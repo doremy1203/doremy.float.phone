@@ -1,0 +1,503 @@
+/* ── Single-page desktop mode（单页桌面：仪表盘式卡片分组）──
+   本文件只服务单页形态，选择器全部限定在 .desktop-single / .ds-* 内，
+   多页桌面（.phone-swipe-layer / .icon-grid 原样式）完全不受影响。
+
+   卡片材质刻意与「桌面组件」的玻璃卡保持一致（同样的渐变 / 模糊 / 高光 / 阴影），
+   所以换主题色、换壁纸、切「扁平纯色 / 毛玻璃态」时，卡片会跟着一起变。
+
+   ⚠️ 两个滚动容器（.desktop-single / .ds-dir-scroll）一律用「块级流 + 外边距」排布，
+   不用 flex 列布局：卡片自身是 overflow:hidden，而 overflow 不为 visible 时
+   flex 子项的 min-height:auto 会解析为 0，卡片会被压扁到容器高度、
+   既不溢出也不滚动，内容就"看不见"了。
+
+   ⚠️ 滚动性能：毛玻璃（backdrop-filter）在本文件里被刻意收敛。
+   嵌套模糊（整页糊 + 卡糊 + 每个图标糊）会让滚动每帧重新采样几十层，
+   是掉帧的主因。下面的做法是：整页底色改为近乎不透明、去掉整页/卡片的模糊，
+   并把图标模糊半径从 22px 压到 5px —— 背后本来就已经是糊的，观感几乎无差别。 */
+
+.desktop-single {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  display: block;
+  padding: 8px 12px 56px; /* 底部留白：够避开右下角悬浮钮即可，不必留一大片空 */
+  scrollbar-width: none;
+}
+
+.desktop-single::-webkit-scrollbar {
+  display: none;
+}
+
+.desktop-single > * + * {
+  margin-top: 12px;
+}
+
+/* 组件下面那行名称（.widget-label 由组件渲染器输出）在单页里可以关掉：
+   仪表盘式版面里它读起来像说明文字。默认仍显示，由「主题 → 桌面形态」里的开关决定。 */
+.desktop-single.ds-hide-labels .widget-label {
+  display: none;
+}
+
+/* ══ 卡片本体 ══ */
+
+.ds-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: 24px;
+  padding: 14px 12px 16px;
+  isolation: isolate;
+  /* 扁平态：半透明白 + 主题的组件底色（--c-home-card 默认近乎透明，
+     所以这里叠一层白，保证"扁平"下卡片也看得见轮廓） */
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.42)),
+    var(--c-home-card, transparent);
+}
+
+/* 毛玻璃态：与 .widget-glass 同款配方（斜向高光 + 描边 + 投影 + 粉光） */
+.phone-shell[data-widget-effect="glass"] .ds-card {
+  background:
+    linear-gradient(90deg,
+      transparent 8%,
+      rgba(255, 255, 255, 0.34) 50%,
+      transparent 92%) top 6% left 5% / 90% 2px no-repeat,
+    linear-gradient(135deg,
+      rgba(255, 255, 255, 0.26),
+      color-mix(in srgb, var(--c-home-pink, #f8bbd0) 5%, transparent),
+      rgba(255, 255, 255, 0.1)),
+    color-mix(in srgb, var(--c-home-card, rgba(255, 255, 255, 0.85)) 44%, transparent);
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  box-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 0.38),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.05),
+    0 8px 32px rgb(0 0 0 / calc(0.14 * var(--desktop-shadow-strength, 0))),
+    0 0 22px color-mix(in srgb, var(--c-home-pink, #f8bbd0) 8%, transparent);
+}
+
+/* ══ 卡片头 ══ */
+
+.ds-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 6px 12px;
+}
+
+.ds-card-title {
+  font-size: calc(12.5px*var(--app-text-scale,1));
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--c-home-text, rgba(0, 0, 0, 0.65));
+}
+
+/* ══ 卡片内图标网格：四列、按行向下排 ══ */
+
+.ds-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  justify-items: center;
+  column-gap: 2px;
+  row-gap: 10px;
+}
+
+.ds-grid .icon-item {
+  width: 100%;
+  min-height: 72px;
+}
+
+/* ══ 应用目录里的「钉进常用」按钮 ══
+   每个格子里图标在下、星标在上层（不占布局），点星标即可把该应用加进/移出常用。 */
+
+.ds-dir-cell {
+  position: relative;
+  width: 100%;
+}
+
+.ds-pin {
+  position: absolute;
+  top: -2px;
+  right: 2px;
+  z-index: 3;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--c-home-border, rgba(0, 0, 0, 0.06));
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(12px*var(--app-text-scale,1));
+  line-height: 1;
+  color: var(--c-icon, #a0a3a8);
+  background: var(--c-panel, rgba(255, 255, 255, 0.86));
+  cursor: pointer;
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.ds-pin:active {
+  transform: scale(0.88);
+}
+
+.ds-pin.on {
+  color: var(--c-home-pink, var(--c-icon-active, #8c7ae6));
+}
+
+/* 滚动性能：毛玻璃态下每个图标自身都带 22px 模糊，一屏几十个图标同时重新采样，
+   手指划动时就会明显掉帧。单页与目录里把模糊半径压到 5px ——
+   背后本来就已经是糊的，肉眼几乎看不出差别，但滚动会顺很多。 */
+.phone-shell[data-icon-effect="glass"] .desktop-single .icon-glyph-box,
+.phone-shell[data-icon-effect="glass"] .ds-directory .icon-glyph-box {
+  backdrop-filter: blur(5px) saturate(140%);
+  -webkit-backdrop-filter: blur(5px) saturate(140%);
+}
+
+/* ══ 桌面组件：按自身尺寸自然排布（2x2 占一列、2x4 占满一行……）══
+   复用 .icon-grid 只是为了继承它的格子尺寸变量，布局本身改成流式换行。 */
+
+.icon-grid.ds-widget-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  grid-template-rows: none;
+  margin-top: 0;
+  padding-bottom: 0;
+}
+
+.icon-grid.ds-widget-row .widget-glass {
+  margin-left: 0;
+}
+
+.icon-grid.ds-widget-row .widget-drag-wrap {
+  display: contents;
+}
+
+/* ══ 「应用目录」悬浮钮：贴右下角、压在 Dock 正上方 ══ */
+
+.ds-dir-fab {
+  position: absolute;
+  right: 18px;
+  bottom: calc(var(--dock-height, 92px) + var(--home-dock-lift, 0px) + 22px);
+  z-index: 60;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 52px;
+  height: 52px;
+  border-radius: 999px;
+  border: 1px solid var(--c-home-border, rgba(0, 0, 0, 0.06));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-home-text, rgba(0, 0, 0, 0.65));
+  background: var(--c-home-card, rgba(255, 255, 255, 0.5));
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  box-shadow: 0 10px 26px rgb(0 0 0 / calc(0.2 * var(--desktop-shadow-strength, 0.5)));
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.ds-dir-fab:active {
+  transform: scale(0.92);
+  opacity: 0.88;
+}
+
+.ds-dir-fab-glyph {
+  font-size: calc(19px*var(--app-text-scale,1));
+  line-height: 1;
+  color: var(--c-home-pink, var(--c-icon-active, #8c7ae6));
+}
+
+/* ══ 应用目录（全屏页）：铺满手机屏幕、盖住底栏，头部与搜索固定、分组独立滚动 ══ */
+
+.ds-directory {
+  position: absolute;
+  inset: 0;
+  z-index: 700;
+  display: flex;
+  flex-direction: column;
+  /* 顶部让位 = 设备**实测**的状态栏高度，不能写死。
+     壳是整屏 WebView 且隐藏了系统状态栏，目录页又是 inset:0 的整屏覆盖层，
+     内容必须让开刘海/状态栏那一整条真实高度，否则状态栏偏窄或偏高的机型会顶到边缘。
+     --android-shell-status-bar-height 由 MainActivity.injectStatusBarHeight() 注入
+     （写在 document.documentElement 的行内样式上，换算后已是 CSS px）；
+     浏览器 / iOS PWA 里没有这个变量，整条回落，行为与改动前一致（36px）。
+     ⚠️ 没有直接改 --status-bar-height 本身：它同时是 .phone-status-bar（虚拟状态栏）
+     的高度，跟着设备走会让那条在窄状态栏机型上被压扁。 */
+  padding: calc(var(--android-shell-status-bar-height, var(--status-bar-height, 36px)) + 12px) 14px 18px;
+  /* 目录页是整屏覆盖层，本身不该滚动（滚动交给内部的 .ds-dir-scroll）。
+     hidden 会让它变成「隐藏的可滚动容器」，点搜索框时浏览器把整页滚走、标题消失；
+     clip 同样裁掉溢出，但不能被 focus scroll 滚动。
+     ⚠️ 下面的 .ds-dir-scroll 是真正的滚动区，必须保持 auto，不要跟着改。 */
+  overflow: clip;
+  /* 底色用完全不透明、且不用 backdrop-filter：
+     目录整页本来就是独立页面，透出桌面没有意义；而整页模糊会和卡内每个图标的
+     模糊形成"嵌套模糊"，滚动时每帧都要重新采样，是掉帧的主因（见 K6）。
+     直接取变量原值，不再 color-mix(… 99%, transparent)：哪怕只掺 1% 透明，
+     这一层也会走「半透明合成」路径。这条与 K6「整页底色改为近乎不透明」同向，
+     和下面两条（contain / transform 的合成层实验）性质不同，故保留。 */
+  background: var(--c-page-body-bg, #f1f2f6);
+  /* ⚠️ contain: paint 与下面的 translateY 曾经被拿掉，现已按 docs 的 K1 记录回滚。
+     K1 实验 3 实测：只去掉 contain: paint 会让故障**形态翻转**——从「键盘弹起时
+     标题消失」变成「键盘收起时消失但可交互」。这说明它是影响因素之一而非唯一因素，
+     单独删掉并不修 bug，只是把症状换个时机出现。实验 B 又证实合成层假设不成立，
+     文档结论是「停止 CSS 盲测，等 chrome://inspect 精确定位」。
+     所以这里维持原样（合成层缓存 + transform 动画），别再把它们当性能优化删掉——
+     否则会以「看起来是优化、实际只是换了故障时机」的方式重新引入问题。 */
+  contain: paint;
+  animation: dsDirectoryIn 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dsDirectoryIn {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 目录里的卡片：底下已经是不透明的整页底色，再叠加模糊看不出差别，只会白耗性能 */
+.phone-shell[data-widget-effect="glass"] .ds-directory .ds-card {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.ds-dir-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 6px 12px;
+}
+
+.ds-dir-title {
+  font-size: calc(15px*var(--app-text-scale,1));
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--c-text-title, #2c3440);
+}
+
+.ds-dir-close {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 1px solid var(--c-home-border, rgba(0, 0, 0, 0.06));
+  background: var(--c-home-card, rgba(255, 255, 255, 0.5));
+  color: var(--c-home-sub, rgba(0, 0, 0, 0.35));
+  font: inherit;
+  font-size: calc(13px*var(--app-text-scale,1));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.ds-dir-close:active {
+  transform: scale(0.93);
+}
+
+/* ── 搜索框 ── */
+
+.ds-dir-search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 14px;
+}
+
+.ds-dir-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 42px;
+  border-radius: 14px;
+  border: 1px solid var(--c-input-border, rgba(0, 0, 0, 0.05));
+  background: var(--c-input, rgba(255, 255, 255, 0.72));
+  color: var(--c-text-title, #2c3440);
+  font: inherit;
+  font-size: calc(13px*var(--app-text-scale,1));
+  padding: 0 14px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.ds-dir-search input::placeholder {
+  color: var(--c-icon, #a0a3a8);
+}
+
+.ds-dir-clear {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 0;
+  background: var(--c-input, rgba(0, 0, 0, 0.06));
+  color: var(--c-icon, #a0a3a8);
+  font: inherit;
+  font-size: calc(12px*var(--app-text-scale,1));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+/* ── 分组滚动区（块级流，见文件头说明） ── */
+
+.ds-dir-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  display: block;
+  padding: 2px 0 8px;
+}
+
+.ds-dir-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.ds-dir-group {
+  padding: 12px 10px 14px;
+}
+
+.ds-dir-group + .ds-dir-group {
+  margin-top: 12px;
+}
+
+.ds-dir-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 6px 10px;
+  font-size: calc(11.5px*var(--app-text-scale,1));
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--c-home-text, rgba(0, 0, 0, 0.65));
+}
+
+.ds-dir-group-count {
+  font-weight: 500;
+  color: var(--c-home-sub, rgba(0, 0, 0, 0.35));
+}
+
+.ds-dir-empty {
+  padding: 48px 0;
+  text-align: center;
+  font-size: calc(12px*var(--app-text-scale,1));
+  color: var(--c-icon, #a0a3a8);
+}
+
+/* ══ 单页「常用」：复用设置 / 外观 App 的卡片（.card-grid / .card-card）══
+   版式直接来自那套类，这里只做两处桌面必需的覆盖。 */
+
+.desktop-single .card-grid {
+  margin-top: 0;
+}
+
+/* .card-card 自带 opacity:0 + 450ms 入场动画（靠 animation-fill 收尾到可见）。
+   桌面上每次重渲染都会重播，且动画一旦不跑就会留下"看不见的卡片"。
+   这里统一关掉动画并显式给足不透明度，行为确定。
+   卡片底色显式写成 --c-card，与设置 / 外观页的卡片是同一个颜色来源。 */
+.desktop-single .card-card {
+  animation: none;
+  opacity: 1;
+  background: var(--c-card, rgba(255, 255, 255, 0.7));
+  /* 版式改为「居中大图标 + 下方小标题」：
+     原来的 3:2 卡片里图标和文字分居左下/右上，中间空一大片、文字还偏大。
+     现在砍掉固定比例、内容居中，视觉重心交给图标。 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  grid-template-areas: none;
+  grid-template-columns: none;
+  grid-template-rows: none;
+  aspect-ratio: auto;
+  min-height: 92px;
+  padding: 14px 10px;
+  text-align: center;
+}
+
+.desktop-single .card-card .card-card-body {
+  align-items: center;
+  width: 100%;
+  gap: 2px;
+}
+
+/* 居中排版下右箭头是多余的（它原本贴着卡片右下角） */
+.desktop-single .card-card .card-card-chevron {
+  display: none;
+}
+
+/* 主标题字号收小，让位给图标 */
+.desktop-single .card-card .card-label {
+  font-size: calc(12px*var(--app-text-scale,1));
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 卡片左下角的圆形图标底：应用图标要裁进圆里 */
+.desktop-single .card-card .card-icon {
+  position: relative;
+  overflow: hidden;
+  /* 图标放大：它是这张卡的视觉重心 */
+  width: 46px;
+  height: 46px;
+  align-self: center;
+}
+
+/* glyph 跟着放大后的圆底走 */
+.desktop-single .card-card .card-icon .ds-card-icon-glyph {
+  width: 24px;
+  height: 24px;
+  color: var(--c-text-title);
+}
+
+/* 有图标皮肤 / 自定义图标时，图片铺满圆形底 */
+.ds-card-icon-img {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-size: cover;
+  background-position: center;
+}
+
+/* ══ 单页里的 Dock（胶囊条）══
+   只作用于单页形态（桌面壳会在单页给 dock 加 .dock-single）；
+   多页桌面的 Dock 保持原样。
+   目标：少一点"贴上去的板子"感，让它和壁纸渐变融在一起，并贴近屏幕底部。 */
+
+.phone-shell .dock.dock-single {
+  background: color-mix(in srgb, var(--c-home-glass, rgba(255, 255, 255, 0.3)) 42%, transparent);
+  margin-bottom: calc(var(--home-dock-lift, 8px) * 0.35);
+}
+
+.phone-shell[data-icon-effect="glass"] .dock.dock-single:not([data-skinned]) {
+  background:
+    linear-gradient(135deg,
+      rgba(255, 255, 255, 0.1),
+      color-mix(in srgb, var(--c-desktop-icon-bg, #c7b8ff) 4%, transparent),
+      rgba(255, 255, 255, 0.04)),
+    color-mix(in srgb, var(--c-home-glass, rgba(255, 255, 255, 0.3)) 32%, transparent);
+}

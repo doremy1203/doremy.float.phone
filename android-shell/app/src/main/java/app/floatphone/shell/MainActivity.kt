@@ -55,7 +55,16 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.10"
+        /**
+         * 壳版本号，同时拼进 WebView 的 UA（`FloatShell/$VERSION`）。
+         *
+         * 以前这里写死 1.0.10、`build.gradle` 的 versionName 已经是 1.0.12，两边对不上，
+         * 于是 UA 永远报 1.0.10——**排查"手机上跑的是哪个包"时完全失效**。
+         * 现在与 `build.gradle` 的 versionName 保持一致，升版时两处一起改：
+         * 改完在 UA 里就能看到真实版本（`navigator.userAgent` 里的 `FloatShell/x.y.z`），
+         * 不用再猜装的是哪个 APK。
+         */
+        const val VERSION = "1.0.13"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -78,6 +87,28 @@ class MainActivity : AppCompatActivity() {
 
     /** 当前键盘（IME）高度（物理像素），0 = 键盘收起；用于给 WebView 让出底部空间。 */
     private var imeInsetPx: Int = 0
+
+    /**
+     * ⚠️ 这里曾经有过一套 WindowInsetsAnimationCompat 逐帧插值（onProgress 每帧写
+     * rootContainer 的底部内边距），目的是让键盘"推着"内容走、消除一次跳变。
+     *
+     * **真机实测后被撤掉了**，原因有两条，都很明确：
+     *   1. 每帧 setPadding 都会触发 requestLayout，WebView 随之每帧变高变矮；网页侧
+     *      `useAndroidNativeKeyboardViewport` 又监听 window.resize 去改
+     *      `--phone-screen-height`——相当于每秒 60 次布局 + 变量重写。真机上直接的
+     *      表现就是卡。为了一个入场动画牺牲常态流畅度，不划算。
+     *   2. 它喂在 K1 那条已知的竞态链上（键盘变更 → resize → 改 CSS 变量 → 重绘
+     *      结果不稳定，见 docs/single-page-desktop.md）。在没有定位清楚 K1 之前，
+     *      不该再往这条链上加触发源。
+     *
+     * 结论：键盘让位恢复成「变化时落一次终值」（见 observeWindowInsets 的
+     * applyImePadding 调用）。跳变不好看，但它是可预期的，也不会拖慢常态。
+     * 真要再做跟手，得先解决"每帧 reflow"这个根本代价（例如只动 transform
+     * 而不改布局尺寸），不能靠回调里直接改 padding。
+     */
+
+    /** 最近一次真正下发到页面的状态栏高度（CSS px）；-1 = 还没发过。 */
+    private var injectedStatusBarCssPx: Int = -1
 
     /** 网页消息通知的自增 id：同一条消息覆盖同一 id 会让新通知顶掉旧的，故逐条递增。 */
     private var webNotifId = 500
@@ -466,18 +497,47 @@ class MainActivity : AppCompatActivity() {
             // 网页侧 interactiveWidget("resizes-content") 在 WebView 里同样不生效，
             // 于是输入框被键盘盖住。这里把 IME 高度写成容器底部内边距，WebView 变矮，
             // 网页 resize 后输入栏自然贴在键盘上方。
+            //
+            // 只在高度真变了的时候写一次（applyImePadding 内部幂等）：insets 回调本身
+            // 可能因无关类型变化被反复派发，而每次 setPadding 都是一次 requestLayout。
+            // 这里刻意**不做逐帧插值**，理由见上面 imeInsetPx 附近的注释。
             val imePx = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-            if (imePx != imeInsetPx) {
-                imeInsetPx = imePx
-                if (::rootContainer.isInitialized) rootContainer.setPadding(0, 0, 0, imePx)
-            }
+            applyImePadding(imePx)
             insets
         }
     }
 
-    /** 把实测状态栏高度（CSS px）写入页面根元素的 CSS 变量，供 phone-shell.css 的 --status-bar-drop 消费。 */
+    /**
+     * 写键盘让位内边距。幂等：同值直接返回。
+     *
+     * 这一点很重要——insets 回调会因为无关类型（状态栏、导航栏、刘海）的变化被反复
+     * 派发，每次 setPadding 都触发一轮 requestLayout + WebView 重新布局。不幂等的话
+     * 键盘没动也会跟着重排，白白消耗。
+     */
+    private fun applyImePadding(px: Int) {
+        if (px == imeInsetPx) return
+        imeInsetPx = px
+        if (::rootContainer.isInitialized) rootContainer.setPadding(0, 0, 0, px)
+    }
+
+    /**
+     * 把实测状态栏高度（CSS px）写成页面根元素的行内 CSS 变量。
+     *
+     * 变量名 `--android-shell-status-bar-height`，单位已是 CSS px（物理像素 / density）。
+     * **消费方是 `styles/desktop-single.css` 的 `.ds-directory` padding-top**——它优先读
+     * 这个变量、缺失时回落到 36px。它不是 `--status-bar-drop`（那个是用户在「状态栏」
+     * 弹窗里手调的整屏上移量，另一个用途），以前这里的注释写错过，已更正。
+     *
+     * 写的是行内样式，靠继承传导给所有后代，所以不依赖任何事件监听；同名的
+     * `floatshell-statusbarheight` 自定义事件仍会派发，但页面侧目前没有监听者。
+     */
     private fun injectStatusBarHeight() {
         if (!::webView.isInitialized || statusBarHeightCssPx <= 0) return
+        // 同值不重发：insets 回调会因为无关类型的变化被反复派发，同一高度反复
+        // setProperty + dispatchEvent 会白触发一遍样式重算。
+        // 调用方的 `cssPx != statusBarHeightCssPx` 是第一道闸，这里是最后一道。
+        if (statusBarHeightCssPx == injectedStatusBarCssPx) return
+        injectedStatusBarCssPx = statusBarHeightCssPx
         val js = "document.documentElement.style.setProperty('--android-shell-status-bar-height', '${statusBarHeightCssPx}px');" +
             "window.dispatchEvent(new CustomEvent('floatshell-statusbarheight', { detail: $statusBarHeightCssPx }));"
         webView.evaluateJavascript(js, null)

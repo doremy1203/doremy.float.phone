@@ -126,7 +126,12 @@
   flex-direction: column;
   border-radius: var(--phone-screen-radius);
   background: #ffffff;
-  overflow: hidden;
+  /* overflow: hidden 会顺带生成一个「隐藏但依然可滚动」的容器：输入框聚焦时，
+     浏览器为了把输入框滚进视野，会去改它的 scrollTop。表现就是应用目录的标题和
+     搜索框被整页滚出视野、收起键盘才回来（DOM 和 CSS 都没变，变的只是滚动位置）。
+     clip 同样是裁掉溢出、视觉完全一致，但不生成滚动容器，focus scroll 动不了它。
+     注意：真正需要滚动的列表（.desktop-single / .ds-dir-scroll）不要改成 clip。 */
+  overflow: clip;
   padding: 12px;
   isolation: isolate;
 }
@@ -1103,7 +1108,8 @@
     display: flex;
     justify-content: flex-start;
     align-items: flex-start;
-    overflow: hidden;
+    /* 同上：clip 只裁不留滚动容器，键盘聚焦时整块画面不会被 focus scroll 滚走 */
+    overflow: clip;
     background: var(--c-page-body-bg);
   }
 

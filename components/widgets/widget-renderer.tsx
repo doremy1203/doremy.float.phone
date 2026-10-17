@@ -59,7 +59,9 @@ export function WidgetRenderer({ widget, preview, onConfigChange }: WidgetRender
           onConfigChange={onConfigChange}
         />
       </div>
-      {!preview && <span className="widget-label">widgets</span>}
+      {/* 这里原来写的是字面量 "widgets"，但上一行的 widgetName 算出来却没人用——
+          显然原意是显示组件名。改成真实名字；未知类型则不显示，免得再漏出占位文字。 */}
+      {!preview && widgetName ? <span className="widget-label">{widgetName}</span> : null}
     </div>
   );
 }

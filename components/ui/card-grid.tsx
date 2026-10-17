@@ -7,12 +7,15 @@ import { GlassIcon } from "./glass-icon";
 /* ── Card item definition ── */
 export type CardItem = {
   id: string;
-  icon: LucideIcon;
+  /** Lucide 线性图标；也可以改用下面的 glassIcon / iconNode */
+  icon?: LucideIcon;
   label: string;
   desc?: string;
   iconColor: string;
   /** 传了就用 <GlassIcon name={glassIcon}> 那张玻璃图标，替代上面的线性 icon */
   glassIcon?: string;
+  /** 自定义图标节点（例如桌面应用的 glyph / 图标皮肤）。传了它优先，忽略 icon 与 glassIcon */
+  iconNode?: ReactNode;
   onClick: () => void;
 };
 
@@ -47,7 +50,13 @@ export function CardGrid({
                 className={`card-icon${item.glassIcon ? " card-icon-glass" : ""}`}
                 style={item.glassIcon ? undefined : cardIconStyle(item.iconColor)}
               >
-                {item.glassIcon ? <GlassIcon name={item.glassIcon} /> : <Icon size={22} strokeWidth={1.75} />}
+                {item.iconNode
+                  ? item.iconNode
+                  : item.glassIcon
+                    ? <GlassIcon name={item.glassIcon} />
+                    : Icon
+                      ? <Icon size={22} strokeWidth={1.75} />
+                      : null}
               </span>
               <span className="card-card-body">
                 <span className="card-label">{item.label}</span>

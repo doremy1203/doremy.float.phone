@@ -9,6 +9,7 @@ import {
   Code2,
   Download,
   LayoutGrid,
+  MonitorSmartphone,
   PaintBucket,
   Plus,
   RotateCcw,
@@ -24,9 +25,9 @@ import { GlassIcon } from "@/components/ui/glass-icon";
 import { normalizeThemeProfile, resolveActiveIconSkins, DEFAULT_THEME_PROFILE, type ThemeProfile } from "@/lib/theme-types";
 import type { DesktopIconId, IconId } from "@/lib/desktop-config";
 import { DOCK_DEFAULT, PAGE_1_DEFAULT, PAGE_2_DEFAULT, PAGE_3_DEFAULT, ICONS } from "@/lib/desktop-config";
-import type { DesktopFolderMap, DesktopIconLayout } from "@/lib/desktop-layout-storage";
+import type { DesktopFolderMap, DesktopIconLayout, DesktopViewMode } from "@/lib/desktop-layout-storage";
 import { CUSTOM_APPS_UPDATED_EVENT, loadInstalledCustomApps } from "@/lib/custom-app-storage";
-import { toCustomAppIconId, type InstalledCustomApp } from "@/lib/custom-app-types";
+import { toCustomAppIconId, customAppIdFromIconId, type InstalledCustomApp } from "@/lib/custom-app-types";
 import { PageShell } from "@/components/ui/page-shell";
 import { readPwaDisplayPreference, writePwaDisplayPreference } from "@/lib/pwa-display-mode";
 import {
@@ -34,6 +35,7 @@ import {
   GRID_ROWS,
   WIDGET_CATALOG,
   WIDGET_SIZE_CELLS,
+  SINGLE_PAGE_WIDGET_CATALOG,
   type WidgetInstance,
   type WidgetType,
 } from "@/lib/widget-types";
@@ -55,6 +57,7 @@ import {
 } from "@/lib/theme-storage";
 import { BINDING_ACCENTS } from "@/lib/ui-accent-colors";
 import { ConfirmDialog, ContentDialog } from "@/components/ui/modal";
+import { Toggle } from "@/components/ui/form";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DIYWidgetEditor } from "@/components/widgets/diy-widget-editor";
 import {
@@ -76,6 +79,7 @@ type ThemeSection =
   | "wallpaper"
   | "icons"
   | "widgets"
+  | "desktop"
   | "case"
   | "text"
   | "css";
@@ -100,6 +104,21 @@ type PhoneThemeAppProps = {
   pageIcons: DesktopIconLayout;
   iconSkins: Record<string, string | null>;
   wallpaperStyle?: CSSProperties;
+  /** 当前主屏形态（由桌面壳注入）：paged = 多页翻页；single = 单页桌面 */
+  desktopViewMode?: DesktopViewMode;
+  onDesktopViewModeChange?: (mode: DesktopViewMode) => void;
+  /** 单页「常用」独立清单（与多页第一页解耦） */
+  singleFavorites?: DesktopIconId[];
+  onToggleSingleFavorite?: (iconId: DesktopIconId) => void;
+  /** 单页组件清单（与多页组件位置互不影响） */
+  singleWidgets?: string[];
+  onSingleWidgetsChange?: (types: string[]) => void;
+  /** 单页组件的尺寸覆盖（类型 → 尺寸） */
+  singleWidgetSizes?: Record<string, string>;
+  onSingleWidgetSizeChange?: (type: string, size: string) => void;
+  /** 单页组件下面那行名称是否显示 */
+  singleWidgetLabels?: boolean;
+  onSingleWidgetLabelsChange?: (visible: boolean) => void;
 };
 
 function IconChevronRight() {
@@ -124,6 +143,10 @@ function IconGrid() {
 
 function IconWidgets() {
   return <AppWindow size={22} strokeWidth={1.75} />;
+}
+
+function IconDesktopMode() {
+  return <MonitorSmartphone size={22} strokeWidth={1.75} />;
 }
 
 function IconCase() {
@@ -164,6 +187,7 @@ const MENU_ITEMS: Array<{
   { section: "wallpaper", icon: IconWallpaper, label: "壁纸", desc: "桌面背景", color: BINDING_ACCENTS.api, glow: `color-mix(in srgb, ${BINDING_ACCENTS.api} 35%, transparent)`, glass: "wallpaper" },
   { section: "icons", icon: IconGrid, label: "图标", desc: "应用图标", color: BINDING_ACCENTS.regex, glow: `color-mix(in srgb, ${BINDING_ACCENTS.regex} 35%, transparent)`, glass: "icons" },
   { section: "widgets", icon: IconWidgets, label: "桌面组件", desc: "小组件", color: BINDING_ACCENTS.voice, glow: `color-mix(in srgb, ${BINDING_ACCENTS.voice} 35%, transparent)`, glass: "widgets" },
+  { section: "desktop", icon: IconDesktopMode, label: "桌面形态", desc: "单页 / 分页", color: BINDING_ACCENTS.identity, glow: `color-mix(in srgb, ${BINDING_ACCENTS.identity} 35%, transparent)`, glass: "quick-action" },
   { section: "case", icon: IconCase, label: "状态栏", color: BINDING_ACCENTS.memory, glass: "status-bar" },
   { section: "text", icon: IconText, label: "文字", color: BINDING_ACCENTS.identity, glow: `color-mix(in srgb, ${BINDING_ACCENTS.identity} 35%, transparent)`, glass: "text" },
   { section: "css", icon: IconCode, label: "CSS 变量", desc: "自定义全局样式变量", color: BINDING_ACCENTS.embedding, glow: `color-mix(in srgb, ${BINDING_ACCENTS.embedding} 35%, transparent)`, glass: "css" },
@@ -181,15 +205,228 @@ const SECTION_TITLES: Record<Exclude<ThemeSection, "menu">, string> = {
   wallpaper: "\u58C1\u7EB8",
   icons: "\u56FE\u6807",
   widgets: "\u684C\u9762\u7EC4\u4EF6",
+  desktop: "\u684C\u9762\u5F62\u6001",
   case: "\u624B\u673A\u58F3",
   text: "\u6587\u5B57",
   css: "CSS \u53D8\u91CF",
 };
 
-const THEME_SECTIONS = new Set<string>(["menu", "palette", "wallpaper", "icons", "widgets", "case", "text", "css"]);
+const THEME_SECTIONS = new Set<string>(["menu", "palette", "wallpaper", "icons", "widgets", "desktop", "case", "text", "css"]);
 
 function isThemeSection(value: string): value is ThemeSection {
   return THEME_SECTIONS.has(value);
+}
+
+/** 桌面形态：在「多页翻页桌面」和「单页桌面」之间切换。
+ *  两种形态共用同一份图标布局、桌面组件与主题，所以随时可逆、不会丢设置。 */
+function DesktopModePage({
+  value,
+  onChange,
+  singleFavorites,
+  onToggleSingleFavorite,
+  singleWidgets,
+  onSingleWidgetsChange,
+  singleWidgetSizes,
+  onSingleWidgetSizeChange,
+  singleWidgetLabels,
+  onSingleWidgetLabelsChange,
+}: {
+  value?: DesktopViewMode;
+  onChange?: (mode: DesktopViewMode) => void;
+  singleFavorites?: DesktopIconId[];
+  onToggleSingleFavorite?: (iconId: DesktopIconId) => void;
+  singleWidgets?: string[];
+  onSingleWidgetsChange?: (types: string[]) => void;
+  singleWidgetSizes?: Record<string, string>;
+  onSingleWidgetSizeChange?: (type: string, size: string) => void;
+  singleWidgetLabels?: boolean;
+  onSingleWidgetLabelsChange?: (visible: boolean) => void;
+}) {
+  const current: DesktopViewMode = value === "single" ? "single" : "paged";
+  const [installedApps, setInstalledApps] = useState<InstalledCustomApp[]>([]);
+
+  const [diyTemplates, setDiyTemplates] = useState<DIYWidgetTemplate[]>([]);
+
+  useEffect(() => {
+    setInstalledApps(loadInstalledCustomApps());
+    const sync = () => setInstalledApps(loadInstalledCustomApps());
+    window.addEventListener(CUSTOM_APPS_UPDATED_EVENT, sync);
+    return () => window.removeEventListener(CUSTOM_APPS_UPDATED_EVENT, sync);
+  }, []);
+
+  useEffect(() => {
+    setDiyTemplates(loadDIYTemplates());
+  }, []);
+
+  /** 单页可选组件：完整目录（标准 + 自由艺术）+ 用户自制的 DIY 组件 */
+  const widgetChoices = useMemo(() => [
+    ...SINGLE_PAGE_WIDGET_CATALOG,
+    ...diyTemplates.map((template) => ({
+      type: template.id,
+      name: template.name || "DIY 组件",
+      desc: template.mode === "image" ? "图片贴纸" : "自定义代码",
+      size: String(template.size),
+      freestyle: true,
+    })),
+  ], [diyTemplates]);
+
+  /** 可放进常用的全部应用：先摆自己装的 APP，再摆内置应用。 */
+  const allIcons = useMemo<DesktopIconId[]>(() => ([
+    ...installedApps.map(app => toCustomAppIconId(app.id) as DesktopIconId),
+    ...(Object.keys(ICONS) as IconId[]),
+  ]), [installedApps]);
+
+  const labelFor = useCallback((iconId: DesktopIconId): string => {
+    const appId = customAppIdFromIconId(iconId);
+    if (appId) return installedApps.find(app => app.id === appId)?.name ?? appId;
+    return ICONS[iconId as IconId]?.label ?? String(iconId);
+  }, [installedApps]);
+
+  const toggleWidget = (type: string) => {
+    const list = singleWidgets ?? [];
+    const next = list.includes(type) ? list.filter(item => item !== type) : [...list, type];
+    onSingleWidgetsChange?.(next);
+  };
+
+  /** 可选的尺寸档位（单页是流式排布，这几档够覆盖常见诉求） */
+  const SIZE_CHOICES = ["1x4", "2x2", "3x2", "2x4", "4x4"];
+
+  const options: Array<{ id: DesktopViewMode; title: string; desc: string }> = [
+    {
+      id: "paged",
+      title: "分页桌面",
+      desc: "原来的多页翻页桌面：图标分页摆放，长按可拖拽排布、合并成文件夹。",
+    },
+    {
+      id: "single",
+      title: "单页桌面",
+      desc: "一页装下：上面是常用图标，全部应用收在右下角按钮里，点开是整页应用目录。",
+    },
+  ];
+
+  return (
+    <div className="flex-1 overflow-y-auto px-4 pb-8">
+      <div className="flex flex-col gap-3">
+        {options.map((option) => {
+          const active = current === option.id;
+          return (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => onChange?.(option.id)}
+              className={`w-full rounded-2xl border px-4 py-4 text-left transition active:scale-[0.98] ${active ? "border-[var(--c-icon-active)]" : "border-[var(--c-card-border)]"} bg-[var(--c-card)]`}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <span className="ts-14 font-semibold text-[var(--c-text-title)]">{option.title}</span>
+                {active ? <CheckCircle2 size={18} className="shrink-0 text-[var(--c-icon-active)]" /> : null}
+              </div>
+              <p className="mt-1 ts-11 leading-relaxed text-[var(--c-icon)]">{option.desc}</p>
+            </button>
+          );
+        })}
+      </div>
+      {/* 单页 · 常用应用：独立清单，装新 APP 不会自动挤进来 */}
+      <div className="mt-6">
+        <h3 className="appearance-menu-section-title">单页 · 常用应用</h3>
+        <p className="mt-1 ts-11 leading-relaxed text-[var(--c-icon)]">
+          勾选要放进单页「常用」的应用。这是独立清单：新装的 APP 只会出现在应用目录里，
+          不会再自动挤进常用（也就是不会再默认落在多页桌面第一页）。
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {allIcons.map((iconId) => {
+            const on = (singleFavorites ?? []).includes(iconId);
+            return (
+              <button
+                key={iconId}
+                type="button"
+                onClick={() => onToggleSingleFavorite?.(iconId)}
+                className={`rounded-full border px-3 py-1.5 ts-13 font-medium transition active:scale-95 ${on ? "border-[var(--c-icon-active)] text-[var(--c-text-title)]" : "border-[var(--c-card-border)] text-[var(--c-icon)]"}`}
+              >
+                {on ? `★ ${labelFor(iconId)}` : labelFor(iconId)}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 单页 · 组件：与多页桌面的组件位置互不影响 */}
+      <div className="mt-6">
+        <h3 className="appearance-menu-section-title">单页 · 组件</h3>
+        <p className="mt-1 ts-11 leading-relaxed text-[var(--c-icon)]">
+          单页顶部展示的组件（排在「常用」上面）。这份清单独立于多页桌面，
+          两边怎么改都不会互相影响。这里就是完整目录，也包含你自制的 DIY 组件。
+        </p>
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-[var(--c-card-border)] bg-[var(--c-card)] px-4 py-3">
+          <span className="ts-13 font-medium text-[var(--c-text-title)]">显示组件名称</span>
+          <Toggle
+            checked={singleWidgetLabels !== false}
+            onChange={(next) => onSingleWidgetLabelsChange?.(next)}
+          />
+        </div>
+        {(["standard", "freestyle"] as const).map((trackKey) => {
+          const items = widgetChoices.filter((choice) => (trackKey === "freestyle") === choice.freestyle);
+          if (items.length === 0) return null;
+          return (
+            <div key={trackKey} className="mt-3">
+              <div className="ts-11 font-semibold text-[var(--c-icon)]">
+                {trackKey === "freestyle" ? "自由艺术" : "标准组件"}
+              </div>
+              <div className="mt-2 flex flex-col gap-2">
+                {items.map((option) => {
+                  const on = (singleWidgets ?? []).includes(option.type);
+                  const currentSize = singleWidgetSizes?.[option.type] ?? option.size;
+                  return (
+                    <div
+                      key={option.type}
+                      className={`w-full rounded-2xl border px-4 py-3 transition ${on ? "border-[var(--c-icon-active)]" : "border-[var(--c-card-border)]"} bg-[var(--c-card)]`}
+                    >
+                      {/* 主区域是按钮；尺寸胶囊必须是它的兄弟节点，不能嵌在 button 里 */}
+                      <button
+                        type="button"
+                        onClick={() => toggleWidget(option.type)}
+                        className="w-full bg-transparent p-0 text-left"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="ts-13 font-semibold text-[var(--c-text-title)]">{option.name}</span>
+                          {on ? <CheckCircle2 size={16} className="shrink-0 text-[var(--c-icon-active)]" /> : null}
+                        </div>
+                        <p className="mt-0.5 ts-10 leading-relaxed text-[var(--c-icon)]">
+                          {option.desc} · {currentSize}
+                        </p>
+                      </button>
+                      {/* 尺寸只对标准组件开放：自由艺术 / DIY 的形状是设计死的，改了会变形 */}
+                      {on && !option.freestyle ? (
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          <span className="ts-10 text-[var(--c-icon)]">尺寸</span>
+                          {SIZE_CHOICES.map((size) => {
+                            const activeSize = currentSize === size;
+                            return (
+                              <button
+                                key={size}
+                                type="button"
+                                onClick={() => onSingleWidgetSizeChange?.(option.type, size)}
+                                className={`rounded-full border px-2.5 py-1 ts-10 font-semibold transition active:scale-95 ${activeSize ? "border-[var(--c-icon-active)] text-[var(--c-text-title)]" : "border-[var(--c-card-border)] text-[var(--c-icon)]"}`}
+                              >
+                                {size}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="mt-4 ts-11 leading-relaxed text-[var(--c-icon)]">
+        切换形态不会影响图标位置、桌面组件和主题，也不会动任何数据，随时可以切回来。
+      </p>
+    </div>
+  );
 }
 
 export function PhoneThemeApp({
@@ -204,6 +441,16 @@ export function PhoneThemeApp({
   pageIcons,
   iconSkins,
   wallpaperStyle,
+  desktopViewMode,
+  onDesktopViewModeChange,
+  singleFavorites,
+  onToggleSingleFavorite,
+  singleWidgets,
+  onSingleWidgetsChange,
+  singleWidgetSizes,
+  onSingleWidgetSizeChange,
+  singleWidgetLabels,
+  onSingleWidgetLabelsChange,
 }: PhoneThemeAppProps) {
   const [section, setSection] = useState<ThemeSection>(() => {
     if (typeof window !== "undefined") {
@@ -366,7 +613,7 @@ export function PhoneThemeApp({
             <div>
               <h3 className="appearance-menu-section-title">Appearance</h3>
               <div className="card-grid mt-2.5">
-                {MENU_ITEMS.filter(item => ["palette", "wallpaper", "icons", "widgets"].includes(item.section)).map((item) => (
+                {MENU_ITEMS.filter(item => ["palette", "wallpaper", "icons", "widgets", "desktop"].includes(item.section)).map((item) => (
                   <button
                     key={item.section}
                     className="app-card card-card"
@@ -536,6 +783,19 @@ export function PhoneThemeApp({
             pageIcons={pageIcons}
             iconSkins={iconSkins}
             wallpaperStyle={wallpaperStyle}
+          />
+        ) : section === "desktop" ? (
+          <DesktopModePage
+            value={desktopViewMode}
+            onChange={onDesktopViewModeChange}
+            singleFavorites={singleFavorites}
+            onToggleSingleFavorite={onToggleSingleFavorite}
+            singleWidgets={singleWidgets}
+            onSingleWidgetsChange={onSingleWidgetsChange}
+            singleWidgetSizes={singleWidgetSizes}
+            onSingleWidgetSizeChange={onSingleWidgetSizeChange}
+            singleWidgetLabels={singleWidgetLabels}
+            onSingleWidgetLabelsChange={onSingleWidgetLabelsChange}
           />
         ) : section === "palette" ? (
           <PalettePresetPage draft={draft} onDraftChange={onDraftChange} onApply={onApply} onNotice={onNotice} />

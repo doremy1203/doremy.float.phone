@@ -104,7 +104,7 @@ import {
   resolveActiveIconSkins,
   type ThemeProfile
 } from "@/lib/theme-types";
-import { GRID_COLS, GRID_ROWS, WIDGET_SIZE_CELLS, WIDGET_CATALOG, type WidgetInstance, type WidgetType } from "@/lib/widget-types";
+import { GRID_COLS, GRID_ROWS, WIDGET_SIZE_CELLS, WIDGET_CATALOG, resolveSingleWidgetSize, DEFAULT_SINGLE_PAGE_WIDGETS, type WidgetInstance, type WidgetType, type WidgetSize } from "@/lib/widget-types";
 import { buildOccupancyGrid, canPlaceWidget, placeWidget, createDefaultWidgets, loadWidgets, saveWidgets, loadDIYTemplates, saveDIYTemplates } from "@/lib/widget-storage";
 import {
   createDefaultDesktopIconLayout,
@@ -115,6 +115,17 @@ import {
   loadDockLayout,
   normalizeDock,
   writeDockLayout,
+  loadDesktopViewMode,
+  writeDesktopViewMode,
+  type DesktopViewMode,
+  loadSingleFavorites,
+  writeSingleFavorites,
+  loadSingleWidgets,
+  writeSingleWidgets,
+  loadSingleWidgetSizes,
+  writeSingleWidgetSizes,
+  loadSingleWidgetLabelsVisible,
+  writeSingleWidgetLabelsVisible,
   loadDesktopFolders,
   writeDesktopFolders,
   DOCK_LAYOUT_STORAGE_KEY,
@@ -124,6 +135,7 @@ import {
   type DesktopPageKey,
 } from "@/lib/desktop-layout-storage";
 import { WidgetRenderer } from "@/components/widgets/widget-renderer";
+import { CardGrid } from "@/components/ui/card-grid";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
@@ -1149,6 +1161,22 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [layout, setLayout] = useState<DesktopLayout>(DEFAULT_LAYOUT);
   // Dock is an ordered icon-id list (max DOCK_MAX), kept disjoint from `layout`.
   const [dock, setDock] = useState<DesktopIconId[]>(DOCK_DEFAULT);
+  // 主屏形态：paged = 原来的多页翻页桌面；single = 单页桌面（卡片化分组 + 应用目录）。
+  // 只改变"怎么摆"，图标布局 / 组件位置 / 主题都不动，切换入口在「主题 → 桌面形态」。
+  const [desktopViewMode, setDesktopViewMode] = useState<DesktopViewMode>("paged");
+  // 单页桌面里「应用目录」全屏页是否展开（多页形态不用它）
+  const [showAppDirectory, setShowAppDirectory] = useState(false);
+  // 应用目录的搜索词
+  const [appDirQuery, setAppDirQuery] = useState("");
+  // 单页桌面的内容与多页布局解耦：常用是一份独立清单，组件也是一份独立清单。
+  // 装新应用不会自动进常用；改这两份清单都不影响多页桌面。
+  const [singleFavorites, setSingleFavorites] = useState<DesktopIconId[]>([]);
+  const [singleWidgets, setSingleWidgets] = useState<string[]>([]);
+  // 组件尺寸覆盖（类型 → 尺寸）；缺省项回落到该组件的推荐尺寸
+  const [singleWidgetSizes, setSingleWidgetSizes] = useState<Record<string, WidgetSize>>({});
+  // 组件下面那行名称是否显示
+  const [singleWidgetLabels, setSingleWidgetLabels] = useState(true);
+  const singleContentReadyRef = useRef(false);
   // 桌面文件夹：tile 在 layout 里占格子，这张表管名字和成员
   const [folders, setFolders] = useState<DesktopFolderMap>({});
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
@@ -1581,6 +1609,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       // Dock loads first so page normalization can keep the two disjoint.
       const hydratedDock = loadDockLayout();
       setDock(hydratedDock);
+      setDesktopViewMode(loadDesktopViewMode());
       const dockIds = new Set<DesktopIconId>(hydratedDock);
       const hydratedFolders = loadDesktopFolders();
       const rawV2 = kvGet(ICON_LAYOUT_STORAGE_KEY);
@@ -2287,6 +2316,226 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   }, [getCustomAppForIcon]);
 
   const activeIcon = activeApp ? getDesktopIconMeta(activeApp) : null;
+
+  // ── 单页桌面 / 多页桌面 ──────────────────────────────
+  // 两者共用同一份图标布局、组件、主题，切换只是换一种摆法并记一个键。
+  // 入口收在「主题 App → 桌面形态」，桌面底部不放假按钮，免得和翻页圆点挤在一行。
+  const handleDesktopViewModeChange = useCallback((mode: DesktopViewMode) => {
+    setDesktopViewMode(mode);
+    writeDesktopViewMode(mode);
+  }, []);
+
+  /** 打开应用目录：每次打开都从干净状态开始，不留上次的搜索词。 */
+  const openAppDirectory = useCallback(() => {
+    setAppDirQuery("");
+    setShowAppDirectory(true);
+  }, []);
+
+  // 单页是滚动列表、不做拖拽排布：进入单页时退出编辑态；离开单页时收起应用目录。
+  useEffect(() => {
+    if (desktopViewMode !== "single") {
+      setShowAppDirectory(false);
+      return;
+    }
+    if (editMode) exitEditMode();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [desktopViewMode, editMode]);
+
+  /** 单页「常用」：一份独立清单（与多页第一页解耦）。
+   *  首次使用（从没存过）时以第一页图标作为出厂默认，之后只由用户在主题里勾选。 */
+  const favoriteIcons = useMemo<DesktopIconId[]>(() => singleFavorites, [singleFavorites]);
+
+  /** 把某个应用加进 / 移出「常用」。 */
+  const toggleSingleFavorite = useCallback((iconId: DesktopIconId) => {
+    setSingleFavorites(prev => {
+      const next = prev.includes(iconId)
+        ? prev.filter(id => id !== iconId)
+        : [...prev, iconId];
+      writeSingleFavorites(next);
+      return next;
+    });
+  }, []);
+
+  const handleSingleWidgetsChange = useCallback((types: string[]) => {
+    setSingleWidgets(types);
+    writeSingleWidgets(types);
+  }, []);
+
+  const handleSingleWidgetSizeChange = useCallback((type: string, size: WidgetSize) => {
+    setSingleWidgetSizes(prev => {
+      const next = { ...prev, [type]: size };
+      writeSingleWidgetSizes(next);
+      return next;
+    });
+  }, []);
+
+  const handleSingleWidgetLabelsChange = useCallback((visible: boolean) => {
+    setSingleWidgetLabels(visible);
+    writeSingleWidgetLabelsVisible(visible);
+  }, []);
+
+  /** 单页组件：只按「单页组件清单」渲染，位置信息不参与——单页是流式排布。
+   *  不套卡片：组件自带尺寸（2x2 / 2x4）正是版式上「一格 / 两格 / 一排」的来源，
+   *  再包一层卡会把两层玻璃叠在一起。 */
+  const singlePageWidgets = useMemo<WidgetInstance[]>(() => {
+    // 用户自制的 DIY 组件不在标准目录里，尺寸得从模板读
+    const diyTemplates = singleWidgets.some((type) => type.startsWith("diy-")) ? loadDIYTemplates() : [];
+    return singleWidgets.map((type, index) => {
+      // DIY 组件（用户自制）保留模板自带尺寸；标准组件允许用户在主题里覆盖尺寸
+      const size = type.startsWith("diy-")
+        ? (diyTemplates.find((item) => item.id === type)?.size ?? "2x2")
+        : (singleWidgetSizes[type] ?? resolveSingleWidgetSize(type));
+      return {
+        id: `single-${type}`,
+        type,
+        size,
+        page: 1,
+        row: 1,
+        col: 1 + index,
+      } as WidgetInstance;
+    });
+  }, [singleWidgets, singleWidgetSizes]);
+
+  // 单页内容首次水合：从没设置过时用出厂默认
+  // （常用 = 第一页现有图标；组件 = 大时钟 / 日历 / AI 助手）。只跑一次。
+  useEffect(() => {
+    if (singleContentReadyRef.current || !desktopReady) return;
+    singleContentReadyRef.current = true;
+    const storedFavorites = loadSingleFavorites();
+    const storedWidgets = loadSingleWidgets();
+    setSingleFavorites(storedFavorites ?? (layout.page1 ?? []).map(item => item.id));
+    setSingleWidgets(storedWidgets ?? DEFAULT_SINGLE_PAGE_WIDGETS);
+    setSingleWidgetSizes(loadSingleWidgetSizes());
+    setSingleWidgetLabels(loadSingleWidgetLabelsVisible());
+  }, [desktopReady, layout]);
+
+  /** 应用目录：按「我的应用 / 内置应用」分组，并支持按名称搜索。 */
+  const appDirectoryGroups = useMemo(() => {
+    const query = appDirQuery.trim().toLowerCase();
+    const matches = (iconId: DesktopIconId) => {
+      if (!query) return true;
+      const meta = getDesktopIconMeta(iconId);
+      if (!meta) return false;
+      return meta.label.toLowerCase().includes(query) || String(iconId).toLowerCase().includes(query);
+    };
+    const custom = customApps
+      .map(app => toCustomAppIconId(app.id) as DesktopIconId)
+      .filter(matches);
+    const builtin = (Object.keys(ICONS) as IconId[]).filter(matches);
+    const groups: Array<{ key: string; title: string; icons: DesktopIconId[] }> = [];
+    if (custom.length > 0) groups.push({ key: "custom", title: "我的应用", icons: custom });
+    if (builtin.length > 0) groups.push({ key: "builtin", title: "内置应用", icons: builtin });
+    return groups;
+  }, [appDirQuery, customApps, getDesktopIconMeta]);
+
+  /**
+   * 单页与目录页里的图标：外观与多页图标完全同款（图标皮肤 / 图片图标 / 未读红点 / 标签），
+   * 但不挂多页那套长按拖拽——这两处都是列表，拖拽排布请切回分页桌面做。
+   */
+  function renderSingleIcon(iconId: DesktopIconId) {
+    if (isFolderIconId(iconId)) return null;
+    const icon = getDesktopIconMeta(iconId);
+    if (!icon) return null;
+    const customApp = icon.customApp;
+    const builtinIconId = customApp ? null : (icon.id as IconId);
+    const iconSkinId = activeIconSkins[iconId];
+    const iconSkinUrl = iconSkinId ? themeAssets[iconSkinId] ?? null : null;
+    const customIconUrl = customApp && customAppIconStyles[customApp.id] !== "global"
+      ? customApp.iconDataUrl ?? null
+      : null;
+    const iconImageUrl = iconSkinUrl || customIconUrl;
+    const hasImageIcon = Boolean(iconImageUrl);
+    const badgeCount = customApp ? customAppBadges[customApp.id] ?? 0 : 0;
+    return (
+      <button
+        key={iconId}
+        type="button"
+        className="icon-item"
+        onClick={() => { setShowAppDirectory(false); openApp(iconId); }}
+      >
+        <span
+          className={hasImageIcon ? "icon-glyph-box icon-glyph-box-skin" : "icon-glyph-box"}
+          style={hasImageIcon ? undefined : { "--icon-tone": icon.tone } as React.CSSProperties}
+          aria-hidden
+        >
+          {iconImageUrl ? (
+            <span className="icon-skin-layer" style={{ backgroundImage: `url("${iconImageUrl}")` }} />
+          ) : null}
+          {builtinIconId ? (
+            <IconGlyph
+              id={builtinIconId}
+              className={
+                builtinIconId === "music"
+                  ? iconSkinUrl
+                    ? "icon-glyph icon-glyph-music icon-glyph-hidden"
+                    : "icon-glyph icon-glyph-music"
+                  : iconSkinUrl
+                    ? "icon-glyph icon-glyph-hidden"
+                    : "icon-glyph"
+              }
+            />
+          ) : customIconUrl ? null : (
+            <CustomAppGlyph seed={customApp?.name || icon.label} className="icon-glyph" />
+          )}
+          {badgeCount > 0 ? (
+            <span className="desktop-icon-badge" aria-label={`${badgeCount} 条未读`}>
+              {badgeCount > 99 ? "99+" : badgeCount}
+            </span>
+          ) : null}
+        </span>
+        <span className="icon-label">{icon.label}</span>
+      </button>
+    );
+  }
+
+  /**
+   * 单页「常用」卡片里的图标（画在卡片左下角那个圆形底色上，即 .card-icon 内）。
+   * 有图标皮肤 / 自定义图标的显示图片，否则画 glyph——和设置、外观 App 的卡片图标同一位置。
+   */
+  function renderCardIconNode(iconId: DesktopIconId) {
+    const meta = getDesktopIconMeta(iconId);
+    if (!meta) return null;
+    const customApp = meta.customApp;
+    const skinId = activeIconSkins[iconId];
+    const skinUrl = skinId ? themeAssets[skinId] ?? null : null;
+    const customUrl = customApp && customAppIconStyles[customApp.id] !== "global"
+      ? customApp.iconDataUrl ?? null
+      : null;
+    const imageUrl = skinUrl || customUrl;
+    if (imageUrl) {
+      return <span className="ds-card-icon-img" style={{ backgroundImage: `url("${imageUrl}")` }} />;
+    }
+    if (customApp) {
+      return <CustomAppGlyph seed={customApp.name} className="ds-card-icon-glyph" />;
+    }
+    return <IconGlyph id={iconId as IconId} className="ds-card-icon-glyph" />;
+  }
+
+  /**
+   * 应用目录里的格子：图标 + 右上角「钉进常用」小星标。
+   * 星标不占布局（绝对定位），所以格子尺寸与单页图标完全一致；
+   * 点星标只改「常用」清单，不会打开应用。
+   */
+  function renderDirectoryIcon(iconId: DesktopIconId) {
+    if (isFolderIconId(iconId)) return renderSingleIcon(iconId);
+    const meta = getDesktopIconMeta(iconId);
+    if (!meta) return null;
+    const pinned = singleFavorites.includes(iconId);
+    return (
+      <div key={iconId} className="ds-dir-cell">
+        {renderSingleIcon(iconId)}
+        <button
+          type="button"
+          className={pinned ? "ds-pin on" : "ds-pin"}
+          onClick={(event) => { event.stopPropagation(); toggleSingleFavorite(iconId); }}
+          aria-label={pinned ? `把${meta.label}移出常用` : `把${meta.label}加入常用`}
+          title={pinned ? "已在常用" : "加入常用"}
+        >
+          {pinned ? "★" : "☆"}
+        </button>
+      </div>
+    );
+  }
 
   // 文件夹 tile 里的迷你图标：皮肤/自定义图标优先，否则画小号 glyph。
   // 底板样式全靠 CSS 变量，跟随图标材质调节。
@@ -4152,6 +4401,16 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
           pageIcons={layout}
           iconSkins={iconSkinUrls}
           wallpaperStyle={wallpaperStyle}
+          desktopViewMode={desktopViewMode}
+          onDesktopViewModeChange={handleDesktopViewModeChange}
+          singleFavorites={singleFavorites}
+          onToggleSingleFavorite={toggleSingleFavorite}
+          singleWidgets={singleWidgets}
+          onSingleWidgetsChange={handleSingleWidgetsChange}
+          singleWidgetSizes={singleWidgetSizes}
+          onSingleWidgetSizeChange={handleSingleWidgetSizeChange}
+          singleWidgetLabels={singleWidgetLabels}
+          onSingleWidgetLabelsChange={handleSingleWidgetLabelsChange}
         />
       );
     }
@@ -4668,6 +4927,55 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
                 {!activeApp ? (
                   <>
+                    {desktopViewMode === "single" ? (
+                      /* ── 单页桌面：组件在上（按自身尺寸排布），常用在下，
+                            用设置 / 外观 App 同款的卡片网格（CardGrid）── */
+                      <>
+                        <div className={singleWidgetLabels ? "desktop-single" : "desktop-single ds-hide-labels"}>
+                          {/* 组件在上、常用在下 */}
+                          {singlePageWidgets.length > 0 && (
+                            <div className="icon-grid ds-widget-row">
+                              {singlePageWidgets.map((widget) => (
+                                <div key={widget.id} className="widget-drag-wrap">
+                                  <WidgetRenderer widget={widget} onConfigChange={handleWidgetConfigChange} />
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* 「常用」复用设置 / 外观 App 的同一套卡片（CardGrid），
+                              所以版式与那两处完全一致：小标题 + 两列卡片（图标 + 名称 + 右箭头）。 */}
+                          <CardGrid
+                            label="常用"
+                            labelClassName="appearance-menu-section-title"
+                            items={favoriteIcons
+                              .filter((iconId) => Boolean(getDesktopIconMeta(iconId)))
+                              .map((iconId) => {
+                                const meta = getDesktopIconMeta(iconId)!;
+                                return {
+                                  id: iconId,
+                                  label: meta.label,
+                                  iconColor: meta.tone,
+                                  iconNode: renderCardIconNode(iconId),
+                                  onClick: () => { setShowAppDirectory(false); openApp(iconId); },
+                                };
+                              })}
+                          />
+                        </div>
+                        {/* 应用目录的唯一入口：右下角悬浮钮 */}
+                        {!showAppDirectory && (
+                          <button
+                            type="button"
+                            className="ds-dir-fab"
+                            onClick={openAppDirectory}
+                            aria-label="打开应用目录"
+                            title="应用目录"
+                          >
+                            <span className="ds-dir-fab-glyph" aria-hidden>✦</span>
+                          </button>
+                        )}
+                      </>
+                    ) : (
                     <div
                       ref={swipeLayerRef}
                       className="phone-swipe-layer"
@@ -4860,9 +5168,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                         );
                       })}
                     </div>
+                    )}
 
                     <div className="page-controls">
-                      {pageKeys.map((pageKey, pageIndex) => (
+                      {desktopViewMode === "single" ? null : pageKeys.map((pageKey, pageIndex) => (
                         <button
                           key={pageKey}
                           type="button"
@@ -4926,7 +5235,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
               {!activeApp ? (
                 <footer
                   ref={dockElRef}
-                  className={editMode ? "dock edit-mode" : "dock"}
+                  className={`${editMode ? "dock edit-mode" : "dock"}${desktopViewMode === "single" ? " dock-single" : ""}`}
                   {...(dockSkinUrl ? { "data-skinned": "" } : {})}
                   style={{ "--dock-count": Math.max(1, dock.length) } as CSSProperties}
                   onPointerMove={handleSwipeMove}
@@ -5214,6 +5523,59 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
               {/* Drag ghost — absolutely positioned INSIDE .phone-shell so the
                   clone keeps theme variables + glass effect selectors
                   (.phone-shell[data-icon-effect] etc.); follows pointer via ref */}
+              {/* 应用目录：单页桌面里点右下角按钮展开的一整页全屏清单（分组 + 搜索）。
+                  铺满手机屏幕并盖住底栏，头部与搜索框固定，分组区独立滚动。 */}
+              {desktopViewMode === "single" && showAppDirectory && !activeApp ? (
+                <div className="ds-directory" role="dialog" aria-modal="true" aria-label="应用目录">
+                  <div className="ds-dir-head">
+                    <span className="ds-dir-title">应用目录</span>
+                    <button
+                      type="button"
+                      className="ds-dir-close"
+                      onClick={() => setShowAppDirectory(false)}
+                      aria-label="关闭应用目录"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="ds-dir-search">
+                    <input
+                      type="text"
+                      inputMode="search"
+                      value={appDirQuery}
+                      onChange={(event) => setAppDirQuery(event.target.value)}
+                      placeholder="搜索应用"
+                      aria-label="搜索应用"
+                    />
+                    {appDirQuery ? (
+                      <button
+                        type="button"
+                        className="ds-dir-clear"
+                        onClick={() => setAppDirQuery("")}
+                        aria-label="清空搜索"
+                      >
+                        ✕
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="ds-dir-scroll">
+                    {appDirectoryGroups.length === 0 ? (
+                      <div className="ds-dir-empty">没有匹配的应用</div>
+                    ) : appDirectoryGroups.map((group) => (
+                      <section key={group.key} className="ds-card ds-dir-group">
+                        <div className="ds-dir-group-head">
+                          <span>{group.title}</span>
+                          <span className="ds-dir-group-count">{group.icons.length}</span>
+                        </div>
+                        <div className="ds-grid">
+                          {group.icons.map((iconId) => renderDirectoryIcon(iconId))}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
               <div ref={ghostRef} className="drag-ghost" />
             </div>
           </div>
