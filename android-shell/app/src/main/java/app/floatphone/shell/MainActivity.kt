@@ -55,7 +55,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.10"
+        const val VERSION = "1.0.13"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -285,6 +285,14 @@ class MainActivity : AppCompatActivity() {
             mediaPlaybackRequiresUserGesture = false
             allowFileAccess = false
             userAgentString = "$userAgentString FloatShell/$VERSION"
+            // WebView 默认**不认**页面里的 <meta viewport>：useWideViewPort 不打开时，
+            // 它按约 980px 的「宽视口」布局再整体缩放。网页里所有
+            // `@media (max-width: 500px) and (hover:none) and (pointer:coarse)` 的
+            // 移动端样式（phone-shell.css 的 Mobile responsive 段）因此全部不命中，
+            // 表现就是：界面不适配手机屏、内容被缩小/裁切、且整页缩放合成明显掉帧。
+            // 打开这两项后 WebView 才按 width=device-width 布局，移动端样式生效。
+            useWideViewPort = true
+            loadWithOverviewMode = true
         }
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)

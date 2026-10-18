@@ -1178,6 +1178,102 @@
   }
 }
 
+/* ── Android 原生壳强制铺满（不依赖 hover/pointer 媒体特性） ──
+   部分设备（反馈来自华为 nova13pro / 鸿蒙 WebView）的 WebView 内核对
+   `(hover: none) and (pointer: coarse)` 判断不稳定，导致上面这条媒体查询
+   不命中：.app-root 退回桌面态固定宽度布局、.phone-shell-wrap 保留桌面态的
+   金属外壳与黑色内框，表现为页面居中一张带壳的小卡片、四周留白且不对称
+   （桌面态布局只有 margin:0 auto 水平居中，没有整体垂直居中规则）。
+   data-shell-env="android" 由 app/layout.tsx 的内联脚本在检测到壳注入的
+   window.AndroidShell 桥对象后挂上，是比 UA 嗅探更可靠的壳环境信号。
+   这里与上面 500px 媒体查询块保持完全一致的规则，只是触发条件换成
+   该标记，相当于「媒体查询命中 或 确认在原生壳里」两路径任一生效，
+   不改动、不影响原有媒体查询对其它设备的判断。 */
+html[data-shell-env="android"] {
+  --phone-screen-width: 100vw;
+  --phone-screen-height: 100lvh;
+}
+
+html[data-shell-env="android"],
+html[data-shell-env="android"] body {
+  overflow: hidden;
+  width: 100%;
+  height: 100lvh;
+  background: var(--c-page-body-bg);
+}
+
+html[data-shell-env="android"] .app-root {
+  width: 100vw;
+  height: 100lvh;
+  padding: 0;
+  display: flex;
+  justify-content: flex-start;
+  align-items: flex-start;
+  overflow: hidden;
+  background: var(--c-page-body-bg);
+}
+
+html[data-shell-env="android"] .phone-shell-wrap {
+  --phone-case-padding: 0px;
+  --phone-case-border-size: 0px;
+  --phone-frame-size: 0px;
+  --phone-screen-radius: 0px;
+  --phone-frame-radius: 0px;
+  --phone-case-radius: 0px;
+  width: var(--phone-screen-width);
+  margin-inline: 0;
+  gap: 0;
+  transform-origin: top left;
+  margin-top: calc(-1 * var(--status-bar-drop, 0px));
+  transform: translate3d(0, calc(-1 * var(--mobile-keyboard-lift, 0px)), 0);
+  will-change: transform;
+}
+
+html[data-shell-env="android"] .phone-shell-wrap .phone-case {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+html[data-shell-env="android"] .phone-shell-wrap .phone-case::before,
+html[data-shell-env="android"] .phone-shell-wrap .phone-case::after {
+  display: none;
+}
+
+html[data-shell-env="android"] .phone-shell-wrap .phone-frame {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+html[data-shell-env="android"] .phone-shell-wrap .phone-frame::before,
+html[data-shell-env="android"] .phone-shell-wrap .phone-frame::after {
+  display: none;
+}
+
+html[data-shell-env="android"] .app-root.splash-root {
+  width: 100vw;
+  height: 100lvh;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  overflow: hidden;
+  background: var(--c-page-body-bg);
+}
+
+html[data-shell-env="android"] .splash-shell-wrap {
+  width: var(--phone-screen-width);
+  transform-origin: top left;
+}
+
+html[data-shell-env="android"] .splash-shell-wrap .phone-case,
+html[data-shell-env="android"] .splash-shell-wrap .phone-frame {
+  width: var(--phone-screen-width);
+}
+
 .settings-main-menu,
 .appearance-main-menu {
   padding-bottom: calc(var(--safe-area-bottom, 0px) + 28px);
