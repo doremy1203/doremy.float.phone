@@ -106,7 +106,7 @@ object CheckInAlarmScheduler {
         val name = item.optString("name").ifBlank { "角色" }
         val pending = JSONObject().put("characterId", characterId).put("name", name).toString()
         // Keep the request until the WebView confirms it has consumed the event.
-        prefs.edit().putString(KEY_PENDING, pending).remove(KEY_SCHEDULE).apply()
+        prefs.edit().putString(KEY_PENDING, pending).putBoolean(KEY_OPENED, false).remove(KEY_SCHEDULE).apply()
         showReminder(context, characterId, name)
     }
 
