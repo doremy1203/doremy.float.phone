@@ -24,12 +24,50 @@ type CheckInBridgeLike = {
   /** 查岗 / 截屏确认浮层的配色（老 APK 没有） */
   getCheckInTheme?: () => string;
   setCheckInTheme?: (json: string) => boolean;
+  scheduleNativeCheckIn?: (json: string) => boolean;
+  cancelNativeCheckIn?: () => void;
+  consumePendingCheckIn?: () => string;
 };
 
 function bridge(): CheckInBridgeLike | null {
   if (typeof window === "undefined") return null;
   const candidate = (window as unknown as { AndroidShell?: CheckInBridgeLike }).AndroidShell;
   return candidate && typeof candidate === "object" ? candidate : null;
+}
+
+/**
+ * 将网页算出的下一次触发时间交给原生闹钟。闹钟只通知，不会后台截屏。
+ * 返回 false 表示当前是浏览器或旧版 APK，没有原生调度能力。
+ */
+export function scheduleNativeCheckIn(payload: {
+  characterId: string;
+  name: string;
+  dueAt: number;
+}): boolean {
+  try {
+    return bridge()?.scheduleNativeCheckIn?.(JSON.stringify(payload)) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** 没有任何角色启用查岗时取消原生闹钟。 */
+export function cancelNativeCheckIn(): void {
+  try { bridge()?.cancelNativeCheckIn?.(); } catch { /* 忽略 */ }
+}
+
+/** 用户点击原生查岗提醒后，读取待处理角色 id。读取即清空。 */
+export function consumePendingNativeCheckIn(): string | null {
+  try {
+    const raw = bridge()?.consumePendingCheckIn?.();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { characterId?: unknown };
+    return typeof parsed.characterId === "string" && parsed.characterId.trim()
+      ? parsed.characterId.trim()
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 壳是否提供查岗浮层（老 APK 没有）。 */
