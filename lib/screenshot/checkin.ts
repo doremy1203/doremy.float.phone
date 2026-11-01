@@ -27,6 +27,7 @@ type CheckInBridgeLike = {
   scheduleNativeCheckIn?: (json: string) => boolean;
   cancelNativeCheckIn?: () => void;
   consumePendingCheckIn?: () => string;
+  getNativeCheckInDiagnostics?: () => string;
 };
 
 function bridge(): CheckInBridgeLike | null {
@@ -54,6 +55,32 @@ export function scheduleNativeCheckIn(payload: {
 /** 没有任何角色启用查岗时取消原生闹钟。 */
 export function cancelNativeCheckIn(): void {
   try { bridge()?.cancelNativeCheckIn?.(); } catch { /* 忽略 */ }
+}
+
+/** 原生闹钟状态：只返回计划时间与队列状态，不含截图内容。 */
+export type NativeCheckInDiagnostics = {
+  scheduled: boolean;
+  characterName: string;
+  dueAt: number;
+  pending: boolean;
+  opened: boolean;
+};
+
+export function readNativeCheckInDiagnostics(): NativeCheckInDiagnostics | null {
+  try {
+    const raw = bridge()?.getNativeCheckInDiagnostics?.();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<NativeCheckInDiagnostics>;
+    return {
+      scheduled: parsed.scheduled === true,
+      characterName: typeof parsed.characterName === "string" ? parsed.characterName : "",
+      dueAt: Number(parsed.dueAt) || 0,
+      pending: parsed.pending === true,
+      opened: parsed.opened === true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** 用户点击原生查岗提醒后，读取待处理角色 id。读取即清空。 */
