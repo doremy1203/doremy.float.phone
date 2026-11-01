@@ -73,6 +73,9 @@ export function CheckInScheduler() {
       const characters = loadCharacters();
       const now = Date.now();
       const native = readNativeCheckInDiagnostics();
+      // 上一次闹钟已到点但用户尚未处理时，保留这一条待处理请求，不继续排下一条，
+      // 避免用户不在场时每隔一个间隔就收到重复查岗通知。
+      if (native?.pending) return;
       const candidates = Object.entries(configs)
         .filter(([id, config]) => {
           const runtime = readCharacterRuntime(id);
