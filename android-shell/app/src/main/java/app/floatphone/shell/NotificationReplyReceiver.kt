@@ -37,10 +37,12 @@ class NotificationReplyReceiver : BroadcastReceiver() {
 
         /** 队列上限：够覆盖「用户连回几句、页面一直没起来」的情况。 */
         private const val MAX_QUEUE = 20
+        private val queueLock = Any()
 
         /** 追加一条待发回复。 */
         fun enqueue(context: Context, sessionId: String, text: String) {
             runCatching {
+                synchronized(queueLock) {
                 val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val current = JSONArray(prefs.getString(KEY_QUEUE, "[]") ?: "[]")
                 current.put(
@@ -54,20 +56,24 @@ class NotificationReplyReceiver : BroadcastReceiver() {
                 val trimmed = JSONArray()
                 val start = (current.length() - MAX_QUEUE).coerceAtLeast(0)
                 for (i in start until current.length()) trimmed.put(current.get(i))
-                prefs.edit().putString(KEY_QUEUE, trimmed.toString()).apply()
+                prefs.edit().putString(KEY_QUEUE, trimmed.toString()).commit()
+                }
             }
         }
 
         /** 读取待发队列但不清空；网页成功写入聊天后再逐条确认，避免读取后页面崩溃造成丢消息。 */
         fun consumePendingReplies(context: Context): String =
             runCatching {
-                val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                prefs.getString(KEY_QUEUE, "[]") ?: "[]"
+                synchronized(queueLock) {
+                    val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    prefs.getString(KEY_QUEUE, "[]") ?: "[]"
+                }
             }.getOrDefault("[]")
 
         /** 仅删除网页已成功写入聊天的回复；未确认项会在下次页面启动时重试。 */
         fun ackPendingReplies(context: Context, idsJson: String) {
             runCatching {
+                synchronized(queueLock) {
                 val ids = JSONArray(idsJson)
                 val acknowledged = (0 until ids.length()).mapNotNull { ids.optString(it).takeIf(String::isNotBlank) }.toSet()
                 if (acknowledged.isEmpty()) return
@@ -79,6 +85,7 @@ class NotificationReplyReceiver : BroadcastReceiver() {
                     if (item.optString("id") !in acknowledged) remaining.put(item)
                 }
                 prefs.edit().putString(KEY_QUEUE, remaining.toString()).commit()
+                }
             }
         }
     }
