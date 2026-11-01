@@ -1146,7 +1146,7 @@ class MainActivity : AppCompatActivity() {
          *
          * 网页在页面挂载时、以及收到 userReply 事件时各拉一次：前者补发
          * 「页面被回收期间用户从通知里回的话」，后者处理当场送达的。
-         * 拉到即清空，所以同一句不会被发两遍。
+         * 旧网页调用 consume 时读取即清空；新网页使用 read + ack，避免页面异常时丢回复。
          */
         /** 旧网页兼容接口：读取后清空原生队列。 */
         @JavascriptInterface
