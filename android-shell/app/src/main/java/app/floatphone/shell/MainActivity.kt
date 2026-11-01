@@ -1192,6 +1192,10 @@ class MainActivity : AppCompatActivity() {
 
         /** 读取并清空用户点开查岗提醒后留下的待处理请求。 */
         @JavascriptInterface
+        fun hasPendingCheckIn(): Boolean =
+            CheckInAlarmScheduler.hasPending(this@MainActivity)
+
+        @JavascriptInterface
         fun consumePendingCheckIn(): String =
             CheckInAlarmScheduler.consumePending(this@MainActivity)
 
