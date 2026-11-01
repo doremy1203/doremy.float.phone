@@ -100,7 +100,7 @@ class PushService : Service() {
                 updateKeepAlive("未登录或站点不可达，稍后重试")
                 sleepSec(60); continue
             }
-            updateKeepAlive("已连接，等待角色消息")
+            updateKeepAlive("正在连接推送服务…")
             val closedNormally = runSocket(config)
             if (stopped) break
             updateKeepAlive("连接断开，重连中…")
@@ -219,6 +219,18 @@ class PushService : Service() {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 runCatching {
                     val msg = JSONObject(text)
+                    // Supabase Realtime 的 phx_join 成功回执才代表频道真正订阅成功；
+                    // WebSocket onOpen 仅表示 TCP/WebSocket 建立，不能提前报「已连接」。
+                    if (msg.optString("event") == "phx_reply" && msg.optString("ref") == "1") {
+                        val reply = msg.optJSONObject("payload")
+                        if (reply?.optString("status") == "ok") {
+                            updateKeepAlive("已连接，等待角色消息")
+                        } else {
+                            val reason = reply?.optJSONObject("response")?.optString("reason").orEmpty()
+                            updateKeepAlive(if (reason.isNotEmpty()) "频道订阅失败：$reason" else "频道订阅失败，稍后重试")
+                        }
+                        return
+                    }
                     if (msg.optString("event") != "broadcast") return
                     val payload = msg.optJSONObject("payload") ?: return
                     if (payload.optString("event") != "notify") return
