@@ -9,10 +9,8 @@
 //     原来的实现就是这个毛病：pollDueCheckIns 写好了，却谁也
 //     没调用它，于是「手动试一次」能弹、到点一次都不弹。
 //
-//  ② 「用户自己点悬浮球截屏」的结果也要有人来取（startUserShotBridge）。
-//     点球那一刻网页十有八九已被系统回收，事件是丢的，只能靠一个
-//     常驻的接收端在回到前台时把图捞回来。这条链路**不依赖查岗开关**，
-//     只要用户用了悬浮球就该收得到，所以与下面的定时扫描分开处理。
+//  ② 「用户自己点悬浮球截屏」的结果由 ShellPushRegistrar 统一接收，
+//     与查岗轮询分开，避免同一原生事件被多个监听器重复消费。
 //
 // 挂载点与 RealityBridgeScheduler / WidgetScheduler 完全一致。
 
@@ -38,10 +36,6 @@ const FIRST_SCAN_DELAY_MS = 5_000;
 
 export function CheckInScheduler() {
   useEffect(() => {
-    // 主动截屏接收端：挂载时补收一张，之后每次收到 checkIn 事件再拉一次。
-    // 原生侧是「读到即空」，重复调用不会把同一张图发两遍。
-    const stopUserShotBridge = startUserShotBridge();
-
     let cancelTimer: (() => void) | null = null;
     let disposed = false;
 
