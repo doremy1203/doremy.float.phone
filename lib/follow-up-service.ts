@@ -357,40 +357,6 @@ async function saveBackgroundCompletionRounds(
     return { hasVisible, newCount, stateValues };
 }
 
-// ── 查岗轮询 ──────────────────────────────────────────────
-//
-// 挂在这里而不是另起一套定时器：本服务的 pollSchedules 每 3 秒跑一次，
-// 桌面壳已经把它启动了，查岗只是搭个便车。
-//
-// 两个节流：
-//  · 60 秒才检查一次（查岗间隔是分钟级，3 秒一次纯属浪费）；
-//  · 「上一轮还没跑完」时直接跳过——runCheckIn 会一直等用户在浮层上做决定
-//    （最长 90 秒），不锁的话下一轮又弹一个浮层，两个叠一起根本没法处理。
-const CHECK_IN_POLL_INTERVAL_MS = 60_000;
-let lastCheckInPollAt = 0;
-let checkInPolling = false;
-
-function pollCheckIn(now: number) {
-    if (now - lastCheckInPollAt < CHECK_IN_POLL_INTERVAL_MS) return;
-    lastCheckInPollAt = now;
-    if (checkInPolling) return;
-    checkInPolling = true;
-    // 动态 import：查岗引擎反过来要用本模块的 requestBackgroundChatReply，
-    // 静态 import 会形成循环依赖，运行时解析才是安全的。
-    void import("./screenshot/checkin-engine")
-        .then(async module => {
-            const { hasAnyCheckInEnabled, prepareCheckInService } = await import("./screenshot");
-            if (!hasAnyCheckInEnabled()) return;
-            // App 重启后常驻服务会没掉，而配置里还开着——这时补一次预热。
-            // 只有 App 在前台时才能合法启动前台服务，后台时会失败并等下一轮，
-            // 这是系统限制，不是可以绕过的 bug。
-            prepareCheckInService();
-            await module.pollDueCheckIns();
-        })
-        .catch(() => undefined)
-        .finally(() => { checkInPolling = false; });
-}
-
 function pollSchedules() {
     try {
         const schedules = loadAllFollowUpSchedules();
@@ -408,7 +374,6 @@ function pollSchedules() {
         pollTimedWakeSchedules(now);
         pollMenstrualPeriodCare(now);
         pollIdleReconnect(now);
-        pollCheckIn(now);
     } catch (e) {
         console.error("[FollowUp] pollSchedules error:", e);
     }
