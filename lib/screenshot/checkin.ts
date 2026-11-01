@@ -27,6 +27,7 @@ type CheckInBridgeLike = {
   scheduleNativeCheckIn?: (json: string) => boolean;
   cancelNativeCheckIn?: () => void;
   consumePendingCheckIn?: () => string;
+  hasPendingCheckIn?: () => boolean;
   getNativeCheckInDiagnostics?: () => string;
 };
 
@@ -81,6 +82,11 @@ export function readNativeCheckInDiagnostics(): NativeCheckInDiagnostics | null 
   } catch {
     return null;
   }
+}
+
+/** 通知点击后是否有待处理查岗；用于跳过启动页，直达处理流程。 */
+export function hasPendingNativeCheckIn(): boolean {
+  try { return bridge()?.hasPendingCheckIn?.() === true; } catch { return false; }
 }
 
 /** 用户点击原生查岗提醒后，读取待处理角色 id。读取即清空。 */
