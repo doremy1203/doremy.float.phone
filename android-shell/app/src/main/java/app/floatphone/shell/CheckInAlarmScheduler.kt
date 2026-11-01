@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
@@ -102,6 +103,8 @@ object CheckInAlarmScheduler {
         val notificationsEnabled = androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled() &&
             (Build.VERSION.SDK_INT < 33 ||
                 context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val ignoringBatteryOptimizations = powerManager.isIgnoringBatteryOptimizations(context.packageName)
         return JSONObject()
             .put("scheduled", scheduled != null)
             .put("characterName", scheduled?.optString("name", "").orEmpty())
@@ -111,6 +114,7 @@ object CheckInAlarmScheduler {
             .put("accessibilityConnected", ScreenshotBridge.isAccessibilityOn())
             .put("accessibilityEnabledInSettings", isAccessibilityEnabledInSettings(context))
             .put("notificationsEnabled", notificationsEnabled)
+            .put("ignoringBatteryOptimizations", ignoringBatteryOptimizations)
             .toString()
     }
 
