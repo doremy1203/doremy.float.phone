@@ -32,6 +32,7 @@ class CallControlService : AccessibilityService() {
         // 把实例交给截屏桥：takeScreenshot() 是 AccessibilityService 的方法，
         // 只能在服务实例上调用，且必须等服务连上之后才可用。
         ScreenshotBridge.attach(this)
+        CheckInAlarmScheduler.clearAccessibilityRecoveryNotification(this)
         ShellBus.dispatchOverlayEvent("accessibility", JSONObject().put("connected", true))
     }
 
