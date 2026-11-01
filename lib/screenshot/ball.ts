@@ -109,7 +109,7 @@ export function readScreenshotBallStyle(): BallStyle | null {
       diameter: Number.isFinite(Number(parsed.diameter)) ? Number(parsed.diameter) : 50,
     };
   } catch {
-    return null;
+    return false;
   }
 }
 
