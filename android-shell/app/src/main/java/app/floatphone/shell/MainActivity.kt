@@ -1195,6 +1195,11 @@ class MainActivity : AppCompatActivity() {
         fun consumePendingCheckIn(): String =
             CheckInAlarmScheduler.consumePending(this@MainActivity)
 
+        /** 原生闹钟与待处理提醒状态（诊断面板用，不含截图内容）。 */
+        @JavascriptInterface
+        fun getNativeCheckInDiagnostics(): String =
+            CheckInAlarmScheduler.diagnosticsJson(this@MainActivity)
+
 
         /**
          * 读查岗 / 截屏确认浮层的配色（JSON 原文）。
