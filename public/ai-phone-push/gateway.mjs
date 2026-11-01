@@ -1058,10 +1058,15 @@ $CRON$)`);
       // 一键自检：把离线推送链路上每个「可能断掉的点」都查一遍，返回结构化结果，
       // 免去用户逐张表翻看、逐处猜测。只读，不产生任何副作用。
       const config = await loadConfig();
-      const allSubs = await readJson(await rest(
+      const allSubs = await readJson<Array<{ endpoint: string; user_id: string }>>(await rest(
         "push_subscriptions?select=endpoint,user_id&limit=50",
       ));
-      const recentJobs = await readJson(await rest(
+      const recentJobs = await readJson<Array<{
+        kind: string;
+        status: string;
+        result_note: string | null;
+        execute_at: string;
+      }>>(await rest(
         "push_jobs?select=kind,status,result_note,execute_at&order=created_at.desc&limit=20",
       ));
       const nowMs = Date.now();
@@ -1071,6 +1076,8 @@ $CRON$)`);
 
       const shellSubs = allSubs.filter(sub => sub.endpoint.startsWith("shell:"));
       const webSubs = allSubs.filter(sub => !sub.endpoint.startsWith("shell:"));
+      // 最近一次真正跑完的任务结果。no_subscription 是最常见的失败信号：
+      // 说明生成阶段就因「查不到订阅」提前退出了，根本没走到广播。
       const lastDone = recentJobs.find(job => job.status === "done" || job.status === "failed");
       const noSubHits = recentJobs.filter(job => job.result_note === "no_subscription").length;
 
