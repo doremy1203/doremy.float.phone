@@ -58,7 +58,10 @@ object CheckInAlarmScheduler {
 
     fun cancel(context: Context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .remove(KEY_SCHEDULE).apply()
+            .remove(KEY_SCHEDULE)
+            .remove(KEY_PENDING)
+            .remove(KEY_OPENED)
+            .apply()
         val alarm = alarmPendingIntent(context)
         (context.getSystemService(Context.ALARM_SERVICE) as AlarmManager).cancel(alarm)
     }
