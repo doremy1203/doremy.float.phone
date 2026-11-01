@@ -73,10 +73,28 @@ export function readPendingReplies(): PendingNotificationReply[] {
  * 返回实际发出的条数。
  */
 let flushInFlight: Promise<number> | null = null;
+let flushRequestedAgain = false;
 
 export function flushPendingNotificationReplies(): Promise<number> {
-    if (flushInFlight) return flushInFlight;
-    flushInFlight = flushPendingNotificationRepliesOnce().finally(() => { flushInFlight = null; });
+    if (flushInFlight) {
+        // 本轮读取快照后又收到新回复时，要求当前 flush 再读一轮，不能漏掉新入队项。
+        flushRequestedAgain = true;
+        return flushInFlight;
+    }
+    flushInFlight = (async () => {
+        let total = 0;
+        do {
+            flushRequestedAgain = false;
+            total += await flushPendingNotificationRepliesOnce();
+        } while (flushRequestedAgain);
+        return total;
+    })().finally(() => {
+        flushInFlight = null;
+        // 覆盖 Promise 即将结束时到达的最后一条通知回复。
+        if (flushRequestedAgain) {
+            void flushPendingNotificationReplies().catch(() => undefined);
+        }
+    });
     return flushInFlight;
 }
 
