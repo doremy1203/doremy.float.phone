@@ -109,7 +109,7 @@ export function readScreenshotBallStyle(): BallStyle | null {
       diameter: Number.isFinite(Number(parsed.diameter)) ? Number(parsed.diameter) : 50,
     };
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -121,6 +121,6 @@ export function readBallHasImage(): boolean {
     const parsed = JSON.parse(raw) as { hasImage?: boolean };
     return parsed?.hasImage === true;
   } catch {
-    return null;
+    return false;
   }
 }
