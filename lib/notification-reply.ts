@@ -39,7 +39,7 @@ export type PendingNotificationReply = {
     at: number;
 };
 
-/** 读走并清空原生队列。壳不支持或解析失败都返回空数组。 */
+/** 读取原生待发队列快照；成功写入聊天后由调用方逐条确认。 */
 export function readPendingReplies(): PendingNotificationReply[] {
     try {
         const raw = bridge()?.consumePendingReplies?.();
@@ -110,8 +110,8 @@ async function flushPendingNotificationRepliesOnce(): Promise<number> {
 /**
  * 启动通知回复的处理：页面挂载时补发一次，之后每次收到 userReply 事件再拉一次。
  *
- * 返回取消函数（组件卸载时用）。重复调用无害——壳侧队列是「读到即清空」，
- * 拉两次不会把同一句话发两遍。
+ * 返回取消函数（组件卸载时用）。并发 flush 会合并为同一个 Promise，
+ * 只有本地聊天写入成功后才确认原生队列，异常时保留待重试。
  */
 export function startNotificationReplyBridge(): () => void {
     if (typeof window === "undefined") return () => { /* noop */ };
