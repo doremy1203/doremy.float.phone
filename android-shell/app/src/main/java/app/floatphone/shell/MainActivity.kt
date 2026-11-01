@@ -248,6 +248,9 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (intent?.action == CheckInAlarmScheduler.ACTION_OPEN_REMINDER) {
+            CheckInAlarmScheduler.markReminderOpened(this)
+        }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         enableDisplayCutoutCover()
         hideSystemStatusBar()
@@ -388,6 +391,9 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent.action == CheckInAlarmScheduler.ACTION_OPEN_REMINDER) {
+            CheckInAlarmScheduler.markReminderOpened(this)
+        }
         val target = consumeOpenUrl(intent) ?: return
         // SPA 已加载：loadUrl 到同页 hash 只触发 hashchange，不会整页重载
         webView.loadUrl(target)
