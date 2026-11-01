@@ -1148,8 +1148,13 @@ class MainActivity : AppCompatActivity() {
          * 「页面被回收期间用户从通知里回的话」，后者处理当场送达的。
          * 拉到即清空，所以同一句不会被发两遍。
          */
+        /** 旧网页兼容接口：读取后清空原生队列。 */
         @JavascriptInterface
         fun consumePendingReplies(): String = NotificationReplyReceiver.consumePendingReplies(this@MainActivity)
+
+        /** 新网页读取队列快照，写入聊天成功后再 ack。 */
+        @JavascriptInterface
+        fun readPendingReplies(): String = NotificationReplyReceiver.readPendingReplies(this@MainActivity)
 
         /** 网页逐条确认已写入聊天的通知回复，未确认项保留在原生队列中等待重试。 */
         @JavascriptInterface
