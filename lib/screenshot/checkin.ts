@@ -46,6 +46,7 @@ export function scheduleNativeCheckIn(payload: {
   characterId: string;
   name: string;
   dueAt: number;
+  configKey?: string;
 }): boolean {
   try {
     return bridge()?.scheduleNativeCheckIn?.(JSON.stringify(payload)) === true;
@@ -63,6 +64,8 @@ export function cancelNativeCheckIn(): void {
 export type NativeCheckInDiagnostics = {
   scheduled: boolean;
   characterName: string;
+  characterId: string;
+  configKey: string;
   dueAt: number;
   pending: boolean;
   opened: boolean;
@@ -80,6 +83,8 @@ export function readNativeCheckInDiagnostics(): NativeCheckInDiagnostics | null 
     return {
       scheduled: parsed.scheduled === true,
       characterName: typeof parsed.characterName === "string" ? parsed.characterName : "",
+      characterId: typeof parsed.characterId === "string" ? parsed.characterId : "",
+      configKey: typeof parsed.configKey === "string" ? parsed.configKey : "",
       dueAt: Number(parsed.dueAt) || 0,
       pending: parsed.pending === true,
       opened: parsed.opened === true,
