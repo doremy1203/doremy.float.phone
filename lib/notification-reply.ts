@@ -65,7 +65,15 @@ export function readPendingReplies(): PendingNotificationReply[] {
  * 会话已被删除时跳过——一条无归属的回复写不进去，也不该硬造一个会话。
  * 返回实际发出的条数。
  */
-export async function flushPendingNotificationReplies(): Promise<number> {
+let flushInFlight: Promise<number> | null = null;
+
+export function flushPendingNotificationReplies(): Promise<number> {
+    if (flushInFlight) return flushInFlight;
+    flushInFlight = flushPendingNotificationRepliesOnce().finally(() => { flushInFlight = null; });
+    return flushInFlight;
+}
+
+async function flushPendingNotificationRepliesOnce(): Promise<number> {
     const pending = readPendingReplies();
     if (pending.length === 0) return 0;
 
