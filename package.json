@@ -35,7 +35,7 @@
     "jszip": "^3.10.1",
     "lucide-react": "^0.575.0",
     "marked": "^17.0.4",
-    "next": "^15.1.0",
+    "next": "^15.5.28",
     "pinyin-pro": "^3.28.0",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",
@@ -49,6 +49,9 @@
     "undici": "^7.26.0",
     "web-push": "^3.6.7"
   },
+  "overrides": {
+    "postcss": "^8.5.32"
+  },
   "devDependencies": {
     "@gltf-transform/core": "^4.3.0",
     "@gltf-transform/extensions": "^4.3.0",
@@ -60,7 +63,7 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "eslint": "^9.17.0",
-    "eslint-config-next": "^15.1.0",
+    "eslint-config-next": "^15.5.28",
     "tailwindcss": "^4.2.1",
     "typescript": "^5.7.2"
   }
