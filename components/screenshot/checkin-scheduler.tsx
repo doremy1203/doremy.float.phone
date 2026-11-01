@@ -28,6 +28,7 @@ import {
   pollDueCheckIns,
   prepareCheckInService,
   readCheckInDiagnostics,
+  readNativeCheckInDiagnostics,
   runCheckIn,
   scheduleNativeCheckIn,
 } from "@/lib/screenshot";
@@ -79,11 +80,17 @@ export function CheckInScheduler() {
         .map(([id, config]) => {
           const runtime = readCharacterRuntime(id);
           const delay = stableDelayMinutes(id, runtime.lastFiredAt, config.minMinutes, config.maxMinutes);
+          const configKey = [config.minMinutes, config.maxMinutes, config.dailyLimit].join(":");
+          const native = readNativeCheckInDiagnostics();
+          // 首次触发前 lastFiredAt=0。不能每分钟都用 now+min 重算，
+          // 否则闹钟会一直向后漂移、永远到不了。相同角色和配置沿用原生已登记的绝对时间。
           const dueAt = runtime.lastFiredAt > 0
             ? runtime.lastFiredAt + delay * 60_000
-            : now + config.minMinutes * 60_000;
+            : native?.scheduled && native.characterId === id && native.configKey === configKey && native.dueAt > now
+              ? native.dueAt
+              : now + config.minMinutes * 60_000;
           const character = characters.find(item => item.id === id);
-          return { characterId: id, name: character?.name?.trim() || "角色", dueAt };
+          return { characterId: id, name: character?.name?.trim() || "角色", dueAt, configKey };
         })
         .sort((a, b) => a.dueAt - b.dueAt);
       const next = candidates[0];
