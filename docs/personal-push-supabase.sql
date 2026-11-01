@@ -34,7 +34,7 @@ create table if not exists public.ai_phone_cloud_meta (
   updated_at timestamptz not null default now()
 );
 insert into public.ai_phone_cloud_meta (id, schema_version, updated_at)
-values ('personal-cloud', 3, now())
+values ('personal-cloud', 4, now())
 on conflict (id) do update set schema_version = excluded.schema_version, updated_at = excluded.updated_at;
 
 create table if not exists public.push_server_config (
@@ -75,6 +75,14 @@ create table if not exists public.push_jobs (
   updated_at timestamptz not null default now(),
   constraint push_jobs_status_check check (status in ('pending', 'running', 'done', 'cancelled', 'failed'))
 );
+-- 幂等升级：旧版个人云可能已存在 push_jobs，但尚无 trigger_key。
+-- CREATE TABLE IF NOT EXISTS 不会补齐旧表列；缺列会让预约接口报 trigger_key does not exist。
+alter table public.push_jobs add column if not exists trigger_key text;
+update public.push_jobs
+set trigger_key = 'legacy:' || id
+where trigger_key is null or btrim(trigger_key) = '';
+alter table public.push_jobs alter column trigger_key set not null;
+
 alter table public.push_jobs drop constraint if exists push_jobs_kind_check;
 alter table public.push_jobs add constraint push_jobs_kind_check
   check (kind in ('followup', 'reply_bailout', 'timed_task', 'bridge_scan', 'shortcut_resume'));
