@@ -13,7 +13,7 @@ const PUSH_SUBSCRIPTION_GATE_KEY = "push_account_subscribed_v1";
 export const PERSONAL_PUSH_GATEWAY_SLUG = "ai-phone-push";
 export const PERSONAL_PUSH_GENERATE_SLUG = "push-generate";
 export const PERSONAL_PUSH_SW_SCOPE = "/personal-push/";
-export const PERSONAL_PUSH_SCHEMA_VERSION = 3;
+export const PERSONAL_PUSH_SCHEMA_VERSION = 4;
 
 registerKvMigration(PERSONAL_PUSH_STATE_KEY);
 
