@@ -25,6 +25,8 @@ object CheckInAlarmScheduler {
     private const val PREFS = "native_check_in_schedule"
     private const val KEY_SCHEDULE = "schedule"
     private const val KEY_PENDING = "pending"
+    private const val KEY_OPENED = "opened"
+    const val ACTION_OPEN_REMINDER = "app.floatphone.shell.OPEN_CHECKIN_REMINDER"
     private const val ACTION_ALARM = "app.floatphone.shell.CHECKIN_ALARM"
     private const val CHANNEL = "shell_check_in_reminders"
     private const val NOTIFICATION_ID = 4107
@@ -64,10 +66,18 @@ object CheckInAlarmScheduler {
         }
     }
 
+    fun markReminderOpened(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_OPENED, true).apply()
+    }
+
     fun consumePending(context: Context): String {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(KEY_OPENED, false)) return ""
         val value = prefs.getString(KEY_PENDING, "").orEmpty()
-        if (value.isNotBlank()) prefs.edit().remove(KEY_PENDING).apply()
+        if (value.isNotBlank()) {
+            prefs.edit().remove(KEY_PENDING).remove(KEY_OPENED).apply()
+        }
         return value
     }
 
@@ -110,6 +120,7 @@ object CheckInAlarmScheduler {
             )
         }
         val open = Intent(context, MainActivity::class.java)
+            .setAction(ACTION_OPEN_REMINDER)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             .putExtra("pending_check_in_character_id", characterId)
         val content = PendingIntent.getActivity(
