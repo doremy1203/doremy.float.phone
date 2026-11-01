@@ -73,7 +73,7 @@ function heartbeatText(status: CallAutoChatStatus, now: number): { text: string;
 type CallAutoChatControlProps = {
     config: CallAutoChatConfig;
     /** 改一项设置（内部会存盘并广播，节拍随之复位） */
-    onUpdate: (patch: Partial<CallAutoChatConfig>) => void;
+    onUpdate: (patch: Partial<CallAutoChatConfig>) => CallAutoChatConfig;
 };
 
 export function CallAutoChatControl({ config, onUpdate }: CallAutoChatControlProps) {
