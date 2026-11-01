@@ -1170,6 +1170,27 @@ class MainActivity : AppCompatActivity() {
         }
 
         /**
+         * 把网页计算出的下一次查岗时间交给 Android 原生闹钟。
+         * 原生闹钟到点只发提醒，不会截屏；用户点通知回到 App 后，
+         * 网页再走原有的预览与明确同意流程。
+         */
+        @JavascriptInterface
+        fun scheduleNativeCheckIn(json: String): Boolean =
+            CheckInAlarmScheduler.schedule(this@MainActivity, json)
+
+        /** 没有角色继续开启查岗时取消原生闹钟。 */
+        @JavascriptInterface
+        fun cancelNativeCheckIn() {
+            CheckInAlarmScheduler.cancel(this@MainActivity)
+        }
+
+        /** 读取并清空用户点开查岗提醒后留下的待处理请求。 */
+        @JavascriptInterface
+        fun consumePendingCheckIn(): String =
+            CheckInAlarmScheduler.consumePending(this@MainActivity)
+
+
+        /**
          * 读查岗 / 截屏确认浮层的配色（JSON 原文）。
          *
          * 与通话浮窗的 getOverlayThemeJson 分开走：两者配色互不影响，
