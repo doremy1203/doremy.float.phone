@@ -55,7 +55,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.10"
+        val VERSION: String = BuildConfig.VERSION_NAME
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
