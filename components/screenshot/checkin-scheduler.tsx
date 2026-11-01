@@ -19,12 +19,18 @@ import { useEffect } from "react";
 import { bgSetTimeout } from "@/lib/bg-timer";
 import { hydrateKvDb } from "@/lib/kv-db";
 import {
+  cancelNativeCheckIn,
   checkInReadiness,
+  consumePendingNativeCheckIn,
   hasAnyCheckInEnabled,
   pollDueCheckIns,
   prepareCheckInService,
   readCheckInDiagnostics,
+  runCheckIn,
+  scheduleNativeCheckIn,
 } from "@/lib/screenshot";
+import { loadCheckInConfig, randomCheckInDelayMinutes, readCharacterRuntime } from "@/lib/screenshot/checkin-config";
+import { loadCharacters } from "@/lib/character-storage";
 
 /** 扫描间隔。查岗的节奏本身就按分钟算（最短 5 分钟），一分钟扫一遍足够细，
  *  又不至于让每次扫描都白跑一趟。真正的「该不该触发」由每个角色自己的
@@ -48,10 +54,46 @@ export function CheckInScheduler() {
      * 服务却未必还在——那时弹窗会静默失败，表现和「到点没反应」一模一样。
      * 这里在读诊断时顺手补一次，且只在「有角色开着 + 服务没跑」时补。
      */
+    const syncNativeSchedule = () => {
+      const configs = loadCheckInConfig();
+      const characters = loadCharacters();
+      const now = Date.now();
+      const candidates = Object.entries(configs)
+        .filter(([id, config]) => {
+          const runtime = readCharacterRuntime(id);
+          return config.enabled && runtime.countToday < config.dailyLimit;
+        })
+        .map(([id, config]) => {
+          const runtime = readCharacterRuntime(id);
+          const dueAt = runtime.lastFiredAt > 0
+            ? runtime.lastFiredAt + randomCheckInDelayMinutes(config) * 60_000
+            : now + config.minMinutes * 60_000;
+          const character = characters.find(item => item.id === id);
+          return { characterId: id, name: character?.name?.trim() || "角色", dueAt };
+        })
+        .sort((a, b) => a.dueAt - b.dueAt);
+      const next = candidates[0];
+      if (!next) {
+        cancelNativeCheckIn();
+        return;
+      }
+      scheduleNativeCheckIn(next);
+    };
+
     const scan = async () => {
       try {
-        if (!hasAnyCheckInEnabled()) return;
         await hydrateKvDb();
+        if (!hasAnyCheckInEnabled()) {
+          cancelNativeCheckIn();
+          return;
+        }
+
+        // 原生闹钟只会在用户点击提醒后留下待处理角色。没有点击通知，
+        // 即使用户只是正常打开 App，也不会自动弹出截屏预览。
+        const pendingCharacterId = consumePendingNativeCheckIn();
+        if (pendingCharacterId) {
+          await runCheckIn(pendingCharacterId);
+        }
 
         // 服务没在跑就先暖起来。此刻多半在前台（挂载 / 回到前台触发的），
         // 正是唯一合法的启动时机；失败也不打断下面的扫描，
@@ -62,6 +104,9 @@ export function CheckInScheduler() {
         }
 
         await pollDueCheckIns();
+        // WebView 定时器只能作为前台补偿；真正跨进程存活的是 Android 原生闹钟。
+        // 它到点只发通知，用户点开后才回到上述审批流程。
+        syncNativeSchedule();
       } catch (err) {
         console.warn("[查岗] 扫描失败", err);
       }
