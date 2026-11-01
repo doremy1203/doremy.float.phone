@@ -75,7 +75,7 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
   const shotRows: Row[] = shot
     ? [
         { label: "系统支持", value: shot.supported ? "支持（Android 11+）" : "不支持（需 Android 11+）", tone: toneOf(shot.supported) },
-        { label: "无障碍服务", value: shot.accessibilityOn ? "已开启" : "未开启（截屏的前提）", tone: toneOf(shot.accessibilityOn) },
+        { label: "无障碍实例连接", value: shot.accessibilityOn ? "已连接" : "未连接（可能被系统回收）", tone: toneOf(shot.accessibilityOn) },
         { label: "当前可截", value: shot.ready ? "可以" : "不可以", tone: toneOf(shot.ready) },
         { label: "进行中", value: shot.capturing ? "有一张还没截完" : "空闲", tone: shot.capturing ? "warn" : "ok" },
         { label: "累计截屏", value: `${shot.captureCount ?? 0} 次`, tone: "ok" },
@@ -122,6 +122,9 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
 
   const nativeRows: Row[] = nativeCheckIn
     ? [
+        { label: "无障碍系统开关", value: nativeCheckIn.accessibilityEnabledInSettings ? "系统设置显示已开启" : "系统设置显示未开启", tone: nativeCheckIn.accessibilityEnabledInSettings ? "ok" : "bad" },
+        { label: "无障碍实例", value: nativeCheckIn.accessibilityConnected ? "当前已连接" : "未连接 / 可能被系统回收", tone: nativeCheckIn.accessibilityConnected ? "ok" : "bad" },
+        { label: "通知权限", value: nativeCheckIn.notificationsEnabled ? "允许通知" : "通知被关闭，无法显示故障横幅", tone: nativeCheckIn.notificationsEnabled ? "ok" : "bad" },
         { label: "原生闹钟", value: nativeCheckIn.scheduled ? "已登记" : "未登记", tone: nativeCheckIn.scheduled ? "ok" : "warn" },
         ...(nativeCheckIn.scheduled
           ? [{ label: "下次提醒", value: `${nativeCheckIn.characterName || "角色"} · ${formatWhen(nativeCheckIn.dueAt)}`, tone: "ok" as const }]
@@ -266,7 +269,7 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
           </div>
 
           <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)", marginTop: 6 }}>
-            这里只显示状态，不含任何画面内容。查岗浮层「该弹没弹」时，先看浮窗权限与常驻服务两项。
+            这里只显示状态，不含任何画面内容。若系统开关显示已开启、但无障碍实例未连接，通常是服务被系统回收：到系统无障碍设置关闭再开启「小手机/通话控制服务」；若仍反复断开，再允许自启动、后台运行并关闭电池优化。通知权限关闭时，系统无法展示故障横幅。
           </div>
         </div>
       )}
