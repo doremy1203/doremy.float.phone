@@ -61,8 +61,19 @@ class NotificationReplyReceiver : BroadcastReceiver() {
             }
         }
 
-        /** 读取待发队列但不清空；网页成功写入聊天后再逐条确认，避免读取后页面崩溃造成丢消息。 */
+        /** 旧网页兼容接口：读取并清空，保持旧版 WebView 桥接行为。 */
         fun consumePendingReplies(context: Context): String =
+            runCatching {
+                synchronized(queueLock) {
+                    val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    val raw = prefs.getString(KEY_QUEUE, "[]") ?: "[]"
+                    prefs.edit().putString(KEY_QUEUE, "[]").commit()
+                    raw
+                }
+            }.getOrDefault("[]")
+
+        /** 新网页使用 peek + ack，页面异常退出时未确认的回复会保留待重试。 */
+        fun readPendingReplies(context: Context): String =
             runCatching {
                 synchronized(queueLock) {
                     val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
