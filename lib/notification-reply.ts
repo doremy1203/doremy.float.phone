@@ -15,7 +15,10 @@ import { requestBackgroundChatReply } from "./follow-up-service";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "./shell-call-overlay";
 
 type ReplyBridge = {
+    /** 旧壳兼容：读取时清空。 */
     consumePendingReplies?: () => string;
+    /** 新壳：读取快照，成功落库后单独确认。 */
+    readPendingReplies?: () => string;
     ackPendingReplies?: (idsJson: string) => void;
 };
 
@@ -27,7 +30,9 @@ function bridge(): ReplyBridge | null {
 
 /** 壳是否支持通知栏直接回复（老 APK 没有）。 */
 export function hasNotificationReplyBridge(): boolean {
-    return typeof bridge()?.consumePendingReplies === "function";
+    const api = bridge();
+    return typeof api?.readPendingReplies === "function"
+        || typeof api?.consumePendingReplies === "function";
 }
 
 /** 原生队列里的一条待发回复。 */
@@ -42,7 +47,9 @@ export type PendingNotificationReply = {
 /** 读取原生待发队列快照；成功写入聊天后由调用方逐条确认。 */
 export function readPendingReplies(): PendingNotificationReply[] {
     try {
-        const raw = bridge()?.consumePendingReplies?.();
+        const api = bridge();
+        // 新壳用可重试的 peek/ack；旧壳只有 consume（读即清空），继续兼容旧语义。
+        const raw = api?.readPendingReplies?.() ?? api?.consumePendingReplies?.();
         if (!raw) return [];
         const parsed = JSON.parse(raw) as unknown;
         if (!Array.isArray(parsed)) return [];
