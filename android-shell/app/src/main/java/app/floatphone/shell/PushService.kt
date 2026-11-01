@@ -228,6 +228,9 @@ class PushService : Service() {
                         } else {
                             val reason = reply?.optJSONObject("response")?.optString("reason").orEmpty()
                             updateKeepAlive(if (reason.isNotEmpty()) "频道订阅失败：$reason" else "频道订阅失败，稍后重试")
+                            // 加入频道失败就结束本次连接，让外层退避后重新取配置并重连。
+                            synchronized(lock) { done = true; lock.notifyAll() }
+                            webSocket.close(1000, "channel join failed")
                         }
                         return
                     }
