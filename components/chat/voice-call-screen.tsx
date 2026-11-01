@@ -1130,10 +1130,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     <button
                         type="button"
                         aria-label="自动搭话设置"
-                        title="拖动可移动 · 点一下展开设置"
                         title={
                             autoChatConfig.enabled
-                                ? `自动搭话：静默 ${autoChatConfig.minSeconds}~${autoChatConfig.maxSeconds} 秒随机开口`
+                                ? `拖动可移动 · 自动搭话：静默 ${autoChatConfig.minSeconds}~${autoChatConfig.maxSeconds} 秒随机开口`
                                 : "自动搭话：已关闭"
                         }
                         style={{
