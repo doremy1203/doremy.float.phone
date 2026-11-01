@@ -1,4 +1,5 @@
 name: Web Typecheck
+# Verified against the latest dependency security repair commit.
 
 on:
   push:
