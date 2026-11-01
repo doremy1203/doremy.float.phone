@@ -3,7 +3,7 @@
 import {
     chatDb,
     initChatDb,
-    dbPutMessage, dbDeleteMessage, dbDeleteMessagesBySession, dbDeleteMessagesByIds,
+    dbPutMessage, dbPutMessageAndWait, dbDeleteMessage, dbDeleteMessagesBySession, dbDeleteMessagesByIds,
     dbPutMessages, dbPutSessions, dbPutContacts, dbDeleteSession,
     dbReplaceContacts, dbReplaceSessions, dbBulkPutMessages,
 } from "./chat-db";
@@ -1507,6 +1507,18 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     emitChatPluginEvent("message.persisted", { message: newMsg });
 
     return newMsg;
+}
+
+/** Critical entry point: keep normal chat side effects, then wait for IndexedDB persistence. */
+export async function pushChatMessageAndPersist(
+    msg: Omit<ChatMessage, "id" | "createdAt" | "status"> & {
+        status?: ChatMessageStatus;
+        createdAt?: string;
+    },
+): Promise<ChatMessage> {
+    const saved = pushChatMessage(msg);
+    await dbPutMessageAndWait(saved);
+    return saved;
 }
 
 export function upsertImportedChatMessage(msg: ChatMessage): { message: ChatMessage; inserted: boolean } {
