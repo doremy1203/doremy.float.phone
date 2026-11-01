@@ -118,7 +118,7 @@ export function insertSystemCalendarEvent(params: {
       params.description ?? "",
     );
     if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持写入日历" };
-    const parsed = JSON.parse(raw) as Partial<SystemCalendarWriteResult>;
+    const parsed = JSON.parse(raw) as { ok?: unknown; eventId?: unknown; reason?: unknown; needPermission?: unknown };
     if (parsed && parsed.ok === true) return parsed as SystemCalendarWriteResult;
     return {
       ok: false,
