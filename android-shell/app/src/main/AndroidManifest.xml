@@ -186,14 +186,22 @@
         <service
             android:name=".CheckInService"
             android:exported="false"
-            android:foregroundServiceType="specialUse" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="用户发起或明确同意的单次屏幕预览确认浮层" />
+        </service>
 
         <!-- 截屏悬浮球：随手点一下就能截屏发给角色（你自己发起，不是角色查岗）。
              点击后交给 CheckInService 走同一套预览与审批。 -->
         <service
             android:name=".ScreenshotBallService"
             android:exported="false"
-            android:foregroundServiceType="specialUse" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="用户主动开启的屏幕截取悬浮球" />
+        </service>
 
         <!-- 媒体控制：持有「通知使用权」后才有资格读活跃媒体会话、直接控制播放。
              它**不读任何通知内容**（onNotificationPosted 刻意不重写），存在的唯一
