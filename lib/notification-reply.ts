@@ -118,7 +118,7 @@ async function flushPendingNotificationRepliesOnce(): Promise<number> {
         }
         // 必须等 IndexedDB 真正完成写入后才确认原生队列；更新内存缓存不算持久化成功。
         // 若存储失败，该条仍留在原生队列，下次页面启动会重试。
-        await pushChatMessageAndPersist({ sessionId: item.sessionId, role: "user", content: text });
+        await pushChatMessageAndPersist({ id: "notification-reply:" + item.id, sessionId: item.sessionId, role: "user", content: text });
         bridge()?.ackPendingReplies?.(JSON.stringify([item.id]));
         touched.add(item.sessionId);
         sent += 1;
