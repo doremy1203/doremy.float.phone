@@ -52,3 +52,8 @@ jobs:
 
       - name: TypeScript
         run: npx tsc --noEmit --incremental false
+
+      - name: Production build
+        run: npm run build
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
