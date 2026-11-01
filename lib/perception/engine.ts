@@ -34,7 +34,6 @@ import {
   supportsHealth,
   supportsLocation,
   supportsUsageStats,
-  type AppUsageEntry,
 } from "./bridge";
 import { syncPerceptionToCloud } from "./cloud-sync";
 import {
@@ -47,7 +46,7 @@ import {
   savePerceptionStatus,
   type PerceptionRuntimeState,
 } from "./storage";
-import type { PerceptionCapability, PerceptionConfig, PerceptionSignal } from "./types";
+import type { AppUsageEntry, PerceptionCapability, PerceptionConfig, PerceptionSignal } from "./types";
 
 const HOUR_MS = 60 * 60 * 1000;
 
