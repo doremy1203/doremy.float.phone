@@ -94,12 +94,18 @@ object CheckInAlarmScheduler {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val scheduled = runCatching { JSONObject(prefs.getString(KEY_SCHEDULE, "").orEmpty()) }.getOrNull()
         val pending = runCatching { JSONObject(prefs.getString(KEY_PENDING, "").orEmpty()) }.getOrNull()
+        val notificationsEnabled = androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled() &&
+            (Build.VERSION.SDK_INT < 33 ||
+                context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED)
         return JSONObject()
             .put("scheduled", scheduled != null)
             .put("characterName", scheduled?.optString("name", "").orEmpty())
             .put("dueAt", scheduled?.optLong("dueAt", 0L) ?: 0L)
             .put("pending", pending != null)
             .put("opened", prefs.getBoolean(KEY_OPENED, false))
+            .put("accessibilityConnected", ScreenshotBridge.isAccessibilityOn())
+            .put("accessibilityEnabledInSettings", isAccessibilityEnabledInSettings(context))
+            .put("notificationsEnabled", notificationsEnabled)
             .toString()
     }
 
