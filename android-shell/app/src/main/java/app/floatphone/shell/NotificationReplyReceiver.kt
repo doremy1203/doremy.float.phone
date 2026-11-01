@@ -75,7 +75,7 @@ class NotificationReplyReceiver : BroadcastReceiver() {
             runCatching {
                 synchronized(queueLock) {
                 val ids = JSONArray(idsJson)
-                val acknowledged = (0 until ids.length()).mapNotNull { ids.optString(it).takeIf(String::isNotBlank) }.toSet()
+                val acknowledged = (0 until ids.length()).mapNotNull { ids.optString(it).takeIf { value -> value.isNotBlank() } }.toSet()
                 if (acknowledged.isEmpty()) return
                 val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val current = JSONArray(prefs.getString(KEY_QUEUE, "[]") ?: "[]")
