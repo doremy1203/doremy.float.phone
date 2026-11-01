@@ -16,6 +16,7 @@ import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "./shell
 
 type ReplyBridge = {
     consumePendingReplies?: () => string;
+    ackPendingReplies?: (idsJson: string) => void;
 };
 
 function bridge(): ReplyBridge | null {
@@ -48,6 +49,7 @@ export function readPendingReplies(): PendingNotificationReply[] {
         return parsed.filter((item): item is PendingNotificationReply => (
             !!item
             && typeof item === "object"
+            && typeof (item as PendingNotificationReply).id === "string"
             && typeof (item as PendingNotificationReply).sessionId === "string"
             && typeof (item as PendingNotificationReply).text === "string"
             && (item as PendingNotificationReply).text.trim().length > 0
@@ -71,10 +73,20 @@ export async function flushPendingNotificationReplies(): Promise<number> {
     let sent = 0;
     const touched = new Set<string>();
     for (const item of pending) {
-        if (!sessionIds.has(item.sessionId)) continue;
+        if (!sessionIds.has(item.sessionId)) {
+            // 会话已删除，无法投递；确认丢弃，避免一条无归属回复永久堵住队列。
+            bridge()?.ackPendingReplies?.(JSON.stringify([item.id]));
+            continue;
+        }
         const text = item.text.trim();
-        if (!text) continue;
+        if (!text) {
+            bridge()?.ackPendingReplies?.(JSON.stringify([item.id]));
+            continue;
+        }
+        // pushChatMessage 同步完成本地写入；只有写入成功后才确认原生队列。
+        // 若这里抛错，该条仍留在原生队列，下次页面启动会重试。
         pushChatMessage({ sessionId: item.sessionId, role: "user", content: text });
+        bridge()?.ackPendingReplies?.(JSON.stringify([item.id]));
         touched.add(item.sessionId);
         sent += 1;
     }
