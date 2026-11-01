@@ -23,6 +23,7 @@ import {
   checkInReadiness,
   consumePendingNativeCheckIn,
   hasAnyCheckInEnabled,
+  hasPendingNativeCheckIn,
   findLatestPrivateSession,
   pollDueCheckIns,
   prepareCheckInService,
@@ -101,11 +102,12 @@ export function CheckInScheduler() {
           return;
         }
 
-        // 原生闹钟只会在用户点击提醒后留下待处理角色。没有点击通知，
-        // 即使用户只是正常打开 App，也不会自动弹出截屏预览。
-        const pendingCharacterId = consumePendingNativeCheckIn();
-        if (pendingCharacterId) {
-          await runCheckIn(pendingCharacterId);
+        // 原生闹钟只会在用户点击提醒（或点击修复无障碍按钮）后标记待处理。
+        // 若无障碍服务尚未重新连接，先保留请求，不要提前消费；用户从系统设置返回、
+        // 服务恢复后再继续原有的预览审批流程。
+        if (hasPendingNativeCheckIn() && checkInReadiness().ready) {
+          const pendingCharacterId = consumePendingNativeCheckIn();
+          if (pendingCharacterId) await runCheckIn(pendingCharacterId);
         }
 
         // 服务没在跑就先暖起来。此刻多半在前台（挂载 / 回到前台触发的），
