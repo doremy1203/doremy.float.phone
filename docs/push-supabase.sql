@@ -49,6 +49,14 @@ create table if not exists public.push_jobs (
   constraint push_jobs_status_check check (status in ('pending', 'running', 'done', 'cancelled', 'failed')),
   constraint push_jobs_kind_check check (kind in ('followup', 'reply_bailout', 'timed_task'))
 );
+-- 旧版数据库升级：CREATE TABLE IF NOT EXISTS 不会为已存在的表补列。
+-- 缺少 trigger_key 会让预约、自检和取消任务接口报列不存在。
+alter table public.push_jobs add column if not exists trigger_key text;
+update public.push_jobs
+set trigger_key = 'legacy:' || id
+where trigger_key is null or btrim(trigger_key) = '';
+alter table public.push_jobs alter column trigger_key set not null;
+
 
 create unique index if not exists push_jobs_trigger_idx
   on public.push_jobs (user_id, trigger_key);
