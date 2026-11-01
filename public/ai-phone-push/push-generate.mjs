@@ -204,173 +204,6 @@ function humanizeSegment(segment: string): string {
   return segment;
 }
 
-// ── 内嵌：lib/llm-prompt-assembler 的输出正则（placement = 2）──
-// 聊天正文的落地路径是 stripHallucinatedTimestamps → applyOutputRegex → parseAndSaveResponse，
-// 而推送预览过去只对裸输出做纯文本处理：用户的输出正则（删旁白、改格式、去标签等）
-// 在通知里完全不生效，同一段原始输出在聊天与通知里就长得不一样。这里按同一语义
-// 复刻 runRegexRule / applyRegex(placement=2)，让预览先过一遍同一批规则。
-//
-// 宏引擎只复刻输出正则这一路真正会用到的宏：客户端应用输出正则时仅构造
-// new MacroEngine(characterName, userName)，其余字段全空，两侧行为一致；
-// 未知宏原样保留（返回带花括号的原串），与客户端相同。
-const PREVIEW_TRIM = "\x00TRIM\x00";
-
-function previewFormatTimestamp(format: string): string {
-  const now = new Date();
-  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
-  return format
-    .replace(/YYYY/g, String(now.getFullYear()))
-    .replace(/YY/g, String(now.getFullYear()).slice(-2))
-    .replace(/MM/g, pad(now.getMonth() + 1))
-    .replace(/DD/g, pad(now.getDate()))
-    .replace(/HH/g, pad(now.getHours()))
-    .replace(/hh/g, pad(now.getHours() % 12 || 12))
-    .replace(/mm/g, pad(now.getMinutes()))
-    .replace(/ss/g, pad(now.getSeconds()))
-    .replace(/A/g, now.getHours() >= 12 ? "PM" : "AM")
-    .replace(/a/g, now.getHours() >= 12 ? "pm" : "am");
-}
-
-function previewMacroValue(body: string, charName: string, userName: string, vars: Record<string, string>): string {
-  if (body.startsWith("//")) return "";
-  if (body === "trim") return PREVIEW_TRIM;
-  if (body === "char") return charName;
-  if (body === "user") return userName;
-  if (body === "time") {
-    const now = new Date();
-    return `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  }
-  if (body === "weekday") return ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"][new Date().getDay()];
-  if (body === "uuid") return crypto.randomUUID();
-  if (body === "timestamp") return new Date().toISOString();
-  if (body.startsWith("timestamp:")) return previewFormatTimestamp(body.substring(10).trim());
-  if (body.startsWith("setvar::")) {
-    const parts = body.substring(8).split("::");
-    if (parts.length >= 2) vars[parts[0]] = parts.slice(1).join("::");
-    return "";
-  }
-  if (body.startsWith("getvar::")) return vars[body.substring(8)] ?? "";
-  if (body.startsWith("random::")) {
-    const items = body.substring(8).split("::").filter(Boolean);
-    return items.length > 0 ? items[Math.floor(Math.random() * items.length)] : "";
-  }
-  if (body.startsWith("random:")) {
-    const items = body.substring(7).split(/[,\n]/).map(s => s.trim()).filter(Boolean);
-    return items.length > 0 ? items[Math.floor(Math.random() * items.length)] : "";
-  }
-  return `{{${body}}}`;
-}
-
-function expandPreviewMacros(text: string, charName: string, userName: string, vars: Record<string, string>): string {
-  let result = text;
-  for (let i = 0; i < 50; i += 1) {
-    const next = result.replace(/\{\{([^{}]*?)\}\}/gs, (_m, body: string) => previewMacroValue(body, charName, userName, vars));
-    if (next === result) break;
-    result = next;
-  }
-  return result.replace(/\n*\x00TRIM\x00\n*/g, "");
-}
-
-function previewRegexFromString(input: string): RegExp | null {
-  try {
-    const m = input.match(/(\/?)(.+)\1([a-z]*)/i);
-    if (m) {
-      if (m[3] && !/^(?!.*?(.).*?\1)[dgimsuyv]+$/.test(m[3])) return new RegExp(input);
-      return new RegExp(m[2], m[3]);
-    }
-  } catch { /* 解析失败按无规则处理 */ }
-  return null;
-}
-
-function previewSanitizeRegexMacro(x: string): string {
-  if (!x || typeof x !== "string") return x;
-  return x.replace(/[\n\r\t\v\f\0.^$*+?{}[\]\\/|()]/g, (s) => {
-    switch (s) {
-      case "\n": return "\\n";
-      case "\r": return "\\r";
-      case "\t": return "\\t";
-      case "\v": return "\\v";
-      case "\f": return "\\f";
-      case "\0": return "\\0";
-      default: return "\\" + s;
-    }
-  });
-}
-
-function previewRunRegexRule(rule: Record<string, unknown>, text: string, charName: string, userName: string, vars: Record<string, string>): string {
-  const findRegexRaw = typeof rule.findRegex === "string" ? rule.findRegex : "";
-  if (!findRegexRaw || !text) return text;
-  let regexString = findRegexRaw;
-  if (rule.substituteRegex) {
-    if (rule.substituteRegex === 2) {
-      regexString = findRegexRaw.replace(/\{\{([^{}]*?)\}\}/gs, (_m, body: string) => {
-        const wrapped = `{{${body}}}`;
-        const resolved = expandPreviewMacros(wrapped, charName, userName, vars);
-        if (resolved === wrapped) return resolved;
-        return previewSanitizeRegexMacro(resolved);
-      });
-    } else {
-      regexString = expandPreviewMacros(regexString, charName, userName, vars);
-    }
-  }
-  const findRegex = previewRegexFromString(regexString);
-  if (!findRegex) return text;
-  if (findRegex.global || findRegex.sticky) findRegex.lastIndex = 0;
-  const trimStrings = Array.isArray(rule.trimStrings) ? rule.trimStrings as string[] : [];
-  const replaceString = typeof rule.replaceString === "string" ? rule.replaceString : "";
-  return text.replace(findRegex, function (...args: unknown[]) {
-    const replaceStr = replaceString.replace(/\{\{match\}\}/gi, "$0");
-    const replaced = replaceStr.replace(/\$(\d+)|\$<([^>]+)>/g, (_s, num?: string, groupName?: string) => {
-      let match: string | undefined;
-      if (num !== undefined) match = args[Number(num)] as string | undefined;
-      else if (groupName) {
-        const groups = args[args.length - 1] as Record<string, string> | undefined;
-        match = groups && typeof groups === "object" ? groups[groupName] : undefined;
-      }
-      if (!match) return "";
-      let value = String(match);
-      for (const ts of trimStrings) value = value.replaceAll(expandPreviewMacros(ts, charName, userName, vars), "");
-      return value;
-    });
-    return expandPreviewMacros(replaced, charName, userName, vars);
-  });
-}
-
-/** 复刻 getActiveAppTags：merge 里没有 appTags 时按 appId + followup 推导。 */
-function previewActiveTags(merge: Record<string, unknown> | null | undefined): string[] {
-  const tags = merge && Array.isArray(merge.appTags) ? merge.appTags as unknown[] : null;
-  if (tags) return tags.map(String);
-  const appId = merge && typeof merge.appId === "string" && merge.appId ? merge.appId : "chat";
-  const followUpCount = merge && typeof merge.followUpCount === "number" ? merge.followUpCount : 0;
-  return [appId, ...(followUpCount > 0 ? ["followup"] : [])];
-}
-
-/** 对预览文本应用输出正则（placement=2，过滤条件与聊天侧 applyOutputRegex 一致）。 */
-function applyOutputRegexToPreview(rawText: string, merge: Record<string, unknown> | null | undefined): string {
-  const groups = merge && Array.isArray(merge.regexes) ? merge.regexes as Record<string, unknown>[] : [];
-  if (groups.length === 0) return rawText;
-  const charName = merge && typeof merge.characterName === "string" ? merge.characterName : "";
-  const userName = merge && typeof merge.userName === "string" ? merge.userName : "用户";
-  const activeTags = previewActiveTags(merge);
-  const vars: Record<string, string> = {};
-  let result = rawText;
-  for (const group of groups) {
-    const rules = group && Array.isArray(group.rules) ? group.rules as Record<string, unknown>[] : [];
-    for (const rule of rules) {
-      if (!rule || rule.disabled === true) continue;
-      if (!Array.isArray(rule.placement) || !(rule.placement as number[]).includes(2)) continue;
-      if (rule.markdownOnly === true || rule.promptOnly === true) continue;
-      if (rule.historyOnly === true) continue;
-      const required = Array.isArray(rule.tags) ? rule.tags as string[] : [];
-      if (required.length > 0 && !required.every(t => activeTags.includes(t))) continue;
-      try {
-        result = previewRunRegexRule(rule, result, charName, userName, vars);
-      } catch { /* 与客户端一致：坏规则静默跳过 */ }
-    }
-  }
-  return result;
-}
-
 function splitResponseForPushPreview(rawText: string): string[] {
   let text = stripStateValues(rawText);
   text = stripBracketBlock(text, "状态栏");
@@ -1300,12 +1133,9 @@ Deno.serve(async (req: Request) => {
     const targetUrl = deliverAsCall && callSessionId
       ? `/?ring=${encodeURIComponent(callSessionId)}&rt=${Date.now()}`
       : (payload.notify?.url || "/");
-    // 预览文案先过一遍输出正则（与聊天落账同一批规则），再走纯文本分条——
-    // 否则用户预设里的输出正则在通知里不生效，两处文案对不上。
-    const previewText = applyOutputRegexToPreview(rawText, payload.merge);
     let parts = deliverAsCall
       ? ["来电话了…"]
-      : splitResponseForPushPreview(previewText).slice(0, 6);
+      : splitResponseForPushPreview(rawText).slice(0, 6);
     if (parts.length === 0) parts = ["发来一条消息"];
 
     for (let index = 0; index < parts.length; index += 1) {
@@ -1315,19 +1145,13 @@ Deno.serve(async (req: Request) => {
       // 在通知里只剩开头一句，聊天里却是完整的。正常聊天单条远不到 200 字，
       // 几乎不会触发截断。
       const partBody = parts[index].slice(0, 200);
-      // 普通消息也让浏览器/PWA 的通知能点进对应会话：url 带 open-chat 深链，
-      // personal-push-sw 的 notificationclick 据此导航（与壳的 #open-chat 同一约定）。
-      const webTargetUrl = !deliverAsCall && callSessionId
-        ? `/#open-chat=${encodeURIComponent(callSessionId)}`
-        : targetUrl;
       const message = JSON.stringify({
         type: deliverAsCall ? "incoming_call" : "chat_outbox",
         title: deliverAsCall ? `📞 ${title}` : title,
         body: partBody,
         tag: `${job.id}-${index}`,
-        url: webTargetUrl,
-        ...(callSessionId ? { sessionId: callSessionId } : {}),
-        ...(deliverAsCall ? { callTs: Date.now() } : {}),
+        url: targetUrl,
+        ...(deliverAsCall ? { sessionId: callSessionId, callTs: Date.now() } : {}),
       });
       if (vapid) {
         for (const sub of webSubs) {
@@ -1359,10 +1183,9 @@ Deno.serve(async (req: Request) => {
                   body: partBody,
                   url: targetUrl,
                   // 老壳不认识这些字段 → 照常显示普通通知，自然向下兼容。
-                  // sessionId 让壳点击通知直达对应会话（普通消息原先漏了它，点开只回桌面）；
-                  // 现在普通消息与来电都带上，壳据此拼深链跳转。
+                  // sessionId 让壳点击通知直达对应会话（普通消息原先没有，点开只回桌面）；
                   // avatar 是角色头像（data URL 或直链），有就当通知大图标，没有壳用默认图。
-                  ...(payload.merge?.sessionId ? { sessionId: String(payload.merge.sessionId) } : {}),
+                  ...(callSessionId ? { sessionId: callSessionId } : {}),
                   ...(typeof payload.notify?.avatar === "string" && payload.notify.avatar
                     ? { avatar: payload.notify.avatar }
                     : {}),
