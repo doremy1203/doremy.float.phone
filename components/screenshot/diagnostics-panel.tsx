@@ -17,6 +17,7 @@ import { RefreshCw, Stethoscope } from "lucide-react";
 import { isShellEnvironment as isShell } from "@/lib/shell-call-overlay";
 import {
   readCheckInDiagnostics,
+  readNativeCheckInDiagnostics,
   readScreenshotDiagnostics,
   readScreenshotShareTargets,
 } from "@/lib/screenshot";
@@ -49,6 +50,7 @@ const TONE_COLOR: Record<string, string> = {
 export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: string) => void }) {
   const [shot, setShot] = useState<ScreenshotDiagnostics | null>(null);
   const [checkIn, setCheckIn] = useState<CheckInDiagnostics | null>(null);
+  const [nativeCheckIn, setNativeCheckIn] = useState<ReturnType<typeof readNativeCheckInDiagnostics>>(null);
   const [share, setShare] = useState<ScreenshotShareTargetState | null>(null);
   const [open, setOpen] = useState(false);
 
@@ -57,6 +59,7 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
   const refresh = useCallback(() => {
     setShot(readScreenshotDiagnostics());
     setCheckIn(readCheckInDiagnostics());
+    setNativeCheckIn(readNativeCheckInDiagnostics());
     setShare(readScreenshotShareTargets());
   }, []);
 
@@ -114,6 +117,16 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
         ...(share.lastTargetReason
           ? [{ label: "上次没能发", value: share.lastTargetReason, tone: "warn" as const }]
           : []),
+      ]
+    : [];
+
+  const nativeRows: Row[] = nativeCheckIn
+    ? [
+        { label: "原生闹钟", value: nativeCheckIn.scheduled ? "已登记" : "未登记", tone: nativeCheckIn.scheduled ? "ok" : "warn" },
+        ...(nativeCheckIn.scheduled
+          ? [{ label: "下次提醒", value: `${nativeCheckIn.characterName || "角色"} · ${formatWhen(nativeCheckIn.dueAt)}`, tone: "ok" as const }]
+          : []),
+        { label: "待处理提醒", value: nativeCheckIn.pending ? (nativeCheckIn.opened ? "已点击，等待网页接收" : "已到点，等待用户点击") : "无", tone: nativeCheckIn.pending ? "warn" : "ok" },
       ]
     : [];
 
@@ -187,6 +200,26 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
             </div>
           ) : (
             shareRows.map(row => (
+              <div className="menu-item" key={row.label} style={{ cursor: "default" }}>
+                <div className="menu-label-group">
+                  <span className="menu-label" style={{ fontSize: 13 }}>{row.label}</span>
+                </div>
+                <span style={{ fontSize: 12, color: TONE_COLOR[row.tone ?? "ok"], maxWidth: "60%", textAlign: "right", wordBreak: "break-all" }}>
+                  {row.value}
+                </span>
+              </div>
+            ))
+          )}
+
+          <div style={{ padding: "14px 0 6px", fontWeight: 600 }}>后台调度</div>
+          {nativeRows.length === 0 ? (
+            <div className="menu-item" style={{ cursor: "default" }}>
+              <div className="menu-label-group">
+                <span className="menu-desc">读不到原生闹钟状态（请更新安卓壳）</span>
+              </div>
+            </div>
+          ) : (
+            nativeRows.map(row => (
               <div className="menu-item" key={row.label} style={{ cursor: "default" }}>
                 <div className="menu-label-group">
                   <span className="menu-label" style={{ fontSize: 13 }}>{row.label}</span>
