@@ -69,6 +69,7 @@ export type NativeCheckInDiagnostics = {
   accessibilityConnected: boolean;
   accessibilityEnabledInSettings: boolean;
   notificationsEnabled: boolean;
+  ignoringBatteryOptimizations: boolean;
 };
 
 export function readNativeCheckInDiagnostics(): NativeCheckInDiagnostics | null {
@@ -85,6 +86,7 @@ export function readNativeCheckInDiagnostics(): NativeCheckInDiagnostics | null 
       accessibilityConnected: parsed.accessibilityConnected === true,
       accessibilityEnabledInSettings: parsed.accessibilityEnabledInSettings === true,
       notificationsEnabled: parsed.notificationsEnabled === true,
+      ignoringBatteryOptimizations: parsed.ignoringBatteryOptimizations === true,
     };
   } catch {
     return null;
