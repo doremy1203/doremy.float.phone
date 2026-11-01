@@ -29,6 +29,7 @@ import {
   type CheckInCharacterConfig,
 } from "./checkin-config";
 import { consumePendingUserShot, hasCheckInBridge, readCheckInCapabilities, requestCheckIn } from "./checkin";
+import type { CheckInOutcome } from "./types";
 import { resolveCheckInGuidance } from "./checkin-guidance";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
 
