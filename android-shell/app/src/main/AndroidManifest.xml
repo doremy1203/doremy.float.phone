@@ -174,6 +174,10 @@
             android:name=".CheckInAlarmReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".CheckInAccessibilitySettingsReceiver"
+            android:exported="false" />
+
         <!-- 通话浮窗服务：TYPE_APPLICATION_OVERLAY 浮在其他 App 上层。
              mediaPlayback 类型同时把进程钉在前台，网页语音才不会被系统掐断。 -->
         <service
