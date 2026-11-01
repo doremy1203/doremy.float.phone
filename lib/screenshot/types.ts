@@ -110,7 +110,7 @@ export type CheckInCapabilities = {
  * 所以无论同意还是拒绝都会带回来——用户主动打的字不该被吞掉。
  */
 export type CheckInOutcome =
-  | { accepted: true; base64: string; width: number; height: number; reply?: string; characterId?: string }
+  | { accepted: true; base64: string; width: number; height: number; bytes?: number; reply?: string; characterId?: string }
   | { accepted: false; reason: string; reply?: string; characterId?: string };
 
 /**
