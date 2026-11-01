@@ -1204,6 +1204,15 @@ class MainActivity : AppCompatActivity() {
         fun getNativeCheckInDiagnostics(): String =
             CheckInAlarmScheduler.diagnosticsJson(this@MainActivity)
 
+        /** 查岗发现无障碍实例断连时，给用户发带修复入口的系统横幅。 */
+        @JavascriptInterface
+        fun notifyCheckInUnavailable(characterName: String) {
+            CheckInAlarmScheduler.showAccessibilityRecoveryNotification(
+                this@MainActivity,
+                characterName.ifBlank { "角色" },
+            )
+        }
+
 
         /**
          * 读查岗 / 截屏确认浮层的配色（JSON 原文）。
