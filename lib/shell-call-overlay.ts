@@ -57,7 +57,7 @@ export type ShellOverlayEvent = {
     ok?: boolean;
     /** action='screenshot' 失败时的原因 */
     reason?: string;
-    /** action='screenshot' 成功时的 PNG base64（不含 data: 前缀） */
+    /** action='screenshot' 或已同意的 'checkIn' 成功时的 PNG base64（不含 data: 前缀） */
     base64?: string;
     /** action='screenshot' 成功时画面的宽 */
     width?: number;
@@ -69,8 +69,6 @@ export type ShellOverlayEvent = {
     characterId?: string;
     /** action='checkIn'：用户是否同意给角色看 */
     accepted?: boolean;
-    /** action='checkIn' accepted=true 时的 PNG base64 */
-    base64?: string;
     /** action='checkIn' 用户在浮层回复框里顺手说的话（可选） */
     reply?: string;
     /** action='userReply'：用户从通知栏直接回复，待发消息落在哪个会话 */
