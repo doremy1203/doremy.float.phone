@@ -9,6 +9,8 @@ on:
       - "hooks/**"
       - "lib/**"
       - "scripts/**"
+      - "supabase/**"
+      - "docs/**"
       - "public/**"
       - "package.json"
       - "package-lock.json"
