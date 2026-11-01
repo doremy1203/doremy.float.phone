@@ -124,6 +124,13 @@ object CheckInAlarmScheduler {
         return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
     }
 
+    fun clearAccessibilityRecoveryNotification(context: Context) {
+        runCatching {
+            (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .cancel(ACCESSIBILITY_NOTICE_ID)
+        }
+    }
+
     /** 只提示修复，不尝试偷偷重启无障碍或截屏。 */
     fun showAccessibilityRecoveryNotification(context: Context, characterName: String = "角色") {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
