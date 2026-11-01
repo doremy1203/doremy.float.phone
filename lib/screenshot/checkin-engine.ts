@@ -391,13 +391,26 @@ export async function requestCheckInForTool(characterId: string): Promise<CheckI
  * 挂进桌面壳的轮询（与定时主动联系同一处）。刻意串行执行：
  * 同一时刻只弹一个浮层——两个浮层叠在一起，用户根本没法处理。
  */
-export async function pollDueCheckIns(): Promise<number> {
-  const all = loadCheckInConfig();
-  let fired = 0;
-  for (const [characterId, config] of Object.entries(all)) {
-    if (!shouldFireCheckIn(characterId, config)) continue;
-    const result = await runCheckIn(characterId, config);
-    if (result.ok) fired += 1;
-  }
-  return fired;
+let checkInPollInFlight: Promise<number> | null = null;
+
+/** 多个 focus/pageshow/visibility/timer 事件可能同时触发扫描；合并成同一轮，
+ * 避免两个扫描循环交错，导致同一时刻弹出多个角色的查岗浮层。 */
+export function pollDueCheckIns(): Promise<number> {
+  if (checkInPollInFlight) return checkInPollInFlight;
+
+  const run = (async () => {
+    const all = loadCheckInConfig();
+    let fired = 0;
+    for (const [characterId, config] of Object.entries(all)) {
+      if (!shouldFireCheckIn(characterId, config)) continue;
+      const result = await runCheckIn(characterId, config);
+      if (result.ok) fired += 1;
+    }
+    return fired;
+  })();
+
+  checkInPollInFlight = run.finally(() => {
+    checkInPollInFlight = null;
+  });
+  return checkInPollInFlight;
 }
