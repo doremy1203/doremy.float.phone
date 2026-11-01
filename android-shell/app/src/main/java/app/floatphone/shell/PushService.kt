@@ -70,7 +70,7 @@ class PushService : Service() {
     private var stopped = false
     private var msgSeq = 2
     private var notifId = 100
-    private var shellSubRegistered = false
+    private var shellSubRegisteredUserId: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -151,7 +151,7 @@ class PushService : Service() {
      * 要往 shellpush 频道广播；服务端不会对它做 Web Push 投递。
      */
     private fun registerShellSubscription(cookie: String, userId: String) {
-        if (shellSubRegistered) return
+        if (shellSubRegisteredUserId == userId) return
         runCatching {
             val body = JSONObject()
                 .put("endpoint", "shell:$userId")
@@ -167,7 +167,7 @@ class PushService : Service() {
             if (cookie.isNotEmpty()) builder.header("Cookie", cookie)
             val request = builder.build()
             client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) shellSubRegistered = true
+                if (response.isSuccessful) shellSubRegisteredUserId = userId
             }
         }
     }
