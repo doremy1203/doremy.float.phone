@@ -23,6 +23,7 @@ import {
   checkInReadiness,
   consumePendingNativeCheckIn,
   hasAnyCheckInEnabled,
+  findLatestPrivateSession,
   pollDueCheckIns,
   prepareCheckInService,
   readCheckInDiagnostics,
@@ -72,7 +73,7 @@ export function CheckInScheduler() {
       const candidates = Object.entries(configs)
         .filter(([id, config]) => {
           const runtime = readCharacterRuntime(id);
-          return config.enabled && runtime.countToday < config.dailyLimit;
+          return config.enabled && runtime.countToday < config.dailyLimit && Boolean(findLatestPrivateSession(id));
         })
         .map(([id, config]) => {
           const runtime = readCharacterRuntime(id);
