@@ -169,6 +169,11 @@
             </intent-filter>
         </receiver>
 
+        <!-- 查岗提醒闹钟：只发提醒通知，不在后台截屏；用户点开后才进入预览审批。 -->
+        <receiver
+            android:name=".CheckInAlarmReceiver"
+            android:exported="false" />
+
         <!-- 通话浮窗服务：TYPE_APPLICATION_OVERLAY 浮在其他 App 上层。
              mediaPlayback 类型同时把进程钉在前台，网页语音才不会被系统掐断。 -->
         <service
