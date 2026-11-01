@@ -29,7 +29,7 @@ import {
   runCheckIn,
   scheduleNativeCheckIn,
 } from "@/lib/screenshot";
-import { loadCheckInConfig, randomCheckInDelayMinutes, readCharacterRuntime } from "@/lib/screenshot/checkin-config";
+import { loadCheckInConfig, readCharacterRuntime } from "@/lib/screenshot/checkin-config";
 import { loadCharacters } from "@/lib/character-storage";
 
 /** 扫描间隔。查岗的节奏本身就按分钟算（最短 5 分钟），一分钟扫一遍足够细，
@@ -54,6 +54,17 @@ export function CheckInScheduler() {
      * 服务却未必还在——那时弹窗会静默失败，表现和「到点没反应」一模一样。
      * 这里在读诊断时顺手补一次，且只在「有角色开着 + 服务没跑」时补。
      */
+    const stableDelayMinutes = (characterId: string, lastFiredAt: number, min: number, max: number) => {
+      const input = characterId + ":" + String(lastFiredAt);
+      let hash = 2166136261;
+      for (let i = 0; i < input.length; i += 1) {
+        hash ^= input.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      const span = Math.max(0, max - min);
+      return min + ((hash >>> 0) % (span + 1));
+    };
+
     const syncNativeSchedule = () => {
       const configs = loadCheckInConfig();
       const characters = loadCharacters();
@@ -65,8 +76,9 @@ export function CheckInScheduler() {
         })
         .map(([id, config]) => {
           const runtime = readCharacterRuntime(id);
+          const delay = stableDelayMinutes(id, runtime.lastFiredAt, config.minMinutes, config.maxMinutes);
           const dueAt = runtime.lastFiredAt > 0
-            ? runtime.lastFiredAt + randomCheckInDelayMinutes(config) * 60_000
+            ? runtime.lastFiredAt + delay * 60_000
             : now + config.minMinutes * 60_000;
           const character = characters.find(item => item.id === id);
           return { characterId: id, name: character?.name?.trim() || "角色", dueAt };
@@ -132,8 +144,10 @@ export function CheckInScheduler() {
     // 每一次仍然会弹浮层让用户当场决定。
     const onResume = () => { void scan(); };
     const onVisible = () => { if (document.visibilityState === "visible") void scan(); };
+    const onConfigChanged = () => { void scan(); };
     window.addEventListener("focus", onResume);
     window.addEventListener("pageshow", onResume);
+    window.addEventListener("check-in-config-changed", onConfigChanged);
     document.addEventListener("visibilitychange", onVisible);
 
     return () => {
@@ -142,6 +156,7 @@ export function CheckInScheduler() {
       if (cancelTimer) cancelTimer();
       window.removeEventListener("focus", onResume);
       window.removeEventListener("pageshow", onResume);
+      window.removeEventListener("check-in-config-changed", onConfigChanged);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
