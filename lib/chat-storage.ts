@@ -1432,12 +1432,13 @@ export function createToolExecutionId(): string {
 }
 
 export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "status"> & {
+    id?: string;
     status?: ChatMessageStatus;
     createdAt?: string;
 }): ChatMessage {
     let newMsg: ChatMessage = {
         ...msg,
-        id: createMessageId(),
+        id: msg.id || createMessageId(),
         createdAt: msg.createdAt || new Date().toISOString(),
         order: getNextMessageOrder(msg.sessionId),
         status: msg.status || "sent"
@@ -1512,11 +1513,15 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
 /** Critical entry point: keep normal chat side effects, then wait for IndexedDB persistence. */
 export async function pushChatMessageAndPersist(
     msg: Omit<ChatMessage, "id" | "createdAt" | "status"> & {
+        id?: string;
         status?: ChatMessageStatus;
         createdAt?: string;
     },
 ): Promise<ChatMessage> {
-    const saved = pushChatMessage(msg);
+    // Stable IDs make retries idempotent: a failed IndexedDB write or failed native ACK
+    // must not append the same notification reply to the in-memory chat twice.
+    const existing = msg.id ? _messagesCache.find(item => item.id === msg.id) : undefined;
+    const saved = existing ?? pushChatMessage(msg);
     await dbPutMessageAndWait(saved);
     return saved;
 }
