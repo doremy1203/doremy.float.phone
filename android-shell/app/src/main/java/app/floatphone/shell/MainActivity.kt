@@ -1151,6 +1151,10 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun consumePendingReplies(): String = NotificationReplyReceiver.consumePendingReplies(this@MainActivity)
 
+        /** 网页逐条确认已写入聊天的通知回复，未确认项保留在原生队列中等待重试。 */
+        @JavascriptInterface
+        fun ackPendingReplies(idsJson: String) = NotificationReplyReceiver.ackPendingReplies(this@MainActivity, idsJson)
+
         /**
          * 弹一次查岗预览：截当前屏 → 浮层给用户过目 → 结果经 'checkIn' 事件回推。
          * 只表示「已请求」，用户是否同意要等事件。
