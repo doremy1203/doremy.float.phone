@@ -27,12 +27,6 @@ const nextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
   },
-  typescript: {
-    // 项目有若干历史 TS 错误（chat-message-list 缺模块、weixin 路由 socket 字段、
-    // world-builder SceneViewport prop 不匹配 等），不影响 dev 但 production build 会卡。
-    // 跳过 typecheck 让 build 通过；IDE 和 `npx tsc --noEmit` 仍能看到错误。
-    ignoreBuildErrors: true,
-  },
   outputFileTracingIncludes: {
     "/api/**": ["./data/**"],
   },
