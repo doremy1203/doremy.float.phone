@@ -10,7 +10,7 @@
 // 消息落库）整个跑在 WebView 的 JS 里，原生没有那套逻辑。原生只负责
 // 「别把用户打的字弄丢」——这是它唯一能可靠承担的职责。
 
-import { loadChatSessions, pushChatMessage } from "./chat-storage";
+import { loadChatSessions, pushChatMessageAndPersist } from "./chat-storage";
 import { requestBackgroundChatReply } from "./follow-up-service";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "./shell-call-overlay";
 
@@ -116,9 +116,9 @@ async function flushPendingNotificationRepliesOnce(): Promise<number> {
             bridge()?.ackPendingReplies?.(JSON.stringify([item.id]));
             continue;
         }
-        // pushChatMessage 同步完成本地写入；只有写入成功后才确认原生队列。
-        // 若这里抛错，该条仍留在原生队列，下次页面启动会重试。
-        pushChatMessage({ sessionId: item.sessionId, role: "user", content: text });
+        // 必须等 IndexedDB 真正完成写入后才确认原生队列；更新内存缓存不算持久化成功。
+        // 若存储失败，该条仍留在原生队列，下次页面启动会重试。
+        await pushChatMessageAndPersist({ sessionId: item.sessionId, role: "user", content: text });
         bridge()?.ackPendingReplies?.(JSON.stringify([item.id]));
         touched.add(item.sessionId);
         sent += 1;
