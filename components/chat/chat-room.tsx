@@ -2524,17 +2524,11 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 if (part.mediaType === "voice_call" || part.mediaType === "video_call") {
                     if (session.isSpectator) continue; // 围观群不能把用户卷进群通话
                     const callType = part.mediaType === "voice_call" ? "voice" : "video";
-                    const isHidden = !mountedRef.current || !isChatRoomElementVisible(wrapperRef.current);
-                    if (isHidden) {
-                        window.dispatchEvent(new CustomEvent("ai-call-trigger", {
-                            detail: { sessionId: session.id, type: callType, characterName: r.characterName },
-                        }));
-                    } else {
-                        setCallInitiator("character");
-                        setCallInitiatorName(r.characterName);
-                        if (callType === "voice") setShowVoiceCall(true);
-                        else setShowVideoCall(true);
-                    }
+                    // 通话界面已提升到 DesktopShell 的全局 CallLayer；无论聊天室是否可见，
+                    // 都统一交给全局事件入口，避免使用已移除的聊天室本地通话状态。
+                    window.dispatchEvent(new CustomEvent("ai-call-trigger", {
+                        detail: { sessionId: session.id, type: callType, characterName: r.characterName },
+                    }));
                     continue;
                 }
                 if (part.mediaType === "accept_red_packet") {
