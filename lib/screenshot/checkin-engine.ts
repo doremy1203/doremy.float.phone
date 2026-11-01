@@ -28,7 +28,7 @@ import {
   shouldFireCheckIn,
   type CheckInCharacterConfig,
 } from "./checkin-config";
-import { consumePendingUserShot, hasCheckInBridge, readCheckInCapabilities, requestCheckIn } from "./checkin";
+import { consumePendingUserShot, hasCheckInBridge, notifyCheckInUnavailable, readCheckInCapabilities, requestCheckIn } from "./checkin";
 import type { CheckInOutcome } from "./types";
 import { resolveCheckInGuidance } from "./checkin-guidance";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
@@ -88,7 +88,11 @@ export async function runCheckIn(
   const readiness = checkInReadiness();
   if (!readiness.bridgeAvailable) return { ok: false, reason: "当前 App 版本不支持查岗" };
   if (!readiness.supported) return { ok: false, reason: "系统版本太低，查岗需要 Android 11 及以上" };
-  if (!readiness.accessibilityOn) return { ok: false, reason: "无障碍服务没有开启" };
+  if (!readiness.accessibilityOn) {
+    const characterName = loadCharacters().find(c => c.id === characterId)?.name?.trim() || "角色";
+    notifyCheckInUnavailable(characterName);
+    return { ok: false, reason: "无障碍服务当前未连接，已尝试发送修复通知" };
+  }
   if (!readiness.overlayReady) return { ok: false, reason: "浮窗权限没有授予，弹不出确认浮层" };
 
   const character = loadCharacters().find(c => c.id === characterId);
@@ -311,7 +315,11 @@ export async function requestCheckInForTool(characterId: string): Promise<CheckI
   const readiness = checkInReadiness();
   if (!readiness.bridgeAvailable) return { ok: false, message: "当前 App 版本不支持这个动作，需要更新安卓壳。" };
   if (!readiness.supported) return { ok: false, message: "TA 的系统版本太低（需要 Android 11 及以上），暂时做不到。" };
-  if (!readiness.accessibilityOn) return { ok: false, message: "TA 还没有开启无障碍服务，暂时截不到屏幕。" };
+  if (!readiness.accessibilityOn) {
+    const characterName = loadCharacters().find(c => c.id === characterId)?.name?.trim() || "角色";
+    notifyCheckInUnavailable(characterName);
+    return { ok: false, message: "无障碍服务当前未连接，已提示用户重新开启服务。" };
+  }
   if (!readiness.overlayReady) return { ok: false, message: "TA 还没有授予浮窗权限，弹不出确认框。" };
 
   const sessionId = findLatestPrivateSession(characterId);
