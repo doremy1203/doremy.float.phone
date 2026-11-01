@@ -81,6 +81,19 @@ object CheckInAlarmScheduler {
         return value
     }
 
+    fun diagnosticsJson(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val scheduled = runCatching { JSONObject(prefs.getString(KEY_SCHEDULE, "").orEmpty()) }.getOrNull()
+        val pending = runCatching { JSONObject(prefs.getString(KEY_PENDING, "").orEmpty()) }.getOrNull()
+        return JSONObject()
+            .put("scheduled", scheduled != null)
+            .put("characterName", scheduled?.optString("name", "").orEmpty())
+            .put("dueAt", scheduled?.optLong("dueAt", 0L) ?: 0L)
+            .put("pending", pending != null)
+            .put("opened", prefs.getBoolean(KEY_OPENED, false))
+            .toString()
+    }
+
     private fun alarmPendingIntent(context: Context): PendingIntent =
         PendingIntent.getBroadcast(
             context, 4107,
