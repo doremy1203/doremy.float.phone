@@ -29,6 +29,7 @@ object CheckInAlarmScheduler {
     private const val KEY_PENDING = "pending"
     private const val KEY_OPENED = "opened"
     const val ACTION_OPEN_REMINDER = "app.floatphone.shell.OPEN_CHECKIN_REMINDER"
+    const val ACTION_OPEN_ACCESSIBILITY_SETTINGS = "app.floatphone.shell.OPEN_ACCESSIBILITY_SETTINGS"
     private const val ACTION_ALARM = "app.floatphone.shell.CHECKIN_ALARM"
     private const val CHANNEL = "shell_check_in_reminders"
     private const val NOTIFICATION_ID = 4107
@@ -151,9 +152,10 @@ object CheckInAlarmScheduler {
             context, 4108, openApp,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val accessibilityIntent = PendingIntent.getActivity(
-            context, 4109, Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        val accessibilityIntent = PendingIntent.getBroadcast(
+            context, 4109,
+            Intent(context, CheckInAccessibilitySettingsReceiver::class.java)
+                .setAction(ACTION_OPEN_ACCESSIBILITY_SETTINGS),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val batteryIntent = PendingIntent.getActivity(
@@ -247,6 +249,21 @@ class CheckInAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action == "app.floatphone.shell.CHECKIN_ALARM") {
             CheckInAlarmScheduler.onAlarm(context)
+        }
+    }
+}
+
+
+/** 用户点击修复按钮：先保留并标记待处理查岗，再打开系统无障碍设置。 */
+class CheckInAccessibilitySettingsReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent?) {
+        if (intent?.action != CheckInAlarmScheduler.ACTION_OPEN_ACCESSIBILITY_SETTINGS) return
+        CheckInAlarmScheduler.markReminderOpened(context)
+        runCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
         }
     }
 }
