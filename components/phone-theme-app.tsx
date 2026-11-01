@@ -1220,7 +1220,10 @@ function IconSkinPage({
   const [dockThumbUrl, setDockThumbUrl] = useState<string | null>(null);
   const [iconUrlDrafts, setIconUrlDrafts] = useState<Record<string, string>>(() => {
     const skins = resolveActiveIconSkins(draft);
-    return Object.fromEntries(Object.entries(skins).filter(([, value]) => typeof value === "string" && /^https?:\/\//i.test(value)));
+    return Object.entries(skins).reduce<Record<string, string>>((result, [key, value]) => {
+      if (typeof value === "string" && /^https?:\/\//i.test(value)) result[key] = value;
+      return result;
+    }, {});
   });
   const [uploadTarget, setUploadTarget] = useState<DesktopIconId | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<{ iconId: DesktopIconId; assetId: string } | null>(null);
