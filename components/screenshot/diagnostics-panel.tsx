@@ -125,6 +125,7 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
         { label: "无障碍系统开关", value: nativeCheckIn.accessibilityEnabledInSettings ? "系统设置显示已开启" : "系统设置显示未开启", tone: nativeCheckIn.accessibilityEnabledInSettings ? "ok" : "bad" },
         { label: "无障碍实例", value: nativeCheckIn.accessibilityConnected ? "当前已连接" : "未连接 / 可能被系统回收", tone: nativeCheckIn.accessibilityConnected ? "ok" : "bad" },
         { label: "通知权限", value: nativeCheckIn.notificationsEnabled ? "允许通知" : "通知被关闭，无法显示故障横幅", tone: nativeCheckIn.notificationsEnabled ? "ok" : "bad" },
+        { label: "忽略电池优化", value: nativeCheckIn.ignoringBatteryOptimizations ? "已允许" : "未允许（建议开启）", tone: nativeCheckIn.ignoringBatteryOptimizations ? "ok" : "warn" },
         { label: "原生闹钟", value: nativeCheckIn.scheduled ? "已登记" : "未登记", tone: nativeCheckIn.scheduled ? "ok" : "warn" },
         ...(nativeCheckIn.scheduled
           ? [{ label: "下次提醒", value: `${nativeCheckIn.characterName || "角色"} · ${formatWhen(nativeCheckIn.dueAt)}`, tone: "ok" as const }]
