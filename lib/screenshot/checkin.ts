@@ -59,7 +59,7 @@ export function consumePendingUserShot(): CheckInOutcome | null {
   try {
     const raw = bridge()?.consumePendingUserShot?.();
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { accepted?: boolean; base64?: string; width?: number; height?: number; reply?: string; reason?: string; characterId?: string };
+    const parsed = JSON.parse(raw) as { accepted?: boolean; base64?: string; width?: number; height?: number; bytes?: number; reply?: string; reason?: string; characterId?: string };
     const reply = typeof parsed?.reply === "string" && parsed.reply.trim() ? parsed.reply.trim() : undefined;
     // 目标角色：浮层里当场选的那个（或者设了默认角色时的默认值）。
     // 老壳不带这个字段 → undefined，调用方退回「最近聊过的私聊会话」。
@@ -72,6 +72,7 @@ export function consumePendingUserShot(): CheckInOutcome | null {
         base64: parsed.base64,
         width: typeof parsed.width === "number" ? parsed.width : 0,
         height: typeof parsed.height === "number" ? parsed.height : 0,
+        bytes: typeof parsed.bytes === "number" ? parsed.bytes : undefined,
         reply,
         characterId,
       };
