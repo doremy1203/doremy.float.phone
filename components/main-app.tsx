@@ -19,6 +19,7 @@ import { getThemeAssetMap, readThemeProfile } from "@/lib/theme-storage";
 import { resolveActiveIconSkins, type ThemeProfile } from "@/lib/theme-types";
 import { hasPendingMcpOAuthCallback } from "@/lib/tool-executor";
 import { shouldRequestPwaFullscreen } from "@/lib/pwa-display-mode";
+import { hasPendingNativeCheckIn } from "@/lib/screenshot";
 
 const TEXT = {
   loading: "\u52A0\u8F7D\u4E2D...",
@@ -264,7 +265,8 @@ export function MainApp() {
       if (cancelled) return;
       setPreparedDesktopTheme(nextPreparedTheme);
       setHydrated(true);
-      if (hasPendingMcpOAuthCallback()) {
+      if (hasPendingMcpOAuthCallback() || hasPendingNativeCheckIn()) {
+        // 用户点了原生查岗提醒时直接进入桌面，避免提醒被启动页挡住。
         setSplashDismissed(true);
       }
     })();
