@@ -71,6 +71,12 @@ object CheckInAlarmScheduler {
             .putBoolean(KEY_OPENED, true).apply()
     }
 
+    fun hasPending(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_OPENED, false) &&
+            prefs.getString(KEY_PENDING, "").orEmpty().isNotBlank()
+    }
+
     fun consumePending(context: Context): String {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (!prefs.getBoolean(KEY_OPENED, false)) return ""
