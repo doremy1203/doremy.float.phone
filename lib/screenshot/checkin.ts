@@ -29,6 +29,7 @@ type CheckInBridgeLike = {
   consumePendingCheckIn?: () => string;
   hasPendingCheckIn?: () => boolean;
   getNativeCheckInDiagnostics?: () => string;
+  notifyCheckInUnavailable?: (characterName: string) => void;
 };
 
 function bridge(): CheckInBridgeLike | null {
@@ -101,6 +102,11 @@ export function consumePendingNativeCheckIn(): string | null {
   } catch {
     return null;
   }
+}
+
+/** 无障碍实例断连时显示 Android 原生修复通知（浏览器/旧壳自动忽略）。 */
+export function notifyCheckInUnavailable(characterName: string): void {
+  try { bridge()?.notifyCheckInUnavailable?.(characterName); } catch { /* 通知失败不影响主流程 */ }
 }
 
 /** 壳是否提供查岗浮层（老 APK 没有）。 */
