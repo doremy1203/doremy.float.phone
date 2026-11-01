@@ -66,6 +66,9 @@ export type NativeCheckInDiagnostics = {
   dueAt: number;
   pending: boolean;
   opened: boolean;
+  accessibilityConnected: boolean;
+  accessibilityEnabledInSettings: boolean;
+  notificationsEnabled: boolean;
 };
 
 export function readNativeCheckInDiagnostics(): NativeCheckInDiagnostics | null {
@@ -79,6 +82,9 @@ export function readNativeCheckInDiagnostics(): NativeCheckInDiagnostics | null 
       dueAt: Number(parsed.dueAt) || 0,
       pending: parsed.pending === true,
       opened: parsed.opened === true,
+      accessibilityConnected: parsed.accessibilityConnected === true,
+      accessibilityEnabledInSettings: parsed.accessibilityEnabledInSettings === true,
+      notificationsEnabled: parsed.notificationsEnabled === true,
     };
   } catch {
     return null;
