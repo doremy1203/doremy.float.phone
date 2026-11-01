@@ -26,7 +26,6 @@ import {
   pollDueCheckIns,
   prepareCheckInService,
   readCheckInDiagnostics,
-  startUserShotBridge,
 } from "@/lib/screenshot";
 
 /** 扫描间隔。查岗的节奏本身就按分钟算（最短 5 分钟），一分钟扫一遍足够细，
@@ -102,7 +101,6 @@ export function CheckInScheduler() {
       disposed = true;
       cancelFirstScan();
       if (cancelTimer) cancelTimer();
-      stopUserShotBridge();
       window.removeEventListener("focus", onResume);
       window.removeEventListener("pageshow", onResume);
       document.removeEventListener("visibilitychange", onVisible);
