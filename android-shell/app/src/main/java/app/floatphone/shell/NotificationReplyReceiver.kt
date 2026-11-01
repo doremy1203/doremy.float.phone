@@ -58,14 +58,29 @@ class NotificationReplyReceiver : BroadcastReceiver() {
             }
         }
 
-        /** 读走并清空待发队列（JSON 数组字符串）。网页拉到后逐条发送。 */
+        /** 读取待发队列但不清空；网页成功写入聊天后再逐条确认，避免读取后页面崩溃造成丢消息。 */
         fun consumePendingReplies(context: Context): String =
             runCatching {
                 val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                val raw = prefs.getString(KEY_QUEUE, "[]") ?: "[]"
-                prefs.edit().putString(KEY_QUEUE, "[]").apply()
-                raw
+                prefs.getString(KEY_QUEUE, "[]") ?: "[]"
             }.getOrDefault("[]")
+
+        /** 仅删除网页已成功写入聊天的回复；未确认项会在下次页面启动时重试。 */
+        fun ackPendingReplies(context: Context, idsJson: String) {
+            runCatching {
+                val ids = JSONArray(idsJson)
+                val acknowledged = (0 until ids.length()).mapNotNull { ids.optString(it).takeIf(String::isNotBlank) }.toSet()
+                if (acknowledged.isEmpty()) return
+                val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                val current = JSONArray(prefs.getString(KEY_QUEUE, "[]") ?: "[]")
+                val remaining = JSONArray()
+                for (i in 0 until current.length()) {
+                    val item = current.optJSONObject(i) ?: continue
+                    if (item.optString("id") !in acknowledged) remaining.put(item)
+                }
+                prefs.edit().putString(KEY_QUEUE, remaining.toString()).commit()
+            }
+        }
     }
 
     override fun onReceive(context: Context, intent: Intent) {
