@@ -48,13 +48,22 @@ class CallControlService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        // 无需处理：本服务不阻塞任何交互
+        connected = false
+        ScreenshotBridge.attach(null)
+        // 系统明确通知服务被中断时立即提示；只在已有查岗计划时提醒，避免无关打扰。
+        if (CheckInAlarmScheduler.hasScheduledCheckIn(this)) {
+            CheckInAlarmScheduler.showAccessibilityRecoveryNotification(this)
+        }
     }
 
     override fun onDestroy() {
         connected = false
         // 摘掉实例，否则重连前截屏桥会拿着一个已销毁的服务去调 takeScreenshot。
         ScreenshotBridge.attach(null)
+        // onDestroy 并非所有系统回收场景都会回调；闹钟到点仍会再做一次检测。
+        if (CheckInAlarmScheduler.hasScheduledCheckIn(this)) {
+            CheckInAlarmScheduler.showAccessibilityRecoveryNotification(this)
+        }
         super.onDestroy()
     }
 }
