@@ -8,7 +8,7 @@ on:
         required: false
         type: string
   push:
-    branches: [main]
+    branches: [test]
     paths: ["android-shell/**", ".github/workflows/android-shell.yml"]
 
 jobs:
