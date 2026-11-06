@@ -11,6 +11,8 @@ export type MomentPost = {
     photoUseReferenceImage?: boolean; // AI-generated photo should use character reference image
     photoGenerationStatus?: "pending" | "failed" | "generated";
     photoGenerationPrompt?: string;
+    /** 重新生图时显式选择的出镜角色 ID（含 "__user__"）。 */
+    photoGenerationCharacterIds?: string[];
     photoGenerationError?: string;
     photoCompressedAt?: string;
     photoCleanedAt?: string;

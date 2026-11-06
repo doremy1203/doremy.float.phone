@@ -1,3 +1,7 @@
+-- ⚠️ 旧版推送 Cron 迁移脚本，仅供已部署旧版 push-jobs-scan 的项目维护。
+-- 新版个人云请使用 docs/personal-push-supabase.sql：当前扫描 Cron 为每分钟，
+-- 且任务名为 ai-phone-personal-push-jobs-scan；不要把本脚本应用到新个人云项目。
+-- 执行前先核对目标 Supabase Project Ref、push_jobs 表结构、函数 URL 与现有 Cron。
 -- 离线推送扫描频率迁移：push-jobs-scan 改为每 10 秒、单轮最多 10 单。
 -- 幂等：cron.schedule 同名覆盖，可安全重跑。
 -- 用法：先把下方两处 YOUR-PROJECT-REF 换成你自己的 Supabase Project Ref，

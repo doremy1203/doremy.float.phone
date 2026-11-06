@@ -18,6 +18,7 @@ import {
   MoreHorizontal,
   ChevronDown,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { CheckPhoneBilingualText, normalizeCheckPhoneText } from "@/components/checkphone/checkphone-bilingual-text";
 import { CheckPhoneDebugErrorCard } from "@/components/checkphone/checkphone-debug-error-card";
 import { ConfirmDialog } from "@/components/ui";
@@ -51,7 +52,7 @@ type CheckPhoneWeiboPageProps = {
 
 type WeiboTabId = "home" | "trending" | "messages" | "profile";
 
-const WEIBO_TABS: Array<{ id: WeiboTabId; label: string; icon: any }> = [
+const WEIBO_TABS: Array<{ id: WeiboTabId; label: string; icon: LucideIcon }> = [
   { id: "home", label: "微博", icon: House },
   { id: "trending", label: "发现", icon: Search },
   { id: "messages", label: "消息", icon: MessageSquare },

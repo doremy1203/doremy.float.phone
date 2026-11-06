@@ -1,5 +1,7 @@
 "use client";
 
+import { isCompatibilityFeatureEnabled } from "../device-compatibility";
+
 // 设备动作 ↔ 安卓壳的原生桥对接层。
 //
 // 与 lib/perception/bridge.ts 同一套路：非壳环境一律安全降级为 no-op，
@@ -28,7 +30,7 @@ type DeviceActionBridgeLike = {
 };
 
 function bridge(): DeviceActionBridgeLike | null {
-  if (typeof window === "undefined") return null;
+  if (typeof window === "undefined" || !isCompatibilityFeatureEnabled("deviceActions")) return null;
   const candidate = (window as unknown as { AndroidShell?: DeviceActionBridgeLike }).AndroidShell;
   return candidate && typeof candidate === "object" ? candidate : null;
 }
@@ -42,7 +44,7 @@ export function hasDeviceActionBridge(): boolean {
 function parseResult(raw: unknown, fallbackReason: string): DeviceActionResult {
   if (typeof raw !== "string" || !raw) return { ok: false, reason: fallbackReason };
   try {
-    const parsed = JSON.parse(raw) as { ok?: unknown; reason?: unknown; needPermission?: unknown; [key: string]: unknown };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (parsed && parsed.ok === true) {
       return { ...parsed, ok: true } as DeviceActionResult;
     }

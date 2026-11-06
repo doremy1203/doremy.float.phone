@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from "re
 import {
     type CallAutoChatConfig,
     type CallAutoChatStatus,
+    MAX_INTERVAL_SECONDS,
     MAX_TURNS_LIMIT,
     MIN_INTERVAL_SECONDS,
     readCallAutoChatStatus,
@@ -73,7 +74,7 @@ function heartbeatText(status: CallAutoChatStatus, now: number): { text: string;
 type CallAutoChatControlProps = {
     config: CallAutoChatConfig;
     /** 改一项设置（内部会存盘并广播，节拍随之复位） */
-    onUpdate: (patch: Partial<CallAutoChatConfig>) => CallAutoChatConfig;
+    onUpdate: (patch: Partial<CallAutoChatConfig>) => void;
 };
 
 export function CallAutoChatControl({ config, onUpdate }: CallAutoChatControlProps) {
@@ -265,8 +266,10 @@ export function CallAutoChatControl({ config, onUpdate }: CallAutoChatControlPro
                             defaultValue={config.minSeconds}
                             title={`最小 ${MIN_INTERVAL_SECONDS} 秒`}
                             onBlur={(e) => {
-                                const next = onUpdate({ minSeconds: Number(e.target.value) });
-                                e.target.value = String(next.minSeconds);
+                                const value = Number(e.target.value);
+                                const minSeconds = Number.isFinite(value) ? Math.min(MAX_INTERVAL_SECONDS, Math.max(MIN_INTERVAL_SECONDS, Math.round(value))) : config.minSeconds;
+                                onUpdate({ minSeconds });
+                                e.target.value = String(minSeconds);
                             }}
                             style={NUM_INPUT_STYLE}
                         />
@@ -280,8 +283,10 @@ export function CallAutoChatControl({ config, onUpdate }: CallAutoChatControlPro
                             defaultValue={config.maxSeconds}
                             title="不小于静默下限"
                             onBlur={(e) => {
-                                const next = onUpdate({ maxSeconds: Number(e.target.value) });
-                                e.target.value = String(next.maxSeconds);
+                                const value = Number(e.target.value);
+                                const maxSeconds = Number.isFinite(value) ? Math.min(MAX_INTERVAL_SECONDS, Math.max(config.minSeconds, Math.round(value))) : config.maxSeconds;
+                                onUpdate({ maxSeconds });
+                                e.target.value = String(maxSeconds);
                             }}
                             style={NUM_INPUT_STYLE}
                         />
@@ -296,8 +301,10 @@ export function CallAutoChatControl({ config, onUpdate }: CallAutoChatControlPro
                             defaultValue={config.maxTurns}
                             title="0 = 不限"
                             onBlur={(e) => {
-                                const next = onUpdate({ maxTurns: Number(e.target.value) });
-                                e.target.value = String(next.maxTurns);
+                                const value = Number(e.target.value);
+                                const maxTurns = Number.isFinite(value) ? Math.min(MAX_TURNS_LIMIT, Math.max(0, Math.round(value))) : config.maxTurns;
+                                onUpdate({ maxTurns });
+                                e.target.value = String(maxTurns);
                             }}
                             style={NUM_INPUT_STYLE}
                         />

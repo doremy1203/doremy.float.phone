@@ -32,6 +32,7 @@ import { useCallAutoChat } from "./use-call-auto-chat";
 import { useCallReplyQueue } from "./use-call-reply-queue";
 import { CallSubtitleItem, type CallSubtitleAction } from "./call-subtitle-item";
 import { stopShellCallOverlay } from "@/lib/shell-call-overlay";
+import { beginTurn, type TurnHandle } from "@/lib/turn-coordinator";
 
 // ── Types ───────────────────────────────────────────
 
@@ -99,6 +100,18 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const [inputMode, setInputMode] = useState<"voice" | "text">(() => androidTextInputOnly ? "text" : "voice");
     const [typedText, setTypedText] = useState("");
     const [bgImageResolved, setBgImageResolved] = useState<string | null>(null);
+
+    // 通话是交互阻塞态：通话期间所有主动消息让路；挂断/卸载时 abort 当前通话 turn。
+    const callTurnRef = useRef<TurnHandle | null>(null);
+    useEffect(() => {
+        const turn = beginTurn({ kind: "call", characterId: character.id, sessionId: session.id });
+        callTurnRef.current = turn;
+        return () => {
+            turn?.abort();
+            turn?.end();
+            callTurnRef.current = null;
+        };
+    }, [character.id, session.id]);
     const [cameraEnabled, setCameraEnabled] = useState(false);
     const [cameraFacingMode, setCameraFacingMode] = useState<"user" | "environment">("user");
     const [cameraError, setCameraError] = useState<string | null>(null);
@@ -496,6 +509,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             const frame = captureCameraFrame();
             const aiResponseText = flattenCompletionResult(await generateChatCompletion(session, messagesRef.current, {
                 appTags: ["chat", "video"],
+                signal: callTurnRef.current?.signal,
                 attachedImages: frame ? [frame] : undefined,
             }));
             if (stateRef.current === "ENDED") return;
@@ -557,9 +571,9 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 autoChatNotifyRef.current?.assistantSpoke(true);
                 setCallState("IDLE");
             }
-        } catch (error: any) {
+        } catch (error: unknown) {
             if (stateRef.current !== "ENDED") {
-                setSubtitles(prev => [...prev, { id: `err-${Date.now()}`, role: "assistant", text: `⚠️ ${error?.message || "发送失败"}` }]);
+                setSubtitles(prev => [...prev, { id: `err-${Date.now()}`, role: "assistant", text: `⚠️ ${error instanceof Error ? error.message : String(error)}` }]);
                 autoChatNotifyRef.current?.assistantSpoke(false);
                 setCallState("IDLE");
             }

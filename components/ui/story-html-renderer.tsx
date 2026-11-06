@@ -4,6 +4,7 @@ import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "reac
 import { Loader2 } from "lucide-react";
 import { LanguageIcon } from "@heroicons/react/24/solid";
 import { marked } from "marked";
+import DOMPurify, { type Config as DOMPurifyConfig } from "dompurify";
 import { translateReasoningText } from "@/lib/reasoning-translate";
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
 
@@ -174,8 +175,13 @@ function splitNonFoldContent(text: string): Segment[] {
 /** Scope CSS selectors inside <style> blocks to prevent leaking */
 function scopeStyles(html: string, scopeClass: string): string {
     return html.replace(/<style>([\s\S]*?)<\/style>/gi, (_match, css: string) => {
+        // CSS 里不允许 javascript:/expression()/@import 这类可执行/外部拉取入口
+        const filteredCss = css
+            .replace(/@import[^;]+;/gi, "")
+            .replace(/expression\s*\(/gi, "")
+            .replace(/javascript\s*:/gi, "");
         // Prefix each CSS rule selector with the scope class
-        const scoped = css.replace(
+        const scoped = filteredCss.replace(
             /([^{}@/][^{}]*)\{/g,
             (ruleMatch: string, selector: string) => {
                 const trimmed = selector.trim();
@@ -208,6 +214,34 @@ function escapeHtmlAttribute(value: string): string {
         .replace(/"/g, "&quot;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
+}
+
+const DOMPURIFY_CONFIG: DOMPurifyConfig = {
+    ADD_TAGS: ["style"],
+    ADD_ATTR: ["style"],
+    FORBID_TAGS: ["script", "iframe", "object", "embed", "form", "input", "textarea", "select", "option", "meta", "link", "base"],
+    FORBID_ATTR: ["srcdoc"],
+    ALLOW_DATA_ATTR: true,
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|data:image\/)/i,
+};
+
+/**
+ * 故事正文来自 AI/导入文件/用户编辑，不能当“可信 HTML”直接进主 DOM。
+ * 这里统一 sanitize；SSR 阶段没有 window 时退化到最小清理（去掉 script/on* 属性）。
+ * 语音/语义占位符在 sanitize 之后才注入，因为它们是代码生成的可信 HTML。
+ */
+function sanitizeStoryHtml(html: string): string {
+    if (!html) return "";
+    if (typeof window === "undefined") {
+        return html
+            .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+            .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
+    }
+    // dompurify 在浏览器里默认导出通常是已初始化的实例；在个别打包环境里
+    // 仍是 createDOMPurify 工厂。两种都兼容，避免运行时 sanitize 不存在。
+    const candidate = DOMPurify as unknown as { sanitize?: (value: string, config: unknown) => string } & ((window: Window) => { sanitize: (value: string, config: unknown) => string });
+    const purifier = (typeof candidate.sanitize === "function" ? candidate : candidate(window)) as { sanitize: (value: string, config: unknown) => string };
+    return purifier.sanitize(html, DOMPURIFY_CONFIG);
 }
 
 function parseLegacyStoryVoiceMarker(inner: string): { text: string; speaker?: string } {
@@ -275,9 +309,11 @@ function MarkdownSegment({
         customTagsPrepared = customTagsPrepared.replace(/<(story_[a-zA-Z0-9_-]+)([^>]*)>([\s\S]*?)<\/\1>/g, (wholeMatch, tagName, attrs, innerHTML) => {
             const token = `STORYCUSTOMTAGPLACEHOLDER${customTagPlaceholders.length}END`;
             // 不转义 innerHTML，允许用户在方案里直接写 <div class="..."> 等 HTML
+            const safeAttrs = String(attrs || "").replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
             customTagPlaceholders.push({
                 token,
-                html: `<${tagName}${attrs}>${innerHTML}</${tagName}>`,
+                // 自定义标签内部的 HTML 同样不可信；先 sanitize，避免绕过主 sanitize。
+                html: `<${tagName}${safeAttrs}>${sanitizeStoryHtml(innerHTML)}</${tagName}>`,
             });
             return token;
         });
@@ -302,14 +338,19 @@ function MarkdownSegment({
         // 1. Markdown → HTML
         const rawHtml = marked.parse(preprocessed, { async: false }) as string;
 
-        // 2. Strip only <script> tags (security), keep everything else as-is
-        //    No DOMPurify — regex-processed HTML is user-configured and trusted
-        let clean = rawHtml.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
+        // 2. Sanitize AI/导入/用户编辑的 HTML；语音/语义占位符在 sanitize 之后注入。
+        let clean = sanitizeStoryHtml(rawHtml);
 
         // 2.5 单换行(<br>)后的行也做首行缩进：CSS text-indent 只作用于段落首行，
         //     标准的 each-line 关键字浏览器均未实现，这里在每个 <br> 后插入
         //     2em 占位符模拟；折叠块/系统消息内由 CSS 把占位符宽度归零
         clean = clean.replace(/<br\s*\/?>/gi, '<br><span class="story-br-indent"></span>');
+
+        // 2.6 先把自定义标签还原，再统一 scope/filter 其中的 <style>；
+        // 否则自定义标签里的 style 会绕过 scopeStyles。
+        for (const placeholder of customTagPlaceholders) {
+            clean = clean.replace(placeholder.token, placeholder.html);
+        }
 
         // 3. Scope <style> blocks to prevent CSS leaking
         const scoped = scopeStyles(clean, scopeClass);
@@ -325,9 +366,6 @@ function MarkdownSegment({
             trimmed = trimmed.replace(placeholder.token, placeholder.html);
         }
         for (const placeholder of semanticPlaceholders) {
-            trimmed = trimmed.replace(placeholder.token, placeholder.html);
-        }
-        for (const placeholder of customTagPlaceholders) {
             trimmed = trimmed.replace(placeholder.token, placeholder.html);
         }
         trimmed = trimmed.replace(/<em>/g, '<em class="story-thought">');

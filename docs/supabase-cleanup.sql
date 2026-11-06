@@ -1,3 +1,12 @@
+-- ⚠️ 高风险维护脚本（历史站点库工具，不是通用一键清理）
+-- 仅对已确认包含相应站点业务表的 Supabase 项目按需选段执行。
+-- 不要在新建的个人推送专用 Supabase 项目中整份运行：其中若干语句针对站点账号、
+-- 市场、审核和旧版共享推送表；新个人云 Schema 与这些表并不等价。
+-- 执行前必须备份、核对目标项目 ref、逐项确认表存在，并先查看 DELETE 影响行数。
+-- 不要整份复制执行：文件中包含 DELETE、TRUNCATE 和 VACUUM FULL 示例；必须人工选段。
+-- 本文中的 2026-08 数据库体积与“10 秒扫描”是旧环境历史观测，不代表当前个人云配置。
+-- 当前个人云使用 docs/personal-push-supabase.sql 中的分钟级 Cron 与自动日志清理。
+
 -- ═══════════════════════════════════════════════════════════════════
 -- Supabase 空间体检 + 清理（Database Size 快满时用）
 --
@@ -14,13 +23,13 @@
 --
 -- 2026-08 实测：数据库 444 MB 里有 369 MB（83%）是这张表——推送扫描
 -- 任务 10 秒一跑，每天写 8640 行执行记录，一个月堆了 23 万行。
--- 它是纯日志，清空不影响任何业务，且 truncate 即时回收空间、无需 VACUUM。
+-- 它通常是 Cron 执行日志，但清空会移除审计/排障历史；只有确认保留要求、目标 schema 和影响范围后才考虑清理。
 --
 -- 先看它有多大：
 --   select pg_size_pretty(pg_total_relation_size('cron.job_run_details'::regclass)),
 --          count(*) from cron.job_run_details;
 --
--- 清空（几百 MB 一秒回收）：
+-- ⚠️ 破坏性操作示例：会删除全部 Cron 执行历史；确认后才可手动执行：
 --   truncate table cron.job_run_details;
 --
 -- 装上自动清理，防止再堆（每天 03:20 UTC 删两天前的记录，只需执行一次）：
@@ -52,7 +61,7 @@ order by pg_total_relation_size(c.oid) desc
 limit 30;
 
 -- ═══════════════════════════════════════════════════════════════════
--- 第 2 步 · 清理（每条都可以单独执行；先跑体检确认主犯再动手）
+-- 第 2 步 · 清理（逐段选择；先备份、核对目标库与表存在，再执行）
 -- ═══════════════════════════════════════════════════════════════════
 
 -- ① 过期登录会话（登录态早已失效的记录，删了用户无感）
@@ -137,5 +146,5 @@ delete from public.mixology_recipes
 -- vacuum full public.push_outbox;
 -- vacuum full public.game_hall_games;
 
--- 收尾：全库轻量 vacuum + 刷新统计（不锁表，随便跑）
+-- 收尾：VACUUM ANALYZE 需在事务块外执行；它不会像 VACUUM FULL 那样压缩文件体积
 vacuum analyze;

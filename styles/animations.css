@@ -483,3 +483,9 @@
     display: none;
   }
 }
+
+
+@keyframes photoAlbumPageTurn {
+  from { opacity: .72; transform: perspective(900px) rotateY(-5deg) translateX(-5px); filter: brightness(.96); }
+  to { opacity: 1; transform: perspective(900px) rotateY(0deg) translateX(0); filter: brightness(1); }
+}

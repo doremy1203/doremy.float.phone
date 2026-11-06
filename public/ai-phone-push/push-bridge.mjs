@@ -286,13 +286,17 @@ async function decryptPayload(payload: EncryptedPayload, serviceKey: string): Pr
 
 type JobRow = { id: string; user_id: string; trigger_key: string; kind: string };
 type SubscriptionRow = { endpoint: string; p256dh: string; auth: string };
-type BridgeItem = { id: string; type: string; payload: string; createdAt: string };
+type BridgeItem = { id: string; type: string; payload: string; createdAt: string; scheduledRuleId?: string };
 
 type ServerBridgeRule = {
   id: string;
   name: string;
   matchType: string;
+  payloadFilter?: string;
   cooldownMinutes?: number;
+  schedule?: { kind: "daily" | "weekly" | "interval"; time?: string; weekday?: number; minutes?: number };
+  timeZone?: string;
+  createdAt?: string;
   process: { mode: "raw" | "template" | "ai"; template?: string };
   chat?: {
     characterId: string;
@@ -324,6 +328,64 @@ type BridgeConfigRow = {
 
 type SnapshotRow = { rule_id: string; payload: EncryptedPayload };
 
+
+/** Interpret scheduled rules in the IANA timezone captured when the rule was synced. */
+function scheduleDue(rule: ServerBridgeRule, now: Date, lastRunAt: number): boolean {
+  const schedule = rule.schedule;
+  if (!schedule) return false;
+  if (schedule.kind === "interval") {
+    const minutes = Math.max(1, Math.min(10080, Number(schedule.minutes) || 1));
+    return now.getTime() - lastRunAt >= minutes * 60_000;
+  }
+  const match = /^(\d{1,2}):(\d{2})$/.exec(schedule.time || "");
+  if (!match) return false;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) return false;
+  const timeZone = rule.timeZone || "UTC";
+  const parts: Record<string, string> = {};
+  try {
+    for (const part of new Intl.DateTimeFormat("en-US", {
+      timeZone, weekday: "short", year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(now)) parts[part.type] = part.value;
+  } catch {
+    return false;
+  }
+  if (!parts.year || !parts.month || !parts.day || !parts.weekday) return false;
+  const weekdayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  let year = Number(parts.year), month = Number(parts.month), day = Number(parts.day);
+  if (schedule.kind === "weekly") {
+    const wanted = Math.max(0, Math.min(6, Number(schedule.weekday) || 0));
+    const localWeekday = weekdayMap[parts.weekday];
+    const date = new Date(Date.UTC(year, month - 1, day - ((localWeekday - wanted + 7) % 7)));
+    year = date.getUTCFullYear(); month = date.getUTCMonth() + 1; day = date.getUTCDate();
+  }
+  // Convert the intended wall-clock time in timeZone to an epoch, including DST.
+  const targetWall = Date.UTC(year, month - 1, day, hour, minute, 0);
+  let targetEpoch = targetWall;
+  try {
+    const formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+    });
+    for (let i = 0; i < 3; i++) {
+      const p: Record<string, string> = {};
+      for (const part of formatter.formatToParts(new Date(targetEpoch))) p[part.type] = part.value;
+      const represented = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day),
+        Number(p.hour), Number(p.minute), Number(p.second));
+      targetEpoch += targetWall - represented;
+    }
+  } catch {
+    return false;
+  }
+  if (now.getTime() < targetEpoch) return false;
+  const createdAtMs = Date.parse(rule.createdAt || "") || 0;
+  if (lastRunAt <= 0 && createdAtMs > targetEpoch) return false;
+  return lastRunAt < targetEpoch;
+}
+
+
+
 type RuleSnapshot = {
   replyRequest?: { url: string; headers: Record<string, string>; body: Record<string, unknown>; providerKind: ProviderKind };
   processRequest?: { url: string; headers: Record<string, string>; body: Record<string, unknown>; providerKind: ProviderKind };
@@ -344,6 +406,13 @@ type RuleSnapshot = {
 const INBOX_PREFIX = "bridge-inbox/";
 const BACKUP_BUCKET = "ai-phone-backup";
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+function payloadFilterMatches(filter: string | undefined, payload: string): boolean {
+  const terms = String(filter || "").split(/[|,]/).map(term => term.trim().toLocaleLowerCase()).filter(Boolean);
+  if (terms.length === 0) return true;
+  const value = payload.toLocaleLowerCase();
+  return terms.some(term => value.includes(term));
+}
 
 function parseBridgeItem(name: string, text: string): BridgeItem | null {
   try {
@@ -455,11 +524,6 @@ Deno.serve(async (req: Request) => {
     const fileNames = (Array.isArray(objects) ? objects : [])
       .map(obj => String(obj.name ?? ""))
       .filter(name => name && !name.endsWith("/") && name !== ".emptyFolderPlaceholder");
-    if (fileNames.length === 0) {
-      await finish("done", "inbox empty (client handled)");
-      return;
-    }
-
     const items: BridgeItem[] = [];
     for (const name of fileNames) {
       const path = `${INBOX_PREFIX}${name}`;
@@ -477,8 +541,27 @@ Deno.serve(async (req: Request) => {
       }
     }
     items.sort((a, b) => a.id.localeCompare(b.id));
+
+    // Only the dedicated periodic scan triggers scheduled rules; signal scans never do.
+    if (job.trigger_key.startsWith("bridge:schedule:")) {
+      const scheduleNow = new Date();
+      const lastRuns = config.rule_runs || {};
+      const scheduledRules = (Array.isArray(config.rules) ? config.rules : [])
+        .filter((rule: ServerBridgeRule) => Boolean(rule.schedule)
+          && scheduleDue(rule, scheduleNow, lastRuns[rule.id] ? Date.parse(lastRuns[rule.id]) || 0 : 0));
+      for (const rule of scheduledRules) {
+        items.push({
+          id: `schedule_${rule.id}_${Math.floor(scheduleNow.getTime() / 60_000)}`,
+          type: rule.matchType || "定时联动",
+          payload: rule.name || "定时触发",
+          createdAt: scheduleNow.toISOString(),
+          scheduledRuleId: rule.id,
+        });
+      }
+    }
+
     if (items.length === 0) {
-      await finish("done", "no parsable items");
+      await finish("done", "inbox empty (client handled; no scheduled rules due)");
       return;
     }
 
@@ -700,7 +783,11 @@ Deno.serve(async (req: Request) => {
     let generated = 0;
 
     for (const item of items) {
-      const matched = rules.filter(rule => rule.matchType === "*" || rule.matchType === item.type);
+      const matched = item.scheduledRuleId
+        ? rules.filter(rule => rule.id === item.scheduledRuleId && Boolean(rule.schedule))
+        : rules.filter(rule => !rule.schedule
+          && (rule.matchType === "*" || rule.matchType === item.type)
+          && payloadFilterMatches(rule.payloadFilter, item.payload));
       if (matched.length === 0) {
         outboxRows.push({
           id: `out_${crypto.randomUUID()}`,

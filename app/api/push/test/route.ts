@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getCurrentAccount } from "@/lib/server/account-auth";
-import { resolvePushSubject, sendPushToUser } from "@/lib/server/push-service";
+import { broadcastShellNotify, resolvePushSubject, sendPushToUser } from "@/lib/server/push-service";
 import { encodeSupabaseFilter, formatSupabaseRestError, getSupabaseServerConfig, supabaseRestFetch } from "@/lib/server/supabase-rest";
 
 /**
@@ -23,7 +23,8 @@ async function runTest(request: Request, includeDiagnostics: boolean) {
       return NextResponse.json({ ok: false, step: "account", error: "未登录。" }, { status: 401 });
     }
 
-    // 自检时把「这个账号名下有哪些订阅」原样列出：壳订阅应当以 shell: 开头出现。
+    const testBody = request.method === "POST" ? await request.clone().json().catch(() => ({})) as Record<string, unknown> : {};
+    // 生活现场专用测试：只广播到安卓壳 Realtime 通道，不把网页内预览冒充原生通知。
     // 只查本账号——这正是与个人云那套 OWNER_ID 寻址的关键差异，也是本链路可靠的原因。
     let subscriptions: { endpoint: string; user_id: string }[] = [];
     let shellEndpoints: string[] = [];
@@ -33,6 +34,32 @@ async function runTest(request: Request, includeDiagnostics: boolean) {
       );
       subscriptions = subs.ok ? subs.data : [];
       shellEndpoints = subscriptions.filter(row => row.endpoint.startsWith("shell:")).map(row => row.endpoint);
+    }
+
+    if (testBody.kind === "life_scene") {
+      const sessionId = typeof testBody.sessionId === "string" ? testBody.sessionId.trim() : "";
+      const sceneId = typeof testBody.sceneId === "string" ? testBody.sceneId.trim() : "";
+      if (!sessionId || !sceneId) return NextResponse.json({ ok: false, step: "life-scene-payload", error: "缺少生活现场 sessionId 或 sceneId。" }, { status: 400 });
+      const shellSubsResult = await supabaseRestFetch<{ endpoint: string }[]>(
+        "push_subscriptions?user_id=eq." + encodeSupabaseFilter(account.id) + "&select=endpoint&limit=50",
+      );
+      if (!shellSubsResult.ok) return NextResponse.json({ ok: false, step: "subscriptions", error: shellSubsResult.error }, { status: 500 });
+      if (!shellSubsResult.data.some(row => row.endpoint.startsWith("shell:"))) {
+        return NextResponse.json({ ok: false, step: "no-shell-subscription", error: "当前账号没有安卓壳 shell: 订阅。请先打开安卓壳并等待常驻通知显示“已连接，等待角色消息”。" }, { status: 400 });
+      }
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      const sent = await broadcastShellNotify(account.id, {
+        title: "生活现场 · 主动消息",
+        body: typeof testBody.body === "string" ? testBody.body : "这是一条生活现场原生通知测试。",
+        kind: "life_scene",
+        sessionId,
+        sceneId,
+        characterName: typeof testBody.characterName === "string" ? testBody.characterName : "",
+        avatar: typeof testBody.avatar === "string" ? testBody.avatar : "",
+        url: "/#open-chat=" + encodeURIComponent(sessionId),
+      });
+      if (!sent) return NextResponse.json({ ok: false, step: "shell-broadcast", error: "安卓壳原生通知广播发送失败，请检查 Supabase Realtime 配置。" }, { status: 502 });
+      return NextResponse.json({ ok: true, message: "已向安卓壳 Realtime 通道发送生活现场原生通知。", sent: 1, total: 1 });
     }
 
     // 留出杀后台的时间窗：请求收到后等 6 秒再发送（客户端此时可能已经被杀，无妨）。

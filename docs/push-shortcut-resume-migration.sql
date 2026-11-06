@@ -1,3 +1,7 @@
+-- ⚠️ 旧版站点共享推送迁移，不适用于新建个人推送云。
+-- 新版个人云请通过应用内「云服务部署」更新 Schema 与 Edge Functions。
+-- 仅当目标项目确实使用 docs/push-supabase.sql 的旧表结构时，才评估是否执行本迁移。
+
 -- Reality Bridge shortcut continuation after the PWA is suspended or killed.
 -- Safe to run after docs/push-supabase.sql; no URL replacement is required.
 

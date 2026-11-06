@@ -1242,6 +1242,13 @@ function CharListView({
                       }}
                     /> : <CharAvatarFallback name={char.name} size="100%" />}
                     <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent("open-app", { detail: { appId: "life", characterId: char.id } })); }}
+                      className="absolute top-1 left-1 z-10 rounded-full border border-white/35 bg-black/55 px-2 py-1 text-[10px] font-medium text-white shadow-sm backdrop-blur-sm hover:bg-black/70"
+                      aria-label={`管理${char.name || "角色"}日程`}
+                      title="管理此角色日程"
+                    >日程</button>
+                    <button
                       className="char-polaroid-menu-btn absolute top-1 right-1 w-6 h-6 bg-black/20 text-white rounded-full flex items-center justify-center cursor-pointer hover:bg-black/40 transition-colors z-10"
                       onClick={(e) => { e.stopPropagation(); setActiveMoveChar(char); }}
                       aria-label="转移世界"

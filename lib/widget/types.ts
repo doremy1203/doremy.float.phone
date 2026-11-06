@@ -13,6 +13,20 @@
  *    角色在这里写的是「给你看的话」，不该出现在任何公开墙上。
  */
 
+/** 独立的桌面小组件配置。应用不设配置数量上限；实际桌面实例数由 Android 启动器决定。 */
+export type WidgetProfile = {
+  id: string;
+  name: string;
+  characterId: string;
+  template: string;
+  customCss: string;
+  widthDp: number;
+  heightDp: number;
+  scale: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 /** 小组件当前显示的内容。 */
 export type WidgetData = {
   /** 以哪个角色的身份留的话 */

@@ -22,6 +22,15 @@ import {
   WIDGET_PLACEHOLDERS,
   WIDGET_UPDATED_EVENT,
   canGenerateAvatar,
+  deleteWidgetProfile,
+  deleteWidgetProfileNative,
+  injectWidgetCss,
+  loadWidgetProfiles,
+  pushWidgetProfileHtml,
+  requestPinWidgetProfile,
+  saveWidgetProfile,
+  syncWidgetProfilesToNative,
+  type WidgetProfile,
   hasWidgetBridge,
   isWidgetPlaced,
   loadWidgetConfig,
@@ -55,22 +64,27 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
   const [dataVersion, setDataVersion] = useState(0);
   /** 诊断结果（逐行）。null = 还没点过「检查」。 */
   const [diagnosis, setDiagnosis] = useState<string[] | null>(null);
+  const [profiles, setProfiles] = useState<WidgetProfile[]>(() => loadWidgetProfiles());
+  const [profileDraft, setProfileDraft] = useState<WidgetProfile | null>(null);
 
   const characters = useMemo(() => loadCharacters().map(c => ({ id: c.id, name: c.name, avatar: c.avatar ?? "" })), []);
 
   const refresh = useCallback(() => {
     setConfig(loadWidgetConfig());
     setPlaced(isWidgetPlaced());
+    setProfiles(loadWidgetProfiles());
     setDataVersion(v => v + 1);
   }, []);
 
   useEffect(() => {
     const onChange = () => refresh();
     window.addEventListener(WIDGET_UPDATED_EVENT, onChange);
-    const onVisible = () => { if (document.visibilityState === "visible") setPlaced(isWidgetPlaced()); };
+    window.addEventListener("virtual-life-state-updated", onChange);
+    const onVisible = () => { if (document.visibilityState === "visible") { setPlaced(isWidgetPlaced()); refresh(); } };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       window.removeEventListener(WIDGET_UPDATED_EVENT, onChange);
+      window.removeEventListener("virtual-life-state-updated", onChange);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [refresh]);
@@ -150,9 +164,8 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
       onNotice?.("当前 App 版本不支持桌面小组件，需要更新安卓壳");
       return;
     }
-    if (!requestPinWidget()) {
-      onNotice?.("这个系统不支持一键添加，请长按桌面手动添加「float」小组件");
-    }
+    const ok = requestPinWidget();
+    onNotice?.(ok ? "已请求系统添加桌面小组件。所有实例共用当前角色、内容和样式。" : "当前启动器不支持从应用内添加，请手动在桌面添加小组件。");
   }, [onNotice]);
 
   /** 手动塞一条示例内容，方便用户先看看桌面上长什么样。 */
@@ -169,6 +182,101 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
     setDataVersion(v => v + 1);
     onNotice?.("已写入示例内容");
   }, [config.characterId, activeCharacterAvatar, onNotice]);
+
+  const createProfile = useCallback(() => {
+    const now = new Date().toISOString();
+    const profile: WidgetProfile = {
+      id: "widget-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8),
+      name: "自定义小组件 " + (profiles.length + 1),
+      characterId: config.characterId || characters[0]?.id || "",
+      template: templateDraft || DEFAULT_WIDGET_TEMPLATE,
+      customCss: "",
+      widthDp: config.widthDp,
+      heightDp: config.heightDp,
+      scale: config.scale,
+      createdAt: now,
+      updatedAt: now,
+    };
+    setProfileDraft(profile);
+    onNotice?.("已创建独立配置。可以分别选择角色、编辑 HTML/CSS，再添加到真实桌面。");
+  }, [profiles.length, config, characters, templateDraft, onNotice]);
+
+  const profilePreviewHtml = useMemo(() => {
+    if (!profileDraft) return "";
+    const character = characters.find(item => item.id === profileDraft.characterId);
+    const actual = loadWidgetData(profileDraft.characterId);
+    const data = actual ?? {
+      characterId: profileDraft.characterId,
+      text: SAMPLE_TEXT,
+      status: SAMPLE_STATUS,
+      avatar: character?.avatar ?? "",
+      updatedAt: new Date().toISOString(),
+      source: "manual" as const,
+    };
+    return injectWidgetCss(
+      renderWidgetHtml(profileDraft.template || DEFAULT_WIDGET_TEMPLATE, data, character?.name ?? "角色", "你"),
+      profileDraft.customCss,
+    );
+  }, [profileDraft, characters, dataVersion]);
+
+  const patchProfileDraft = (patch: Partial<WidgetProfile>) => {
+    setProfileDraft(current => current ? { ...current, ...patch } : current);
+  };
+
+  const persistProfileDraft = () => {
+    if (!profileDraft) return;
+    saveWidgetProfile(profileDraft);
+    setProfiles(loadWidgetProfiles());
+    onNotice?.("已保存「" + profileDraft.name + "」配置。");
+  };
+
+  const pushProfileDraft = () => {
+    if (!profileDraft) return;
+    saveWidgetProfile(profileDraft);
+    setProfiles(loadWidgetProfiles());
+    if (!hasWidgetBridge()) { onNotice?.("当前 App 版本没有桌面小组件桥，请安装新版 APK。"); return; }
+    const ok = pushWidgetProfileHtml(profileDraft.id, profilePreviewHtml, {
+      widthDp: profileDraft.widthDp, heightDp: profileDraft.heightDp, scale: profileDraft.scale,
+    });
+    onNotice?.(ok ? "已提交该配置的原生渲染。添加前请确认桌面诊断显示渲染成功。" : "当前 APK 尚不支持独立小组件配置，需要更新安卓壳。");
+  };
+
+  const placeProfileDraft = () => {
+    if (!profileDraft) return;
+    if (!hasWidgetBridge()) { onNotice?.("当前 App 版本没有桌面小组件桥，请安装新版 APK。"); return; }
+
+    // 每次「添加到真实桌面」都生成新的 profile ID。否则重复添加同一份草稿时，
+    // Android 会把多个 appWidgetId 绑定到同一缓存，导致第二块小组件与第一块完全相同。
+    const now = new Date().toISOString();
+    const instanceProfile: WidgetProfile = {
+      ...profileDraft,
+      id: "widget-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8),
+      name: (profileDraft.name.trim() || "桌面实例") + " · 实例 " + (profiles.length + 1),
+      createdAt: now,
+      updatedAt: now,
+    };
+    saveWidgetProfile(instanceProfile);
+    setProfiles(loadWidgetProfiles());
+
+    const pushed = pushWidgetProfileHtml(instanceProfile.id, profilePreviewHtml, {
+      widthDp: instanceProfile.widthDp, heightDp: instanceProfile.heightDp, scale: instanceProfile.scale,
+    });
+    if (!pushed) { onNotice?.("原生侧没有接受这份模板，无法继续添加；配置已保留，可检查 APK 版本后重试。"); return; }
+    const accepted = requestPinWidgetProfile(instanceProfile.id);
+    if (accepted) setProfileDraft(instanceProfile);
+    onNotice?.(accepted
+      ? "已请求系统添加「" + instanceProfile.name + "」。每次添加都会使用新的实例 ID 和独立缓存；请在桌面确认流程中完成添加。"
+      : "当前 APK 或启动器不支持按配置添加，需要更新安卓壳或在桌面手动添加默认小组件。");
+  };
+
+  const removeProfileDraft = () => {
+    if (!profileDraft) return;
+    const removed = deleteWidgetProfileNative(profileDraft.id);
+    deleteWidgetProfile(profileDraft.id);
+    setProfiles(loadWidgetProfiles());
+    setProfileDraft(null);
+    onNotice?.(removed ? "已删除配置；关联的桌面实例已恢复为默认小组件。" : "已删除本地配置。旧 APK 里的桌面实例无法按配置清理，更新新版 APK 后即可管理独立实例。");
+  };
 
   const bridgeOk = hasWidgetBridge();
   const previewWidth = clampInt(config.widthDp, WIDGET_LIMITS.widthDp.min, WIDGET_LIMITS.widthDp.max);
@@ -289,12 +397,13 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
 
             {!bridgeOk ? (
               <p className="ws-warn">当前 App 版本不支持桌面小组件——需要更新安卓壳。</p>
-            ) : !placed ? (
+            ) : (
               <div className="ws-inline-row">
-                <span>还没有放到桌面上</span>
-                <button type="button" className="ws-link" onClick={placeWidget}>添加到桌面</button>
+                <span>{placed ? "桌面已有实例，可再添加一个同款小组件" : "还没有放到桌面上"}</span>
+                <button type="button" className="ws-link" onClick={placeWidget}>{placed ? "新建独立实例" : "创建桌面实例"}</button>
               </div>
-            ) : null}
+            )}
+            <p className="ws-hint">桌面实例共用当前角色、内容和样式；不支持按实例分别配置。</p>
           </>
         ) : null}
       </div>
@@ -339,7 +448,7 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
             </div>
             <p className="ws-hint">
               这里可以写任意 HTML 和 CSS——渐变、圆角、阴影、字体、透明度、对齐都能用。
-              桌面上显示什么，就是这段代码渲染出来的样子。
+              桌面上显示什么，就是这段代码渲染出来的样子。新增的生活状态占位符复用生活 APP 的虚拟时间、当前活动、地点线索和下一项日程，不用重复配置时钟。小手机运行且调度可用时会刷新；应用完全退出后不保证实时后台更新。
             </p>
 
             {templateExpanded ? (
@@ -444,6 +553,7 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
           </div>
         </>
       ) : null}
+
     </div>
   );
 }

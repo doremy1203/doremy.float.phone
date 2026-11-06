@@ -3,8 +3,10 @@
 import { Component, memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
 
 import { updateStatusBarTone } from "@/lib/bg-tone";
+import { loadDeviceCompatibilitySettings } from "@/lib/device-compatibility";
 import { startDiaryEntryTimerService, stopDiaryEntryTimerService } from "@/lib/diary-entry-timer-service";
 import { startFollowUpService, stopFollowUpService } from "@/lib/follow-up-service";
+import { installLifeScheduleProactiveScheduler } from "@/lib/life/life-proactive-scheduler";
 import { startMomentsService, stopMomentsService } from "@/lib/moments-engine";
 import { bgTimerCleanup } from "@/lib/bg-timer";
 import { PhoneThemeApp } from "@/components/phone-theme-app";
@@ -26,6 +28,11 @@ import { REALITY_BRIDGE_APP_EVENT_NAME, REALITY_BRIDGE_DATA_EVENT } from "@/lib/
 import { DiaryApp } from "@/components/diary/diary-app";
 import { XiaohongshuApp } from "@/components/xiaohongshu/xiaohongshu-app";
 import { StoryApp } from "@/components/story/story-app";
+import { LifeEngineApp } from "@/components/life/life-engine-app";
+import { ArchiveRoomApp } from "@/components/archive-room-app";
+import { PhotoWallApp } from "@/components/photo-wall-app";
+import { WatchTogetherApp } from "@/components/watch-together-app";
+import { CALL_STATS_ENTRY_HTML } from "@/lib/builtin-apps/call-stats-source";
 import { VnApp } from "@/components/vn/vn-app";
 import ReadingApp from "@/components/reading/reading-app";
 import MapApp from "@/components/map/map-app";
@@ -58,6 +65,7 @@ import {
   PAGE_1_DEFAULT,
   PAGE_2_DEFAULT,
   PAGE_3_DEFAULT,
+  PAGE_4_DEFAULT,
   createFolderIconId,
   isFolderIconId,
   type DesktopIconId,
@@ -152,6 +160,7 @@ const EMOJI_FONTS = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", 
 
 const ICON_LAYOUT_STORAGE_KEY = "ai_phone_icon_layout_v2";
 const ICON_LAYOUT_STORAGE_KEY_V1 = "ai_phone_icon_layout_v1";
+const NEW_LIFESTYLE_APPS_PAGE_MIGRATION_KEY = "ai_phone_new_lifestyle_apps_page4_v1";
 // Sentinel "page" used by the drag engine to mean "the dock". getDesktopPageNumber
 // returns 0 for it and getDesktopPageKeys filters it out, so page iteration never
 // treats the dock as a real page.
@@ -411,6 +420,40 @@ function getInstalledCustomIconIds(): Set<string> {
   return new Set(loadInstalledCustomApps().map(app => toCustomAppIconId(app.id)));
 }
 
+
+function migrateNewLifestyleAppsToPageFour(
+  layout: DesktopLayout,
+  widgets: WidgetInstance[],
+  dock: DesktopIconId[],
+  folders: DesktopFolderMap,
+): DesktopLayout {
+  if (kvGet(NEW_LIFESTYLE_APPS_PAGE_MIGRATION_KEY) === "1") return layout;
+  const movedIds = new Set<DesktopIconId>(["life", "archive", "photowall", "watchtogether"]);
+  const next = cloneDesktopLayout(layout, widgets);
+  for (const pageKey of getDesktopPageKeysForState(next, widgets)) {
+    next[pageKey] = (next[pageKey] ?? []).filter(icon => !movedIds.has(icon.id));
+  }
+  ensureDesktopPage(next, "page4" as DesktopPageKey);
+  const folderMembers = new Set(Object.values(folders).flatMap(folder => folder.icons));
+  const widgetOcc = buildWidgetOccupancy(widgets.filter(widget => widget.page === 4));
+  const usedCells = new Set((next.page4 ?? []).map(icon => `${icon.row},${icon.col}`));
+  for (const id of ["life", "archive", "photowall", "watchtogether"] as const) {
+    if (dock.includes(id) || folderMembers.has(id)) continue;
+    const desired = id === "life" ? { row: 3, col: 2 }
+      : id === "archive" ? { row: 3, col: 3 }
+      : id === "photowall" ? { row: 4, col: 2 }
+      : { row: 4, col: 3 };
+    const free = findNearestFreeCell(desired.row, desired.col, widgetOcc, usedCells);
+    if (!free) continue;
+    next.page4.push({ id, ...free });
+    usedCells.add(`${free.row},${free.col}`);
+  }
+  kvSet(NEW_LIFESTYLE_APPS_PAGE_MIGRATION_KEY, "1");
+  return next;
+}
+
+
+
 function migrateLegacyDesktopIconId(id: string, customIconIds = getInstalledCustomIconIds()): DesktopIconId | null {
   if (id === "weibo") return "game";
   if (id === "fortune") return "interview_magazine";
@@ -518,11 +561,14 @@ function normalizeLayout(raw: unknown, widgets: WidgetInstance[], dockIds: Set<D
   for (const folder of Object.values(folders)) {
     for (const memberId of folder.icons) allPlaced.add(memberId);
   }
-  const allDefaults = [...PAGE_1_DEFAULT, ...PAGE_2_DEFAULT, ...PAGE_3_DEFAULT, ...DOCK_DEFAULT];
+  // PAGE_4_DEFAULT 必须一并纳入兜底：生活/档案室/照片墙/一起看四个图标是后加的
+  // 独立页，漏了它们时一旦走「恢复默认外观 / 导入主题包 / 旧布局迁移」路径，
+  // 图标不被兜底就会被永久清掉，且每次重启都救不回（用户反馈过新增应用消失）。
+  const allDefaults = [...PAGE_1_DEFAULT, ...PAGE_2_DEFAULT, ...PAGE_3_DEFAULT, ...PAGE_4_DEFAULT, ...DOCK_DEFAULT];
 
   for (const id of allDefaults) {
     if (allPlaced.has(id) || dockIds.has(id)) continue;
-    const primaryPage = PAGE_1_DEFAULT.includes(id) ? 1 : PAGE_2_DEFAULT.includes(id) ? 2 : PAGE_3_DEFAULT.includes(id) ? 3 : 1;
+    const primaryPage = PAGE_1_DEFAULT.includes(id) ? 1 : PAGE_2_DEFAULT.includes(id) ? 2 : PAGE_3_DEFAULT.includes(id) ? 3 : PAGE_4_DEFAULT.includes(id) ? 4 : 1;
     // placeIconOnAvailablePage 页满会顺延到下一页乃至新开一页——
     // 曾经这里只在现有页里找空格，页面被图标和组件占满时就静默放弃，
     // 图标（如外观）从此永久丢失且每次重启都救不回
@@ -1078,7 +1124,16 @@ function useAndroidNativeKeyboardViewport() {
       // 手机壳有 -status-bar-drop 的负 margin-top，高度补上这段才能让底栏贴住视口底/键盘顶
       const wrap = document.querySelector<HTMLElement>(".phone-shell-wrap");
       const drop = wrap ? (parseFloat(getComputedStyle(wrap).getPropertyValue("--status-bar-drop")) || 0) : 0;
-      root.style.setProperty("--phone-screen-height", `${Math.round(window.innerHeight + drop)}px`);
+      const compatibilityScale = Math.max(0.5, Number.parseFloat(root.style.getPropertyValue("--compat-layout-scale")) || 1);
+      const compatibility = loadDeviceCompatibilitySettings();
+      const keyboardResized = window.innerHeight < maxInnerHeight - 80;
+      if (!keyboardResized && compatibility.layoutMode === "manual" && compatibility.screenHeight >= 200) {
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const referenceHeight = compatibility.screenUnit === "physical" ? compatibility.screenHeight / dpr : compatibility.screenHeight;
+        root.style.setProperty("--phone-screen-height", `${Math.round(referenceHeight / Math.max(0.75, compatibility.uiScale || 1) + drop / compatibilityScale)}px`);
+      } else {
+        root.style.setProperty("--phone-screen-height", `${Math.round((window.innerHeight + drop) / compatibilityScale)}px`);
+      }
     };
 
     const requestApply = () => {
@@ -1159,6 +1214,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [glassPaintPass, setGlassPaintPass] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [activeApp, setActiveApp] = useState<DesktopIconId | null>(null);
+  const [lifeFocusCharacterId, setLifeFocusCharacterId] = useState<string | null>(null);
   const [customApps, setCustomApps] = useState<InstalledCustomApp[]>([]);
   // 自定义 APP 桌面图标样式偏好（global = 忽略上传图标走全局效果）
   const [customAppIconStyles, setCustomAppIconStyles] = useState<Record<string, CustomAppIconStyle>>({});
@@ -1172,6 +1228,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [customAppUpdateBusy, setCustomAppUpdateBusy] = useState(false);
   const customAppUpdateCheckingRef = useRef<Set<string>>(new Set());
   const activeAppRef = useRef<DesktopIconId | null>(null);
+  const swipeBackGestureRef = useRef<{ pointerId: number; startX: number; startY: number; edge: "left" | "right"; horizontal: boolean } | null>(null);
   const [customAppBadges, setCustomAppBadges] = useState<Record<string, number>>({});
   const [customAppBackgroundRuns, setCustomAppBackgroundRuns] = useState<CustomAppBackgroundEventRun[]>([]);
   const [customAppBackgroundToolRuns, setCustomAppBackgroundToolRuns] = useState<CustomAppBackgroundToolRun[]>([]);
@@ -1588,11 +1645,12 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
         try {
           const normalized = normalizeLayout(JSON.parse(rawV2), hydratedWidgets, dockIds, hydratedFolders);
           const sane = sanitizeDesktopFolders(hydratedFolders, normalized, hydratedDock, hydratedWidgets);
+          const migratedLayout = migrateNewLifestyleAppsToPageFour(sane.layout, hydratedWidgets, hydratedDock, sane.folders);
           setFolders(sane.folders);
-          setLayout(sane.layout);
-          if (sane.changed) {
-            writeDesktopFolders(sane.folders);
-            kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(sane.layout));
+          setLayout(migratedLayout);
+          if (sane.changed) writeDesktopFolders(sane.folders);
+          if (sane.changed || migratedLayout !== sane.layout || migratedLayout !== migratedLayout || kvGet(NEW_LIFESTYLE_APPS_PAGE_MIGRATION_KEY) === "1") {
+            kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(migratedLayout));
           }
           setDesktopReady(true);
           return;
@@ -1873,6 +1931,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     let cancelled = false;
     let servicesStarted = false;
     let cleanupWeixinCloudRealtimeSync: (() => void) | null = null;
+    let cleanupLifeScheduleScheduler: (() => void) | null = null;
 
     void (async () => {
       try {
@@ -1909,6 +1968,8 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       if (cancelled) return;
       startFollowUpService();
       startMomentsService();
+      const stopLifeScheduleScheduler = installLifeScheduleProactiveScheduler();
+      cleanupLifeScheduleScheduler = stopLifeScheduleScheduler;
       startDiaryEntryTimerService();
       const stopWeixinCloudRealtimeSync = startWeixinCloudRealtimeSync();
       servicesStarted = true;
@@ -1927,6 +1988,8 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       if (servicesStarted) {
         stopFollowUpService();
         stopMomentsService();
+        cleanupLifeScheduleScheduler?.();
+        cleanupLifeScheduleScheduler = null;
         stopDiaryEntryTimerService();
       }
       bgTimerCleanup();
@@ -2478,6 +2541,30 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
   // Allow other components to switch apps via custom event
   const [chatInitSessionId, setChatInitSessionId] = useState<string | null>(null);
   const [activeChatSession, setActiveChatSession] = useState<ChatSession | null>(null);
+  useEffect(() => {
+    const handleNativeBack = (event: Event) => {
+      const custom = event as CustomEvent<{ handled?: boolean }>;
+      if (activeApp !== null) {
+        const appBack = { handled: false };
+        window.dispatchEvent(new CustomEvent("floatphone-app-back", { detail: appBack }));
+        if (appBack.handled) {
+          if (custom.detail) custom.detail.handled = true;
+          return;
+        }
+        if (custom.detail) custom.detail.handled = true;
+        setActiveApp(null);
+        setActiveChatSession(null);
+        setOpenFolderId(null);
+        return;
+      }
+      if (openFolderId !== null) {
+        if (custom.detail) custom.detail.handled = true;
+        setOpenFolderId(null);
+      }
+    };
+    window.addEventListener("floatphone-native-back", handleNativeBack);
+    return () => window.removeEventListener("floatphone-native-back", handleNativeBack);
+  }, [activeApp, openFolderId]);
   const [customAppLaunchContext, setCustomAppLaunchContext] = useState<CustomAppLaunchState | null>(null);
   const [appMarketLaunchContext, setAppMarketLaunchContext] = useState<Record<string, unknown> | null>(null);
   useEffect(() => {
@@ -2504,6 +2591,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
           }
           : null);
         setAppMarketLaunchContext(nextAppId === "appmarket" ? launchContextRecord : null);
+        setLifeFocusCharacterId(nextAppId === "life" && typeof detail.characterId === "string" ? detail.characterId : null);
         if (detail.appId === "resources") {
           setResourcesInitialPage(detail.resourcePage === "vn_assets" || detail.resourcePage === "memory" ? detail.resourcePage : "main");
         }
@@ -2591,7 +2679,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     const handler = (e: Event) => {
       const sessionId = (e as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
       if (!sessionId) return;
-      window.setTimeout(() => { void requestBackgroundChatReply(sessionId); }, 0);
+      window.setTimeout(() => { void requestBackgroundChatReply(sessionId, { channel: "call_end" }); }, 0);
     };
     window.addEventListener("chat-call-ended", handler);
     return () => window.removeEventListener("chat-call-ended", handler);
@@ -4012,6 +4100,43 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     if (targetPageIndex !== page) setCurrentPageIndex(targetPageIndex);
   }, [editMode, getSwipePageWidth, pageCount, setSwipeDrag]);
 
+  // A canceled pointer (including rotation/OS gesture takeover) must not be treated
+  // as a completed swipe. Clear the transient translate so the desktop cannot get stuck.
+  const handleSwipeCancel = useCallback((e: React.PointerEvent) => {
+    const drag = editDragRef.current;
+    if (drag && drag.pointerId === e.pointerId) {
+      handleSwipeEnd(e);
+      return;
+    }
+    if (swipeRef.current.pointerId === e.pointerId) {
+      swipeRef.current.pointerId = null;
+      swipeRef.current.deltaX = 0;
+      swipeRef.current.locked = null;
+      setSwipeDrag(0);
+    }
+    cancelLongPress();
+    swipeLayerRef.current?.classList.remove("phone-swipe-dragging");
+  }, [handleSwipeEnd, setSwipeDrag]);
+
+  // Android may emit resize/orientationchange while a pointer is captured. Reset stale
+  // gesture state so the next horizontal swipe starts cleanly after returning upright.
+  useEffect(() => {
+    const resetSwipeAfterRotation = () => {
+      if (editDragRef.current?.active) return;
+      swipeRef.current.pointerId = null;
+      swipeRef.current.deltaX = 0;
+      swipeRef.current.locked = null;
+      setSwipeDrag(0);
+      swipeLayerRef.current?.classList.remove("phone-swipe-dragging");
+    };
+    window.addEventListener("orientationchange", resetSwipeAfterRotation);
+    window.addEventListener("resize", resetSwipeAfterRotation);
+    return () => {
+      window.removeEventListener("orientationchange", resetSwipeAfterRotation);
+      window.removeEventListener("resize", resetSwipeAfterRotation);
+    };
+  }, [setSwipeDrag]);
+
   const handleCloseXiaohongshu = useCallback((isBusy?: boolean) => {
     const shouldKeepMounted = isBusy ?? xiaohongshuBusy;
     setActiveApp(null);
@@ -4034,6 +4159,20 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     setShoppingMounted(false);
   }, [shoppingBusy]);
 
+  /** 内置「通话统计」：1:1 复用 call.stats 2.1.0 的 HTML，由 CustomAppRunner 挂载。 */
+  const CALL_STATS_BUILTIN_APP: InstalledCustomApp = {
+    id: "callstats-builtin",
+    name: "通话统计",
+    version: "2.1.0",
+    description: "通话中心：时长统计与图表、日历视图、逐通回看完整对话、角色语音复听、通话总结。数据全部来自本机聊天记录，不上传。",
+    entryHtml: CALL_STATS_ENTRY_HTML,
+    permissions: ["chat.read", "characters.read", "ai.generate", "app.data.read", "app.data.write", "ui.toast", "voice.tts"] as InstalledCustomApp["permissions"],
+    manifest: { id: "call.stats", name: "通话统计", version: "2.1.0", sdkVersion: "1.0", entry: "index.html", permissions: ["chat.read", "characters.read", "ai.generate", "app.data.read", "app.data.write", "ui.toast", "voice.tts"] },
+    assets: {},
+    installedAt: "2026-10-24T00:00:00.000Z",
+    updatedAt: "2026-10-24T00:00:00.000Z",
+  };
+
   function closeCustomAppRunner(app: InstalledCustomApp): void {
     const launchState = customAppLaunchContext?.appId === app.id ? customAppLaunchContext : null;
     setCustomAppLaunchContext(null);
@@ -4050,6 +4189,95 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     }
     setActiveApp(null);
   }
+
+  // Android-style system back gesture for every foreground app. Nested pages can
+  // consume "phone-swipe-back" first (e.g. the workshop's GitHub settings sheet);
+  // otherwise the active app is closed/returned using the same app-specific path
+  // as its close button.
+  useEffect(() => {
+    const cancelGesture = () => { swipeBackGestureRef.current = null; };
+    const isGestureExcluded = (target: EventTarget | null) => {
+      if (!(target instanceof Element)) return false;
+      return Boolean(target.closest(
+        'input, textarea, select, [contenteditable="true"], video, audio, canvas, [data-swipe-back-ignore], .watch-player, .chat-gallery-preview, .chat-photo-carousel-stack, .photo-wall-surface, [data-photo-wall-viewport]'
+      ));
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.pointerType !== "touch" || !event.isPrimary || event.button !== 0) return;
+      const edge: "left" | "right" | null = event.clientX <= 24
+        ? "left"
+        : event.clientX >= window.innerWidth - 24
+          ? "right"
+          : null;
+      if (!activeAppRef.current || !edge || isGestureExcluded(event.target)) {
+        swipeBackGestureRef.current = null;
+        return;
+      }
+      swipeBackGestureRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        edge,
+        horizontal: false,
+      };
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      const gesture = swipeBackGestureRef.current;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      const dx = event.clientX - gesture.startX;
+      const dy = event.clientY - gesture.startY;
+      const towardCenter = gesture.edge === "left" ? dx : -dx;
+      if (!gesture.horizontal) {
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+        if (Math.abs(dy) > Math.abs(dx) * 1.15 || towardCenter <= 0) {
+          cancelGesture();
+          return;
+        }
+        gesture.horizontal = true;
+      }
+      if (towardCenter > 12 && event.cancelable) event.preventDefault();
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      const gesture = swipeBackGestureRef.current;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      swipeBackGestureRef.current = null;
+      const dx = event.clientX - gesture.startX;
+      const dy = event.clientY - gesture.startY;
+      const towardCenter = gesture.edge === "left" ? dx : -dx;
+      if (!gesture.horizontal || towardCenter < Math.max(76, window.innerWidth * 0.18) || towardCenter < Math.abs(dy) * 1.35) return;
+      const currentApp = activeAppRef.current;
+      if (!currentApp) return;
+      const backEvent = new Event("phone-swipe-back", { cancelable: true });
+      document.dispatchEvent(backEvent);
+      if (backEvent.defaultPrevented) return;
+      const customApp = getCustomAppForIcon(currentApp);
+      if (customApp) {
+        closeCustomAppRunner(customApp);
+        return;
+      }
+      if (currentApp === "chat") {
+        setActiveChatSession(null);
+        setChatInitSessionId(null);
+      }
+      setActiveApp(null);
+    };
+    const onPointerCancel = (event: PointerEvent) => {
+      if (swipeBackGestureRef.current?.pointerId === event.pointerId) cancelGesture();
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("pointermove", onPointerMove, { capture: true, passive: false });
+    window.addEventListener("pointerup", onPointerUp, true);
+    window.addEventListener("pointercancel", onPointerCancel, true);
+    window.addEventListener("blur", cancelGesture);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerup", onPointerUp, true);
+      window.removeEventListener("pointercancel", onPointerCancel, true);
+      window.removeEventListener("blur", cancelGesture);
+      cancelGesture();
+    };
+  }, [getCustomAppForIcon, customAppLaunchContext]);
 
   function dismissPendingCustomAppUpdate(): void {
     if (customAppUpdateBusy || !customAppUpdatePrompt) return;
@@ -4240,6 +4468,41 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
     if (activeApp === "story") {
       return <StoryApp onClose={() => setActiveApp(null)} />;
+    }
+
+    if (activeApp === "life") {
+      return <LifeEngineApp onClose={() => setActiveApp(null)} initialCharacterId={lifeFocusCharacterId ?? undefined} />;
+    }
+
+    if (activeApp === "archive") {
+      return <ArchiveRoomApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
+    }
+
+    if (activeApp === "photowall") {
+      return <PhotoWallApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
+    }
+
+    if (activeApp === "watchtogether") {
+      return <WatchTogetherApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
+    }
+
+    if (activeApp === "callstats") {
+      return (
+        <CustomAppForegroundBoundary
+          key={CALL_STATS_BUILTIN_APP.id}
+          appName={CALL_STATS_BUILTIN_APP.name}
+          appId={CALL_STATS_BUILTIN_APP.id}
+          appVersion={CALL_STATS_BUILTIN_APP.version}
+          manifestId={CALL_STATS_BUILTIN_APP.manifest?.id}
+          onClose={() => setActiveApp(null)}
+        >
+          <CustomAppRunner
+            app={CALL_STATS_BUILTIN_APP}
+            onClose={() => setActiveApp(null)}
+            onNotice={setNotice}
+          />
+        </CustomAppForegroundBoundary>
+      );
     }
 
     if (activeApp === "vnmode") {
@@ -4648,7 +4911,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                 onPointerDown={handleSwipeStart}
                 onPointerMove={handleSwipeMove}
                 onPointerUp={handleSwipeEnd}
-                onPointerCancel={handleSwipeEnd}
+                onPointerCancel={handleSwipeCancel}
               >
                 {/* Edit mode Done button */}
                 {editMode && !activeApp && (
@@ -4745,15 +5008,24 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                                       justifySelf: "start",
                                       alignSelf: "start",
                                       marginLeft: "var(--slot-icon-offset-x)",
+                                      position: "relative",
                                     }}
-                                  />
+                                  >
+                                    <span className="drop-position-label" style={{ position: "absolute", zIndex: 3, top: 2, left: 2, padding: "2px 5px", borderRadius: 6, background: "var(--c-accent, #8b5cf6)", color: "#fff", fontSize: 9, lineHeight: 1.3, whiteSpace: "nowrap", pointerEvents: "none" }}>
+                                      第{dropTarget.row}行 · 第{dropTarget.col}列
+                                    </span>
+                                  </div>
                                 );
                               }
                               return (
                                 <div
                                   className="drop-indicator"
-                                  style={{ gridRow: dropTarget.row, gridColumn: dropTarget.col }}
-                                />
+                                  style={{ gridRow: dropTarget.row, gridColumn: dropTarget.col, position: "relative" }}
+                                >
+                                  <span className="drop-position-label" style={{ position: "absolute", zIndex: 3, top: 2, left: 2, padding: "2px 5px", borderRadius: 6, background: "var(--c-accent, #8b5cf6)", color: "#fff", fontSize: 9, lineHeight: 1.3, whiteSpace: "nowrap", pointerEvents: "none" }}>
+                                    第{dropTarget.row}行 · 第{dropTarget.col}列
+                                  </span>
+                                </div>
                               );
                             })()}
 
@@ -4931,7 +5203,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                   style={{ "--dock-count": Math.max(1, dock.length) } as CSSProperties}
                   onPointerMove={handleSwipeMove}
                   onPointerUp={handleSwipeEnd}
-                  onPointerCancel={handleSwipeEnd}
+                  onPointerCancel={handleSwipeCancel}
                 >
                   {dockSkinUrl && (
                     <span className="dock-skin-layer" style={{ backgroundImage: `url("${dockSkinUrl}")` }} />

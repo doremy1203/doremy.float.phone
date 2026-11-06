@@ -4,6 +4,7 @@
 
 import type { PresetConfig } from "./settings-types";
 import { getCheckPhonePromptTags } from "./checkphone-config";
+import { createBuiltinAppPrompts } from "./builtin-app-prompts";
 
 export const BUILTIN_PRESET_ID = "builtin_default_v1";
 export const BUILTIN_PRESET_VERSION = 265; // 升版本会用出厂内容重写用户的内置预设副本（自定义会丢），非必要不升
@@ -41,6 +42,19 @@ export function createBuiltinPreset(): PresetConfig {
             { identifier: "calendarSchedule", enabled: true },
             { identifier: "memoryCore", enabled: true },
             { identifier: "memoryLongTerm", enabled: true },
+            { identifier: "life_scene_output_contract", enabled: true },
+            { identifier: "life_scene_behavior", enabled: true },
+            { identifier: "life_scene_tools", enabled: true },
+            { identifier: "life_scene_task", enabled: true },
+            { identifier: "life_autonomy_task", enabled: true },
+            { identifier: "life_schedule_task", enabled: true },
+            { identifier: "life_invitation_task", enabled: true },
+            { identifier: "photo_wall_annotation", enabled: true },
+            { identifier: "photo_wall_doodle", enabled: true },
+            { identifier: "watch_together_review", enabled: true },
+            { identifier: "watch_together_comment", enabled: true },
+            { identifier: "reality_bridge_offline_library", enabled: true },
+            { identifier: "phone_widget_status", enabled: true },
 
             // ── Divider ──
             { identifier: "shortTermMemory", enabled: true },
@@ -4128,6 +4142,7 @@ export function createBuiltinPreset(): PresetConfig {
                 enabled: true,
                 tags: ["checkphone"],
             },
+            ...createBuiltinAppPrompts(),
         ],
     };
 }

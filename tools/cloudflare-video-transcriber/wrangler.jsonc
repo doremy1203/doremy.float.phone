@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "momo-float-phone-transcriber",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "vars": {
+    "ALLOWED_ORIGINS": "https://zfloat.netlify.app",
+    "ALLOWED_MEDIA_HOSTS": "REPLACE_WITH_YOUR_AUDIO_HOST"
+  }
+}

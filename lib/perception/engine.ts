@@ -20,6 +20,7 @@
 
 import { isWithinPushQuietHours } from "../push-client";
 import { processBridgeItem } from "../reality-bridge/engine";
+import { loadBridgeRules } from "../reality-bridge/storage";
 import type { BridgeItem } from "../reality-bridge/types";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
 import {
@@ -34,7 +35,10 @@ import {
   supportsHealth,
   supportsLocation,
   supportsUsageStats,
+  supportsBackgroundDwellTracking,
+  configureBackgroundPerception,
 } from "./bridge";
+import type { AppUsageEntry } from "./types";
 import { syncPerceptionToCloud } from "./cloud-sync";
 import {
   appendPerceptionLog,
@@ -46,14 +50,16 @@ import {
   savePerceptionStatus,
   type PerceptionRuntimeState,
 } from "./storage";
-import type { AppUsageEntry, PerceptionCapability, PerceptionConfig, PerceptionSignal } from "./types";
+import type { PerceptionCapability, PerceptionConfig, PerceptionSignal } from "./types";
 
 const HOUR_MS = 60 * 60 * 1000;
 
 let timer: number | null = null;
 let unsubscribeForeground: (() => void) | null = null;
 let unsubscribeVisibility: (() => void) | null = null;
+let unsubscribeBridgeRules: (() => void) | null = null;
 let running = false;
+let nativeDwellTrackingConfigured = false;
 
 /** 引擎是否在运行（诊断面板读） */
 export function isPerceptionRunning(): boolean {
@@ -200,7 +206,11 @@ async function sampleOnce(): Promise<void> {
   // ── 前台应用停留 ──
   // 事件只更新「当前在用哪个应用」，真正的判断放在采样里：
   // 因为用户可能一直停在同一个应用、不再产生新事件，靠事件驱动会永远等不到。
-  await checkDwell(config.appDwellMinutes, state);
+  // 新版 APK 由原生无障碍服务负责后台连续停留计时，并把到期事件投递到同一云端现实桥；
+  // 网页端不再同时判断，避免前台/后台双重触发。旧 APK/浏览器仍走原有网页实现。
+  if (!nativeDwellTrackingConfigured) {
+    await checkDwell(config.appDwellMinutes, state);
+  }
 
   // ── 应用累计使用 ──
   // 每轮采样只读一次使用统计，喂给信号判定，再随状态缓存复用给
@@ -208,7 +218,9 @@ async function sampleOnce(): Promise<void> {
   const appUsage = supportsUsageStats() && isCapabilityEnabled(config, "usageStats")
     ? readUsageStats(12)
     : ([] as AppUsageEntry[]);
-  await checkAppUsageSignal(config, state, appUsage);
+  if (!nativeDwellTrackingConfigured) {
+    await checkAppUsageSignal(config, state, appUsage);
+  }
 
   // ── 作息与习惯 ──
   // 纯时钟信号（深夜/首次打开/很久没聊天）与采样间隔无关；
@@ -779,11 +791,55 @@ export function markQueryPerformed(characterId: string): void {
 
 // ── 生命周期 ──
 
+/** 把需要后台感知的规则过滤条件与可选的返回学习软件动作同步给原生层。 */
+function getNativeResumeTarget(): {
+  targetPackage?: string;
+  targetFilter?: string;
+  ruleFilters: Array<{ matchType: string; payloadFilter?: string }>;
+} {
+  const rules = loadBridgeRules().filter(item => item.enabled && !item.schedule
+    && ["长时间使用", "应用用太久", "*"].includes(item.matchType));
+  const rule = rules.find(item => {
+    const action = item.actions?.deviceAction;
+    const args = action?.args ?? {};
+    const target = String(args.packageName ?? args.package ?? "");
+    return action?.action === "openApp" && Boolean(target);
+  });
+  const args = rule?.actions?.deviceAction?.args ?? {};
+  return {
+    ...(rule ? {
+      targetPackage: String(args.packageName ?? args.package ?? "").slice(0, 160),
+      targetFilter: String(rule.payloadFilter ?? "").slice(0, 160),
+    } : {}),
+    ruleFilters: rules.map(item => ({ matchType: item.matchType, payloadFilter: item.payloadFilter })),
+  };
+}
+
+function syncNativeBackgroundConfig(): void {
+  const config = loadPerceptionConfig();
+  nativeDwellTrackingConfigured = supportsBackgroundDwellTracking()
+    && configureBackgroundPerception({
+      enabled: config.enabled,
+      thresholdMinutes: config.appDwellMinutes,
+      foregroundAppEnabled: isCapabilityEnabled(config, "foregroundApp"),
+      usageStatsEnabled: isCapabilityEnabled(config, "usageStats"),
+      usageSignalMinutes: config.appUsageSignalMinutes,
+      usageOverrides: config.appUsageSignalOverrides,
+      ...getNativeResumeTarget(),
+    });
+}
+
 /** 启动引擎。幂等：重复调用不会起第二个定时器。 */
 export async function startPerception(): Promise<void> {
   if (typeof window === "undefined") return;
   if (running) return;
+  syncNativeBackgroundConfig();
   running = true;
+  if (!unsubscribeBridgeRules) {
+    const onRulesUpdated = () => syncNativeBackgroundConfig();
+    window.addEventListener("reality-bridge-rules-updated", onRulesUpdated);
+    unsubscribeBridgeRules = () => window.removeEventListener("reality-bridge-rules-updated", onRulesUpdated);
+  }
 
   // 前台应用事件来自无障碍服务，经壳的 shell-call-overlay 通道过来。
   // 与通话浮窗共用同一条通道（ensureShellOverlayListener 幂等）。
@@ -833,6 +889,10 @@ export function stopPerception(): void {
     unsubscribeVisibility();
     unsubscribeVisibility = null;
   }
+  if (unsubscribeBridgeRules) {
+    unsubscribeBridgeRules();
+    unsubscribeBridgeRules = null;
+  }
 }
 
 /**
@@ -842,5 +902,7 @@ export function stopPerception(): void {
 export async function restartPerception(): Promise<void> {
   stopPerception();
   const config = loadPerceptionConfig();
+  // 即使网页感知总开关被关闭，也要通知原生层停用后台采集。
+  syncNativeBackgroundConfig();
   if (config.enabled) await startPerception();
 }

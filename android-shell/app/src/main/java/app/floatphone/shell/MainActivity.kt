@@ -1,5 +1,6 @@
 package app.floatphone.shell
 
+import android.content.pm.ActivityInfo
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
@@ -20,10 +21,21 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Base64
+import java.io.OutputStream
+import java.util.concurrent.ConcurrentHashMap
 import android.view.WindowManager
+import android.view.Gravity
+import android.view.View
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.content.ClipboardManager
+import android.content.ClipData
 import androidx.core.app.NotificationCompat
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
@@ -40,12 +52,19 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.health.connect.client.PermissionController
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import java.io.File
 import java.io.FileOutputStream
+import java.io.ByteArrayOutputStream
+import java.util.UUID
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Float 小手机安卓壳：全屏 WebView 直接加载线上站点。
@@ -66,11 +85,80 @@ class MainActivity : AppCompatActivity() {
          * 只需要管一个开关。渠道一旦创建过，后建的只更新名称/描述，不会重置用户选择。
          */
         const val CH_MESSAGES = "shell_messages"
+        @Volatile private var nativeCrashRecorderInstalled = false
+        private const val MAX_WEB_CONSOLE_LOGS = 200
+        private val webConsoleLogs = java.util.Collections.synchronizedList(mutableListOf<String>())
+        private fun recordWebConsoleMessage(message: String) {
+            synchronized(webConsoleLogs) {
+                webConsoleLogs.add(message.take(1200))
+                while (webConsoleLogs.size > MAX_WEB_CONSOLE_LOGS) webConsoleLogs.removeAt(0)
+            }
+        }
+        private fun webConsoleLogsJson(): String = synchronized(webConsoleLogs) {
+            org.json.JSONArray(webConsoleLogs.toList()).toString()
+        }
+    }
+
+    /**
+     * 将上一次未捕获的原生崩溃留在应用私有目录，供用户下次启动后主动导出诊断。
+     * 不上传、不读取业务数据；写入失败时仍交给 Android 原始崩溃处理器。
+     */
+    private fun installNativeCrashRecorder() {
+        synchronized(MainActivity::class.java) {
+            if (nativeCrashRecorderInstalled) return
+            nativeCrashRecorderInstalled = true
+            val appContext = applicationContext
+            val previous = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                try {
+                    val writer = java.io.StringWriter()
+                    throwable.printStackTrace(java.io.PrintWriter(writer))
+                    val body = "time=" + System.currentTimeMillis() +
+                        "\nthread=" + thread.name +
+                        "\n" + writer.toString()
+                    val clipped = if (body.length > 30000) body.takeLast(30000) else body
+                    File(appContext.filesDir, "last-native-crash.txt").writeText(clipped)
+                } catch (_: Throwable) {
+                    // Crash recorder must never replace the real crash handling path.
+                }
+                if (previous != null) {
+                    previous.uncaughtException(thread, throwable)
+                } else {
+                    android.os.Process.killProcess(android.os.Process.myPid())
+                }
+            }
+        }
     }
 
     private lateinit var rootContainer: FrameLayout
     private lateinit var webView: WebView
+    /**
+     * 主文档 URL 的 UI 线程快照。
+     *
+     * @JavascriptInterface 方法运行在 WebView 的私有后台线程；直接读 webView.url
+     * 会触发 “Java exception was raised during method invocation”，表现为保存图片、
+     * 陪看诊断、位置读取等原生桥全部失败。这里只缓存 WebView 主线程回调里的 URL，
+     * 桥方法只做纯字符串比较，不再跨线程访问 WebView。
+     */
+    @Volatile private var trustedShellUrl: String? = SITE_URL
+    private val bridgeNonce = UUID.randomUUID().toString()
+    private var secureBridgeDocumentStartInstalled = false
+
+    /** 大文件分块写入会话：避免一次把几百 MB 的 Base64 字符串塞进 JS Bridge。 */
+    private data class ChunkedFileWrite(
+        val uri: Uri?,
+        val file: File?,
+        val stream: OutputStream,
+        var bytes: Long = 0L,
+    )
+    private val chunkedFileWrites = ConcurrentHashMap<String, ChunkedFileWrite>()
+    private var recoveryOverlay: View? = null
+    private var recoveryBoot = false
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+
+    // Native custom view used by HTML5 video players embedded in the WebView.
+    private var webVideoCustomView: View? = null
+    private var webVideoCustomViewCallback: WebChromeClient.CustomViewCallback? = null
 
     /** 系统状态栏实际高度（CSS px，即物理像素 / density），实时更新。 */
     @Volatile
@@ -164,6 +252,7 @@ class MainActivity : AppCompatActivity() {
         .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
         .build()
 
+
     private val fileChooserLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -245,12 +334,739 @@ class MainActivity : AppCompatActivity() {
         return candidate
     }
 
+
+    /**
+     * Native recovery UI: remains usable when the website fails to load or the WebView
+     * renderer dies. This is intentionally native, so it does not depend on React/JS.
+     */
+    /** WebView 渲染进程崩溃后落盘；下次启动恢复页和诊断报告都能看到。 */
+    private fun recordWebViewCrash(reason: String, detail: String) {
+        runCatching {
+            val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+            val report = "time=$stamp\nreason=$reason\ndetail=$detail"
+            File(filesDir, "last-webview-crash.txt").writeText(report)
+            getSharedPreferences("float_startup_diagnostics", Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("launch_in_progress", true)
+                .putLong("last_webview_crash_at", System.currentTimeMillis())
+                .apply()
+        }
+    }
+
+    private fun showNativeRecoveryScreen(title: String, detail: String) {
+        if (!::rootContainer.isInitialized) return
+        runOnUiThread {
+            recoveryOverlay?.let { rootContainer.removeView(it) }
+            val panel = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(28, 28, 28, 28)
+                setBackgroundColor(android.graphics.Color.rgb(248, 246, 242))
+            }
+            panel.addView(TextView(this).apply {
+                text = "小手机 · 启动恢复"
+                textSize = 13f
+                setTextColor(android.graphics.Color.DKGRAY)
+            })
+            panel.addView(TextView(this).apply {
+                text = title
+                textSize = 23f
+                setTextColor(android.graphics.Color.rgb(35, 35, 35))
+                setPadding(0, 12, 0, 10)
+            })
+            panel.addView(TextView(this).apply {
+                text = detail + "\n\n你可以先复制诊断摘要反馈问题，或尝试重新加载。此页面不会清除聊天、角色记忆或应用数据。"
+                textSize = 14f
+                setTextColor(android.graphics.Color.DKGRAY)
+                setPadding(0, 0, 0, 18)
+            })
+            fun action(label: String, run: () -> Unit) {
+                panel.addView(Button(this).apply {
+                    text = label
+                    isAllCaps = false
+                    setOnClickListener { run() }
+                }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = 8 })
+            }
+            action("退出恢复模式并重试（不清除数据）") {
+                getSharedPreferences("float_startup_diagnostics", Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean("launch_in_progress", false)
+                    .putLong("last_successful_page_at", System.currentTimeMillis())
+                    .apply()
+                recreate()
+            }
+            action("在系统浏览器打开站点") {
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SITE_URL))) }
+                    .onFailure { showNativeRecoveryScreen("无法打开浏览器", it.message ?: "系统未找到可用浏览器") }
+            }
+            action("复制诊断摘要") {
+                val summary = buildString {
+                    appendLine("小手机原生恢复摘要")
+                    appendLine("时间：${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())}")
+                    appendLine("App：$packageName / $VERSION")
+                    appendLine("Android：${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
+                    appendLine("设备：${Build.MANUFACTURER} ${Build.MODEL}")
+                    appendLine("WebView：${if (recoveryBoot) "安全模式下未初始化" else runCatching { WebView.getCurrentWebViewPackage()?.let { it.packageName + " " + it.versionName } }.getOrNull() ?: "未知"}")
+                    appendLine("站点：${Uri.parse(SITE_URL).scheme}://${Uri.parse(SITE_URL).host}")
+                    appendLine("问题：$title")
+                    appendLine("详情：$detail")
+                    val crashFile = File(filesDir, "last-native-crash.txt")
+                    if (crashFile.exists()) appendLine("上次原生崩溃：${crashFile.readText().takeLast(12000)}")
+                    val webCrashFile = File(filesDir, "last-webview-crash.txt")
+                    if (webCrashFile.exists()) appendLine("上次 WebView 崩溃：${webCrashFile.readText().takeLast(12000)}")
+                }
+                runCatching {
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("小手机诊断摘要", summary))
+                    val copied = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString().orEmpty()
+                    if (copied.isBlank()) throw IllegalStateException("系统剪贴板没有写入内容")
+                    android.widget.Toast.makeText(this, "诊断摘要已复制；发送前请检查隐私信息", android.widget.Toast.LENGTH_LONG).show()
+                }.onFailure {
+                    // Android 13+ 某些 WebView/后台状态会静默拒绝剪贴板；至少把摘要落成文件。
+                    val fallback = File(getExternalFilesDir(null) ?: filesDir, "last-diagnostic.txt")
+                    runCatching { fallback.writeText(summary) }
+                    android.widget.Toast.makeText(this, "剪贴板不可用，已保存诊断到：" + fallback.absolutePath, android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+            recoveryOverlay = ScrollView(this).apply {
+                isFillViewport = true
+                addView(panel)
+                setBackgroundColor(android.graphics.Color.rgb(248, 246, 242))
+            }
+            rootContainer.addView(recoveryOverlay, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ))
+            recoveryOverlay?.bringToFront()
+        }
+    }
+
+
+private data class CachedSharedVideo(val cacheId: String, val contentUri: String, val mediaUrl: String? = null, val embedUrl: String? = null)
+private data class SharedVideoPage(val pageUrl: String, val html: String?, val directVideoUrl: String?)
+
+private val sharedVideoExecutor = Executors.newFixedThreadPool(2)
+private val sharedVideoClient: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .callTimeout(75, TimeUnit.SECONDS)
+        .build()
+}
+
+private fun sharedVideoCacheDir(): File = File(cacheDir, "shared-video")
+
+private fun isHostUnder(host: String, suffix: String): Boolean =
+    host.equals(suffix, ignoreCase = true) || host.endsWith("." + suffix, ignoreCase = true)
+
+/**
+ * The native resolver runs only after a trusted app page explicitly asks for it.
+ * Accept public DNS hostnames so ordinary video pages can be inspected too, while
+ * rejecting local names and literal IPs to avoid turning the bridge into an SSRF tool.
+ * Media URLs are still restricted to public hosts and direct MP4-like resources below.
+ */
+private fun isPublicResolverHost(host: String): Boolean {
+    val lower = host.lowercase().trimEnd('.')
+    if (lower.isBlank() || lower == "localhost" || lower.endsWith(".localhost")
+        || lower.endsWith(".local") || lower.endsWith(".internal") || lower.endsWith(".lan")
+        || lower.endsWith(".test") || lower.endsWith(".invalid") || lower.endsWith(".example")
+        || lower.contains(":") || Regex("^(\\d{1,3}\\.){3}\\d{1,3}$").matches(lower)) return false
+    return lower.contains(".")
+}
+
+private fun isAllowedShareOrPageHost(host: String): Boolean = isPublicResolverHost(host)
+
+private fun isAllowedVideoHost(host: String): Boolean = isPublicResolverHost(host)
+
+private fun isSupportedShareUrl(rawUrl: String): Boolean {
+    val url = rawUrl.trim().toHttpUrlOrNull() ?: return false
+    if (url.scheme != "http" && url.scheme != "https" || url.username.isNotEmpty() || url.password.isNotEmpty()) return false
+    return isPublicResolverHost(url.host)
+}
+
+private fun isTrustedShellOrigin(rawUrl: String?): Boolean {
+    if (rawUrl.isNullOrBlank()) return false
+    val configured = Uri.parse(SITE_URL)
+    val current = Uri.parse(rawUrl)
+    val configuredScheme = configured.scheme ?: return false
+    val currentScheme = current.scheme ?: return false
+    val configuredHost = configured.host ?: return false
+    val currentHost = current.host ?: return false
+    fun normalizedPort(uri: Uri): Int = when {
+        uri.port >= 0 -> uri.port
+        uri.scheme.equals("https", ignoreCase = true) -> 443
+        uri.scheme.equals("http", ignoreCase = true) -> 80
+        else -> -1
+    }
+    return currentScheme.equals(configuredScheme, ignoreCase = true)
+        && currentHost.equals(configuredHost, ignoreCase = true)
+        && normalizedPort(current) == normalizedPort(configured)
+}
+
+private fun isTrustedShellPage(): Boolean = isTrustedShellOrigin(trustedShellUrl)
+
+private fun shellOriginRule(): String? {
+    val uri = Uri.parse(SITE_URL)
+    val scheme = uri.scheme ?: return null
+    val host = uri.host ?: return null
+    val defaultPort = if (scheme.equals("https", true)) 443 else if (scheme.equals("http", true)) 80 else -1
+    val port = if (uri.port >= 0 && uri.port != defaultPort) ":${uri.port}" else ""
+    return "$scheme://$host$port"
+}
+private fun secureBridgeBootstrapScript(): String {
+    val nonceJson = org.json.JSONObject.quote(bridgeNonce)
+    return """
+        (function () {
+          if (window !== window.top) return;
+          const nonce = $nonceJson;
+          const attach = (publicName, privateName) => {
+            if (Object.prototype.hasOwnProperty.call(window, publicName)) return;
+            const nativeApi = window[privateName];
+            if (!nativeApi || typeof nativeApi.getMethodNames !== "function") return;
+            let names;
+            try { names = JSON.parse(nativeApi.getMethodNames()); } catch (_) { return; }
+            const wrapper = Object.create(null);
+            for (const methodName of names) {
+              wrapper[methodName] = (...args) => {
+                const raw = nativeApi.invoke(nonce, methodName, JSON.stringify(args));
+                let result;
+                try { result = JSON.parse(raw); } catch (_) { throw new Error("Invalid native bridge response"); }
+                if (!result || result.ok !== true) throw new Error(result && result.error ? result.error : "Native bridge call rejected");
+                return result.value;
+              };
+            }
+            Object.freeze(wrapper);
+            Object.defineProperty(window, publicName, { value: wrapper, configurable: false, writable: false });
+          };
+          attach("AndroidShell", "AndroidShellSecure");
+          attach("PhoneWidget", "PhoneWidgetSecure");
+          window.dispatchEvent(new Event("floatshell-bridge-ready"));
+        })();
+    """.trimIndent()
+}
+
+private fun isLikelyPublicHls(rawUrl: String): Boolean {
+    val url = rawUrl.toHttpUrlOrNull() ?: return false
+    if (!isAllowedVideoHost(url.host)) return false
+    return url.encodedPath.lowercase().endsWith(".m3u8")
+}
+
+private fun isLikelyPublicMp4(rawUrl: String): Boolean {
+    val url = rawUrl.toHttpUrlOrNull() ?: return false
+    if (!isAllowedVideoHost(url.host)) return false
+    val path = url.encodedPath.lowercase()
+    if (path.endsWith(".m3u8") || path.endsWith(".jpg") || path.endsWith(".jpeg")
+        || path.endsWith(".png") || path.endsWith(".webp") || path.endsWith(".gif")) return false
+    return path.endsWith(".mp4")
+        || isHostUnder(url.host, "douyinvod.com")
+        || isHostUnder(url.host, "kwaicdn.com")
+        || isHostUnder(url.host, "kwimgs.com")
+        || isHostUnder(url.host, "yximgs.com")
+        || isHostUnder(url.host, "kspkg.com")
+        || isHostUnder(url.host, "ks-cdn.com")
+        // Douyin's SSR parser exposes signed playback URLs on aweme.snssdk.com.
+        || (isHostUnder(url.host, "snssdk.com") && path.contains("/aweme/v1/play"))
+        || (isHostUnder(url.host, "xhscdn.com") && (path.contains("video") || path.contains("stream") || path.contains("media") || url.queryParameter("type") == "video"))
+}
+
+private fun readBoundedText(input: java.io.InputStream, maxBytes: Int): String {
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(8192)
+    var total = 0
+    while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        total += count
+        if (total > maxBytes) throw IllegalStateException("分享页面过大，已停止解析")
+        output.write(buffer, 0, count)
+    }
+    return output.toString(Charsets.UTF_8.name())
+}
+
+private fun fetchSharedVideoPage(startUrl: String): SharedVideoPage {
+    var currentUrl = startUrl
+    for (attempt in 0..6) {
+        val current = currentUrl.toHttpUrlOrNull()
+            ?: throw IllegalArgumentException("分享链接格式不正确")
+        if (!isPublicResolverHost(current.host)) {
+            throw IllegalArgumentException("跳转到了不支持的平台域名，已停止解析")
+        }
+
+        val requestBuilder = Request.Builder()
+            .url(current)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+            .header("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8")
+        runCatching { CookieManager.getInstance().getCookie(current.toString()) }
+            .getOrNull()?.takeIf { it.isNotBlank() }?.let { requestBuilder.header("Cookie", it) }
+        val request = requestBuilder.build()
+        val response = sharedVideoClient.newCall(request).execute()
+        if (response.code in 300..399) {
+            val location = response.header("Location")
+            val next = if (location.isNullOrBlank()) null else response.request.url.resolve(location)
+            response.close()
+            if (next == null) throw IllegalStateException("分享页面返回了无效跳转")
+            val nextUrl = next.toString()
+            if (isLikelyPublicMp4(nextUrl) || isLikelyPublicHls(nextUrl)) return SharedVideoPage(currentUrl, null, nextUrl)
+            if (!isPublicResolverHost(next.host)) {
+                throw IllegalStateException("分享页面跳转到受限或不支持的地址，已停止解析")
+            }
+            currentUrl = nextUrl
+            continue
+        }
+
+        response.use {
+            if (!it.isSuccessful) throw IllegalStateException("平台页面返回 HTTP " + it.code)
+            val contentType = (it.header("Content-Type") ?: "").lowercase()
+            if ((contentType.startsWith("video/") && isLikelyPublicMp4(current.toString()))
+                || (contentType.contains("mpegurl") && isAllowedVideoHost(current.host))) {
+                return SharedVideoPage(current.toString(), null, current.toString())
+            }
+            val body = it.body ?: throw IllegalStateException("平台页面没有可读取的内容")
+            val length = body.contentLength()
+            if (length > 4L * 1024L * 1024L) throw IllegalStateException("分享页面过大，已停止解析")
+            val html = body.byteStream().use { stream -> readBoundedText(stream, 4 * 1024 * 1024) }
+            return SharedVideoPage(current.toString(), html, null)
+        }
+    }
+    throw IllegalStateException("分享链接跳转次数过多")
+}
+
+/**
+ * Parse Douyin's server-rendered window._ROUTER_DATA payload before falling back to URL scanning.
+ * This follows the established open-source parser strategy: loaderData -> video/note page ->
+ * videoInfoRes.item_list[0].video.play_addr.url_list. No signature or login bypass is attempted.
+ */
+private fun extractDouyinRouterPlayUrl(html: String): String? {
+    if (!html.contains("douyin.com", ignoreCase = true) && !html.contains("iesdouyin.com", ignoreCase = true)) return null
+    val match = Regex("""window\._ROUTER_DATA\s*=\s*(.*?)</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)).find(html)
+        ?: return null
+    var raw = match.groupValues[1].trim()
+    // Find the matching JSON object end, ignoring braces inside quoted strings.
+    var depth = 0
+    var quoted = false
+    var escaped = false
+    var end = -1
+    for (i in raw.indices) {
+        val c = raw[i]
+        if (quoted) {
+            if (escaped) escaped = false
+            else if (c == '\\') escaped = true
+            else if (c == '"') quoted = false
+        } else {
+            when (c) {
+                '"' -> quoted = true
+                '{' -> depth++
+                '}' -> { depth--; if (depth == 0) { end = i + 1; break } }
+            }
+        }
+    }
+    if (end <= 0) return null
+    raw = raw.substring(0, end).replace(Regex(""":\s*undefined(?=[,\s}\]])"""), ": null")
+    return runCatching {
+        val root = org.json.JSONObject(raw)
+        val loader = root.optJSONObject("loaderData") ?: return@runCatching null
+        val page = loader.keys().asSequence()
+            .filter { it.contains("video_(id)/page") || it.contains("note_(id)/page") }
+            .mapNotNull { loader.optJSONObject(it) }
+            .firstOrNull() ?: return@runCatching null
+        val items = page.optJSONObject("videoInfoRes")?.optJSONArray("item_list")
+            ?: return@runCatching null
+        val item = items.optJSONObject(0) ?: return@runCatching null
+        val urls = item.optJSONObject("video")?.optJSONObject("play_addr")?.optJSONArray("url_list")
+            ?: return@runCatching null
+        (0 until urls.length()).asSequence()
+            .mapNotNull { urls.optString(it).takeIf(String::isNotBlank) }
+            .map { it.replace("playwm", "play") }
+            .firstOrNull { isLikelyPublicMp4(it) }
+    }.getOrNull()
+}
+
+private fun extractPublicMp4Url(html: String): String? {
+    // Platforms commonly serialize media URLs in escaped JSON, meta tags, or source elements.
+    val normalized = html
+        .replace("\\/", "/")
+        .replace("\\u002F", "/", ignoreCase = true)
+        .replace("\\u0026", "&", ignoreCase = true)
+        .replace("\\u003A", ":", ignoreCase = true)
+        .replace("\\u003D", "=", ignoreCase = true)
+        .replace("\\u003F", "?", ignoreCase = true)
+        .replace("&amp;", "&", ignoreCase = true)
+        .replace("&quot;", "\"")
+        .replace("&#x2F;", "/", ignoreCase = true)
+        .replace("&#47;", "/")
+    val urlRegex = Regex("""https?://[^\s"'<>\\]+""", RegexOption.IGNORE_CASE)
+    val markerNames = listOf(
+        "playAddr", "play_addr", "playUrl", "play_url", "downloadAddr",
+        "download_addr", "srcNoMark", "src_no_mark", "play_url_h264",
+        "video_url", "videoUrl", "video_src", "videoSrc", "contentUrl",
+        "og:video:secure_url", "og:video", "twitter:player:stream",
+        "<video", "<source", "currentSrc", "master_url", "originVideoKey"
+    )
+    val preferred = mutableListOf<String>()
+    for (marker in markerNames) {
+        var from = 0
+        while (true) {
+            val index = normalized.indexOf(marker, from, ignoreCase = true)
+            if (index < 0) break
+            val end = minOf(normalized.length, index + 12000)
+            preferred.addAll(urlRegex.findAll(normalized.substring(index, end)).map { it.value })
+            from = index + marker.length
+        }
+    }
+    val decoded = normalized
+        .replace("%3A", ":", ignoreCase = true)
+        .replace("%2F", "/", ignoreCase = true)
+        .replace("%3F", "?", ignoreCase = true)
+        .replace("%26", "&", ignoreCase = true)
+        .replace("%3D", "=", ignoreCase = true)
+    val candidates = preferred + urlRegex.findAll(decoded).map { it.value }.toList() +
+        urlRegex.findAll(normalized).map { it.value }.toList()
+    return candidates.asSequence()
+        .map { it.trim().trimEnd(',', ';', ')', ']', '}', '\\', '.', '"') }
+        .distinct()
+        .firstOrNull { candidate ->
+            val path = candidate.substringBefore('?').substringBefore('#').lowercase()
+            isLikelyPublicMp4(candidate) &&
+                !path.endsWith(".jpg") && !path.endsWith(".jpeg") &&
+                !path.endsWith(".png") && !path.endsWith(".webp") &&
+                !path.endsWith(".gif") && !path.endsWith(".avif")
+        }
+}
+
+private fun extractPublicHlsUrl(html: String): String? {
+    val normalized = html.replace("\\/", "/")
+        .replace("\\u002F", "/", ignoreCase = true)
+        .replace("&amp;", "&", ignoreCase = true)
+    return Regex("""https?://[^\s"'<>\\]+""", RegexOption.IGNORE_CASE)
+        .findAll(normalized)
+        .map { it.value.trim().trimEnd(',', ';', ')', ']', '}', '\\', '.', '"') }
+        .firstOrNull(::isLikelyPublicHls)
+}
+private fun downloadPublicMp4(mediaUrl: String, pageUrl: String): CachedSharedVideo {
+    var currentUrl = mediaUrl
+    for (attempt in 0..5) {
+        val current = currentUrl.toHttpUrlOrNull()
+            ?: throw IllegalArgumentException("视频地址格式不正确")
+        if (!isLikelyPublicMp4(current.toString())) {
+            throw IllegalStateException("只允许从支持的平台公开视频 CDN 获取 MP4")
+        }
+        val requestBuilder = Request.Builder()
+            .url(current)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+            .header("Accept", "video/mp4,video/*;q=0.9,application/octet-stream;q=0.8,*/*;q=0.5")
+            .header("Referer", pageUrl)
+        runCatching { CookieManager.getInstance().getCookie(current.toString()) }
+            .getOrNull()?.takeIf { it.isNotBlank() }?.let { requestBuilder.header("Cookie", it) }
+        val request = requestBuilder.build()
+        val response = sharedVideoClient.newCall(request).execute()
+        if (response.code in 300..399) {
+            val location = response.header("Location")
+            val next = if (location.isNullOrBlank()) null else response.request.url.resolve(location)
+            response.close()
+            if (next == null || !isLikelyPublicMp4(next.toString())) {
+                throw IllegalStateException("视频流跳转到了不支持的地址，已停止下载")
+            }
+            currentUrl = next.toString()
+            continue
+        }
+
+        response.use {
+            if (!it.isSuccessful) throw IllegalStateException("视频流返回 HTTP " + it.code)
+            val contentType = (it.header("Content-Type") ?: "").lowercase()
+            if (contentType.contains("mpegurl") || current.encodedPath.endsWith(".m3u8", ignoreCase = true)) {
+                throw IllegalStateException("此链接返回的是 HLS 流，不是可直接嵌入的 MP4")
+            }
+            if (contentType.startsWith("image/")) throw IllegalStateException("平台返回了图片而不是视频")
+            if (!contentType.startsWith("video/") && !contentType.contains("octet-stream")
+                && !isLikelyPublicMp4(current.toString())) {
+                throw IllegalStateException("平台没有返回可播放的视频流")
+            }
+            val body = it.body ?: throw IllegalStateException("视频流为空")
+            if (body.contentLength() > 100L * 1024L * 1024L) throw IllegalStateException("视频超过 100 MB 缓存上限")
+            val directory = sharedVideoCacheDir()
+            if (!directory.exists() && !directory.mkdirs()) throw IllegalStateException("无法创建临时视频缓存目录")
+            val cacheId = UUID.randomUUID().toString()
+            val file = File(directory, cacheId + ".mp4")
+            try {
+                body.byteStream().use { input ->
+                    FileOutputStream(file).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            if (total > 100L * 1024L * 1024L) throw IllegalStateException("视频超过 100 MB 缓存上限")
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                }
+                val contentUri = FileProvider.getUriForFile(
+                    this,
+                    packageName + ".sharedvideos",
+                    file
+                ).toString()
+                return CachedSharedVideo(cacheId, contentUri)
+            } catch (error: Throwable) {
+                file.delete()
+                throw error
+            }
+        }
+    }
+    throw IllegalStateException("视频流跳转次数过多")
+}
+
+private fun resolveAndCacheSharedVideo(rawUrl: String): CachedSharedVideo {
+    val trimmed = rawUrl.trim()
+    if (!isSupportedShareUrl(trimmed)) throw IllegalArgumentException("仅支持公开 HTTP(S) 网页链接；本机、内网和非公开地址不支持")
+    pruneCachedSharedVideos()
+    val firstPage = fetchSharedVideoPage(trimmed)
+    val pages = mutableListOf(firstPage)
+
+    // Mature Douyin parsers request the mobile SSR share route directly after resolving a
+    // short link. Try those canonical routes too; the original URL often renders a shell page.
+    val resolvedUrl = firstPage.pageUrl
+    val douyinId = Regex("""(?:douyin\.com/(?:video|note|share/video|share/note)/|iesdouyin\.com/share/(?:video|note)/)(\d+)""", RegexOption.IGNORE_CASE)
+        .find(resolvedUrl)?.groupValues?.getOrNull(1)
+    if (douyinId != null) {
+        listOf(
+            "https://m.douyin.com/share/video/$douyinId",
+            "https://www.iesdouyin.com/share/video/$douyinId"
+        ).forEach { candidate ->
+            if (pages.none { it.pageUrl == candidate }) {
+                runCatching { fetchSharedVideoPage(candidate) }.getOrNull()?.let(pages::add)
+            }
+        }
+    }
+
+    var lastError: Throwable? = null
+    for (page in pages) {
+        val mediaUrl = page.directVideoUrl
+            ?: page.html?.let { extractDouyinRouterPlayUrl(it) }
+            ?: page.html?.let { extractPublicMp4Url(it) }
+            ?: page.html?.let { extractPublicHlsUrl(it) }
+        if (mediaUrl != null) {
+            return try {
+                if (isLikelyPublicHls(mediaUrl)) return CachedSharedVideo("", "", mediaUrl)
+                downloadPublicMp4(mediaUrl, page.pageUrl)
+            } catch (error: Throwable) {
+                lastError = error
+                continue
+            }
+        }
+    }
+    throw IllegalStateException(
+        lastError?.message
+            ?: "页面中没有找到可直接播放的公开 MP4；可能需要登录、由 JavaScript 加载或使用了平台专有签名"
+    )
+}
+
+/**
+ * Bilibili short links (b23.tv) often expose only the official player page, not a public
+ * MP4 stream. If stream extraction fails, resolve the canonical BV/av identifier and keep
+ * playback inside the app with Bilibili's official embedded player instead of a dead panel.
+ */
+private fun resolveBilibiliEmbedFallback(rawUrl: String): CachedSharedVideo? {
+    val input = rawUrl.toHttpUrlOrNull() ?: return null
+    if (!isHostUnder(input.host, "bilibili.com") && !input.host.equals("b23.tv", ignoreCase = true)) return null
+    val page = fetchSharedVideoPage(rawUrl)
+    val combined = page.pageUrl + "\n" + (page.html ?: "")
+    val bvid = Regex("""(?:/video/|bvid[=:])\s*(BV[0-9A-Za-z]{10})""", RegexOption.IGNORE_CASE)
+        .find(combined)?.groupValues?.getOrNull(1)
+    val aid = Regex("""(?:/av|aid[=:])\s*(\d+)""", RegexOption.IGNORE_CASE)
+        .find(combined)?.groupValues?.getOrNull(1)
+    val base = "https://player.bilibili.com/player.html"
+    val query = when {
+        !bvid.isNullOrBlank() -> "bvid=" + Uri.encode(bvid)
+        !aid.isNullOrBlank() -> "aid=" + Uri.encode(aid)
+        else -> return null
+    }
+    return CachedSharedVideo("", "", null, "$base?$query&autoplay=0&danmaku=0&high_quality=1")
+}
+
+/** Dispatch a resolver result back into the trusted app page. Must be called on the UI thread. */
+private fun emitSharedVideoResult(requestId: String, result: Result<CachedSharedVideo>) {
+    if (!::webView.isInitialized || isFinishing || !isTrustedShellPage()) {
+        result.getOrNull()?.let { deleteCachedSharedVideoInternal(it.cacheId) }
+        return
+    }
+    val payload = org.json.JSONObject().put("requestId", requestId)
+    result.onSuccess {
+        payload.put("ok", true)
+        if (it.cacheId.isNotBlank()) payload.put("cacheId", it.cacheId)
+        if (it.contentUri.isNotBlank()) payload.put("contentUri", it.contentUri)
+        if (!it.mediaUrl.isNullOrBlank()) payload.put("mediaUrl", it.mediaUrl)
+        if (!it.embedUrl.isNullOrBlank()) payload.put("embedUrl", it.embedUrl)
+    }.onFailure { error ->
+        payload.put("ok", false).put("message", (error.message ?: "公开视频解析失败").take(240))
+    }
+    val script = "window.dispatchEvent(new CustomEvent('floatshell-shared-video-ready',{detail:" + payload.toString() + "}));"
+    webView.evaluateJavascript(script, null)
+}
+
+/**
+ * Some platforms create the video URL only after JavaScript executes. Load the share page in
+ * an isolated WebView (no JavaScript bridge is installed), inspect video/source elements and
+ * performance resource URLs, then cache only a validated public MP4. The hidden view is always
+ * removed and destroyed after success or timeout.
+ */
+@SuppressLint("SetJavaScriptEnabled")
+private fun resolveSharedVideoWithWebView(rawUrl: String, callback: (Result<CachedSharedVideo>) -> Unit) {
+    if (!isSupportedShareUrl(rawUrl) || !::rootContainer.isInitialized) {
+        callback(Result.failure(IllegalArgumentException("分享链接无效")))
+        return
+    }
+    val resolverView = WebView(this)
+    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    var finished = false
+    var mediaDownloadStarted = false
+    var attempts = 0
+    val startedAt = System.currentTimeMillis()
+    fun finish(result: Result<CachedSharedVideo>) {
+        if (finished) {
+            result.getOrNull()?.let { deleteCachedSharedVideoInternal(it.cacheId) }
+            return
+        }
+        finished = true
+        handler.removeCallbacksAndMessages(resolverView)
+        runCatching { resolverView.stopLoading() }
+        runCatching { (resolverView.parent as? android.view.ViewGroup)?.removeView(resolverView) }
+        runCatching { resolverView.destroy() }
+        callback(result)
+    }
+    fun inspectPage() {
+        if (finished) return
+        attempts++
+        val script = """
+            (function() {
+              const out = [];
+              const add = v => { if (typeof v === 'string' && (v.startsWith('https://') || v.startsWith('http://'))) out.push(v); };
+              document.querySelectorAll('video').forEach(v => { add(v.currentSrc); add(v.src); });
+              document.querySelectorAll('video source, source').forEach(v => add(v.src));
+              document.querySelectorAll('meta[property="og:video"],meta[property="og:video:url"],meta[name="twitter:player:stream"],meta[itemprop="contentUrl"]')
+                .forEach(v => add(v.content));
+              try {
+                performance.getEntriesByType('resource').forEach(e => {
+                  if (/.mp4(?:[?#]|$)|.m3u8(?:[?#]|$)|video|playaddr|play_url/i.test(e.name)) add(e.name);
+                });
+              } catch (_) {}
+              return JSON.stringify(Array.from(new Set(out)).slice(0, 80));
+            })();
+        """.trimIndent()
+        resolverView.evaluateJavascript(script) { encoded ->
+            if (finished) return@evaluateJavascript
+            val candidates = runCatching {
+                val decoded = org.json.JSONTokener(encoded ?: "null").nextValue() as? String ?: "[]"
+                org.json.JSONArray(decoded)
+            }.getOrNull()
+            val mediaUrl = candidates?.let { array ->
+                (0 until array.length()).asSequence()
+                    .mapNotNull { index -> array.optString(index).takeIf { it.startsWith("http://") || it.startsWith("https://") } }
+                    .firstOrNull { isLikelyPublicMp4(it) || isLikelyPublicHls(it) }
+            }
+            if (mediaUrl != null && !mediaDownloadStarted) {
+                mediaDownloadStarted = true
+                sharedVideoExecutor.execute {
+                    val result = runCatching {
+                        if (isLikelyPublicHls(mediaUrl)) CachedSharedVideo("", "", mediaUrl)
+                        else downloadPublicMp4(mediaUrl, rawUrl)
+                    }
+                    runOnUiThread { finish(result) }
+                }
+            } else if (mediaUrl == null && (attempts >= 14 || System.currentTimeMillis() - startedAt > 18000L)) {
+                finish(Result.failure(IllegalStateException("动态页面加载后仍未发现可直接播放的 MP4；可能需要平台签名、登录或 HLS 播放支持")))
+            } else {
+                handler.postAtTime({ inspectPage() }, resolverView, android.os.SystemClock.uptimeMillis() + 1000L)
+            }
+        }
+    }
+    resolverView.settings.apply {
+        javaScriptEnabled = true
+        domStorageEnabled = true
+        mediaPlaybackRequiresUserGesture = false
+        allowFileAccess = false
+        allowContentAccess = false
+        userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    }
+    CookieManager.getInstance().setAcceptCookie(true)
+    CookieManager.getInstance().setAcceptThirdPartyCookies(resolverView, true)
+    resolverView.alpha = 0.01f
+    resolverView.isFocusable = false
+    resolverView.isFocusableInTouchMode = false
+    rootContainer.addView(resolverView, FrameLayout.LayoutParams(1, 1))
+    resolverView.webViewClient = object : WebViewClient() {
+        override fun onPageFinished(view: WebView, url: String?) {
+            inspectPage()
+        }
+        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
+            if (request.isForMainFrame && !finished) {
+                finish(Result.failure(IllegalStateException("平台网页加载失败：" + error.description)))
+            }
+        }
+    }
+    handler.postAtTime({
+        if (!finished && !mediaDownloadStarted) finish(Result.failure(IllegalStateException("动态解析超时（18 秒）")))
+    }, resolverView, android.os.SystemClock.uptimeMillis() + 19000L)
+    resolverView.loadUrl(rawUrl)
+}
+
+private fun pruneCachedSharedVideos() {
+    val directory = sharedVideoCacheDir()
+    if (!directory.exists()) return
+    val cutoff = System.currentTimeMillis() - 24L * 60L * 60L * 1000L
+    directory.listFiles()?.filter { it.isFile && it.name.endsWith(".mp4") }?.forEach { file ->
+        if (file.lastModified() < cutoff) file.delete()
+    }
+}
+
+private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
+    if (!cacheId.matches(Regex("[a-fA-F0-9-]{36}"))) return false
+    val directory = sharedVideoCacheDir().canonicalFile
+    val file = File(directory, cacheId + ".mp4").canonicalFile
+    if (file.parentFile != directory) return false
+    return file.delete() || !file.exists()
+}
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (intent?.action == CheckInAlarmScheduler.ACTION_OPEN_REMINDER) {
-            CheckInAlarmScheduler.markReminderOpened(this)
+        pruneCachedSharedVideos()
+        installNativeCrashRecorder()
+
+        // If the previous launch never reached a successful main-page load, start in
+        // a native-only recovery screen. This avoids repeatedly initializing a crashing
+        // WebView/bridge stack and lets users copy diagnostics without opening the website.
+        val startupPrefs = getSharedPreferences("float_startup_diagnostics", Context.MODE_PRIVATE)
+        val crashFile = File(filesDir, "last-native-crash.txt")
+        val lastSuccessAt = startupPrefs.getLong("last_successful_page_at", 0L)
+        val recordedCrashAt = if (crashFile.isFile) {
+            runCatching { crashFile.useLines { it.firstOrNull()?.removePrefix("time=")?.toLongOrNull() ?: 0L } }.getOrDefault(0L)
+        } else 0L
+        // A newly recorded native crash also triggers safe mode, even if the page had
+        // loaded successfully earlier in the same process lifecycle.
+        recoveryBoot = startupPrefs.getBoolean("launch_in_progress", false) || recordedCrashAt > lastSuccessAt
+        startupPrefs.edit()
+            .putBoolean("launch_in_progress", true)
+            .putLong("launch_started_at", System.currentTimeMillis())
+            .commit()
+        if (recoveryBoot) {
+            rootContainer = FrameLayout(this)
+            setContentView(rootContainer)
+            val lastCrash = if (crashFile.exists()) crashFile.readText().takeLast(6000) else "没有捕获到未捕获异常堆栈；也可能是系统强制结束、ANR 或崩溃发生在记录器安装前。"
+            val webCrashFile = File(filesDir, "last-webview-crash.txt")
+            val lastWebCrash = if (webCrashFile.isFile) webCrashFile.readText().takeLast(6000) else ""
+            showNativeRecoveryScreen(
+                "检测到上次启动未完成",
+                "已进入原生恢复模式，暂不启动网页和原生桥，避免反复闪退。请先复制诊断摘要；确认后再点“退出恢复模式并重试”。\n\n上次异常摘要：\n" + lastCrash + (if (lastWebCrash.isNotBlank()) "\n\n上次 WebView 崩溃：\n" + lastWebCrash else "")
+            )
+            return
         }
+
         WindowCompat.setDecorFitsSystemWindows(window, false)
         enableDisplayCutoutCover()
         hideSystemStatusBar()
@@ -264,7 +1080,7 @@ class MainActivity : AppCompatActivity() {
         // 打开 WebView 远程调试通道。Android 默认是关闭的，导致在电脑上
         // chrome://inspect 根本看不到这台设备——排查推送/后台任务时没有任何日志可看。
         // 打开后仅在「USB 调试 + chrome://inspect」时可见，不影响正常使用。
-        WebView.setWebContentsDebuggingEnabled(true)
+        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         rootContainer = FrameLayout(this).apply {
             addView(
                 webView,
@@ -286,16 +1102,32 @@ class MainActivity : AppCompatActivity() {
             domStorageEnabled = true
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
+            // 一起看本地解析服务通常是 http://127.0.0.1:8765；页面是 https，
+            // WebView 默认会把这种混合内容拦掉，导致本地解析永远走不到。
+            mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             allowFileAccess = false
             userAgentString = "$userAgentString FloatShell/$VERSION"
         }
         CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)
+        // The app embeds cross-site video players (notably Bilibili's official iframe).
+        // Third-party cookies must be permitted for those embeds to retain supported session state.
+        // This does not bypass platform login/permission checks; it only removes our WebView-level block.
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
-        webView.addJavascriptInterface(ShellBridge(), "AndroidShell")
+        // The raw Android interfaces are never exposed under the app-facing names.
+        // Cross-origin frames can see JavascriptInterface objects, so they receive only a nonce-gated RPC endpoint.
+        webView.addJavascriptInterface(SecureJavascriptBridge(ShellBridge()), "AndroidShellSecure")
+        webView.addJavascriptInterface(SecureJavascriptBridge(PhoneWidgetBridge()), "PhoneWidgetSecure")
+        val originRule = shellOriginRule()
+        if (originRule != null && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            secureBridgeDocumentStartInstalled = runCatching {
+                WebViewCompat.addDocumentStartJavaScript(webView, secureBridgeBootstrapScript(), setOf(originRule))
+                true
+            }.getOrDefault(false)
+        }
         // 桌面小组件桥：独立命名空间，跟通话/截屏那套分开，
         // 免得以後加方法时和 AndroidShell 里几十个方法混在一起。
-        webView.addJavascriptInterface(PhoneWidgetBridge(), "PhoneWidget")
+        // PhoneWidgetSecure is registered above through the same nonce-gated wrapper.
         // 步数传感器是异步的（没有同步取值接口），必须提前挂上才有值可读。
         // 这里只是「挂监听」，不申请权限；没授权时 attachStepSensor 内部会直接返回。
         PerceptionBridge.attachStepSensor(this)
@@ -304,10 +1136,63 @@ class MainActivity : AppCompatActivity() {
         ShellBus.webView = webView
 
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                trustedShellUrl = url ?: trustedShellUrl
+                if (!secureBridgeDocumentStartInstalled && isTrustedShellPage()) {
+                    view.evaluateJavascript(secureBridgeBootstrapScript(), null)
+                }
+                recoveryOverlay?.let { rootContainer.removeView(it) }
+                recoveryOverlay = null
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                if (isTrustedShellOrigin(url)) trustedShellUrl = url
+            }
+
+            override fun onPageFinished(view: WebView, url: String?) {
+                super.onPageFinished(view, url)
+                if (isTrustedShellOrigin(url)) {
+                    trustedShellUrl = url
+                    getSharedPreferences("float_startup_diagnostics", Context.MODE_PRIVATE)
+                        .edit()
+                        .putBoolean("launch_in_progress", false)
+                        .putLong("last_successful_page_at", System.currentTimeMillis())
+                        .apply()
+                }
+            }
+
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
+                super.onReceivedError(view, request, error)
+                if (request.isForMainFrame) {
+                    val description = "网页主文档加载失败：${error.description}（错误码 ${error.errorCode}）"
+                    showNativeRecoveryScreen("网页没有加载成功", description)
+                }
+            }
+
+            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: android.webkit.WebResourceResponse) {
+                super.onReceivedHttpError(view, request, response)
+                if (request.isForMainFrame && response.statusCode >= 400) {
+                    showNativeRecoveryScreen("站点返回错误", "HTTP ${response.statusCode} ${response.reasonPhrase ?: ""}\n地址：${request.url.host ?: "未知"}")
+                }
+            }
+
+            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                val reason = if (detail.didCrash()) "WebView 渲染进程崩溃" else "WebView 渲染进程被系统回收"
+                val detailText = "$reason；系统优先级：${detail.rendererPriorityAtExit()}"
+                recordWebViewCrash(reason, detailText)
+                showNativeRecoveryScreen("网页进程异常退出", detailText)
+                return true
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url
+                // Subframe navigations must never replace the trusted top-level URL snapshot.
+                // Otherwise a cross-origin video iframe would revoke the bridge for the real app page.
+                if (!request.isForMainFrame) return false
+                trustedShellUrl = url.toString()
                 val scheme = url.scheme ?: return false
-                // 站内导航留在壳里；http(s) 外链和自定义协议（shortcuts:// 等）交给系统
+                // 站内导航留在壳里；顶层 http(s) 外链和自定义协议交给系统
                 if (scheme == "http" || scheme == "https") {
                     if (url.host == Uri.parse(SITE_URL).host) return false
                     return runCatching {
@@ -321,6 +1206,40 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.webChromeClient = object : WebChromeClient() {
+            // Required by HTML5 video players inside cross-origin platform iframes.
+            override fun onShowCustomView(view: View, callback: WebChromeClient.CustomViewCallback) {
+                if (webVideoCustomView != null) {
+                    callback.onCustomViewHidden()
+                    return
+                }
+                webVideoCustomView = view
+                webVideoCustomViewCallback = callback
+                webView.visibility = View.INVISIBLE
+                rootContainer.setPadding(0, 0, 0, 0)
+                rootContainer.addView(view, FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    Gravity.CENTER,
+                ))
+                view.requestFocus()
+                hideSystemStatusBar()
+            }
+
+            override fun onHideCustomView() {
+                hideWebVideoCustomView(notifyPage = false)
+            }
+
+            // Capture WebView JavaScript warnings/errors locally for the diagnostics panel.
+            override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage): Boolean {
+                val level = when (consoleMessage.messageLevel()) {
+                    android.webkit.ConsoleMessage.MessageLevel.ERROR -> "ERROR"
+                    android.webkit.ConsoleMessage.MessageLevel.WARNING -> "WARN"
+                    else -> return true
+                }
+                recordWebConsoleMessage(level + " " + consoleMessage.sourceId().orEmpty() + ":" +
+                    consoleMessage.lineNumber() + " " + consoleMessage.message().orEmpty())
+                return true
+            }
             override fun onPermissionRequest(request: android.webkit.PermissionRequest) {
                 val supported = request.resources.filter { webResourcePermissions(it).isNotEmpty() }
                 if (supported.isEmpty()) { request.deny(); return }
@@ -378,7 +1297,18 @@ class MainActivity : AppCompatActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (webView.canGoBack()) webView.goBack() else moveTaskToBack(true)
+                if (webVideoCustomView != null) {
+                    hideWebVideoCustomView(notifyPage = true)
+                    return
+                }
+                if (!::webView.isInitialized) {
+                    moveTaskToBack(true)
+                    return
+                }
+                webView.evaluateJavascript("(function(){var d={handled:false};window.dispatchEvent(new CustomEvent('floatphone-native-back',{detail:d}));return d.handled?'yes':'no';})()") { result ->
+                    if (result?.contains("yes") == true) return@evaluateJavascript
+                    if (webView.canGoBack()) webView.goBack() else moveTaskToBack(true)
+                }
             }
         })
 
@@ -391,10 +1321,11 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.action == CheckInAlarmScheduler.ACTION_OPEN_REMINDER) {
-            CheckInAlarmScheduler.markReminderOpened(this)
-        }
         val target = consumeOpenUrl(intent) ?: return
+        if (!::webView.isInitialized) {
+            showNativeRecoveryScreen("当前处于安全恢复模式", "收到站内跳转请求，但网页尚未启动。请先复制诊断摘要，确认后退出恢复模式重试。")
+            return
+        }
         // SPA 已加载：loadUrl 到同页 hash 只触发 hashchange，不会整页重载
         webView.loadUrl(target)
     }
@@ -440,6 +1371,18 @@ class MainActivity : AppCompatActivity() {
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
+    }
+
+    private fun hideWebVideoCustomView(notifyPage: Boolean) {
+        val view = webVideoCustomView ?: return
+        rootContainer.removeView(view)
+        webVideoCustomView = null
+        if (::webView.isInitialized) webView.visibility = View.VISIBLE
+        rootContainer.setPadding(0, 0, 0, imeInsetPx)
+        val callback = webVideoCustomViewCallback
+        webVideoCustomViewCallback = null
+        if (notifyPage) callback?.onCustomViewHidden()
+        hideSystemStatusBar()
     }
 
     private fun hideSystemStatusBar() {
@@ -517,7 +1460,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun ensurePushService() {
         if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
         ) {
             notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -537,20 +1480,30 @@ class MainActivity : AppCompatActivity() {
      */
     override fun onStop() {
         super.onStop()
-        CallOverlayService.onHostBackground()
-        CheckInService.onHostBackground()
+        if (!recoveryBoot) {
+            runCatching { CallOverlayService.onHostBackground() }
+            runCatching { CheckInService.onHostBackground() }
+        }
     }
 
     override fun onStart() {
         super.onStart()
-        CallOverlayService.onHostForeground()
-        CheckInService.onHostForeground()
+        if (!recoveryBoot) {
+            runCatching { CallOverlayService.onHostForeground() }
+            runCatching { CheckInService.onHostForeground() }
+        }
     }
 
     override fun onDestroy() {
-        if (ShellBus.webView === webView) ShellBus.webView = null
-        CookieManager.getInstance().flush()
-        webView.destroy()
+        // Recovery mode intentionally returns before creating a WebView. Keep its
+        // lifecycle safe: touching a lateinit WebView here would crash the recovery UI.
+        if (::webView.isInitialized) {
+            if (ShellBus.webView === webView) ShellBus.webView = null
+            runCatching { CookieManager.getInstance().flush() }
+            runCatching { webView.stopLoading() }
+            runCatching { webView.destroy() }
+        }
+        runCatching { sharedVideoExecutor.shutdownNow() }
         super.onDestroy()
     }
 
@@ -558,6 +1511,147 @@ class MainActivity : AppCompatActivity() {
     inner class ShellBridge {
         @JavascriptInterface
         fun getVersion(): String = VERSION
+
+        /** Allow the trusted in-app player to request landscape, then restore normal sensor rotation. */
+        @JavascriptInterface
+        fun setScreenOrientation(mode: String): Boolean {
+            if (!isTrustedShellPage()) return false
+            val orientation = when (mode.trim().lowercase()) {
+                "landscape" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                "portrait" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+            runOnUiThread { requestedOrientation = orientation }
+            return true
+        }
+
+        /** Resolve public short-video share links to a bounded, app-private MP4 cache. */
+        @JavascriptInterface
+        fun resolveShortVideoShareUrl(url: String, requestId: String): Boolean {
+            val cleanUrl = url.trim()
+            val cleanRequestId = requestId.trim()
+            if (!isTrustedShellPage() || cleanRequestId.isBlank() || cleanRequestId.length > 120 || !isSupportedShareUrl(cleanUrl)) return false
+            return runCatching {
+                sharedVideoExecutor.execute {
+                    val staticResult = runCatching { resolveAndCacheSharedVideo(cleanUrl) }
+                    if (staticResult.isSuccess) {
+                        runOnUiThread { emitSharedVideoResult(cleanRequestId, staticResult) }
+                    } else {
+                        // Static HTML extraction misses videos injected by page JavaScript.
+                        // Retry in a separate, unprivileged WebView and inspect only public media URLs.
+                        runOnUiThread {
+                            if (!::webView.isInitialized || isFinishing || !isTrustedShellPage()) return@runOnUiThread
+                            resolveSharedVideoWithWebView(cleanUrl) { dynamicResult ->
+                                val finalResult = dynamicResult.recoverCatching { error ->
+                                    resolveBilibiliEmbedFallback(cleanUrl) ?: throw IllegalStateException(
+                                        (staticResult.exceptionOrNull()?.message ?: "静态网页解析失败") +
+                                            "；动态页面解析也失败：" + (error.message ?: "未发现可直接播放的 MP4")
+                                    )
+                                }
+                                emitSharedVideoResult(cleanRequestId, finalResult)
+                            }
+                        }
+                    }
+                }
+                true
+            }.getOrDefault(false)
+        }
+
+        /** Deletes only a UUID-named MP4 from the dedicated private cache directory. */
+        @JavascriptInterface
+        fun deleteCachedShortVideo(cacheId: String): Boolean {
+            if (!isTrustedShellPage()) return false
+            return runCatching { deleteCachedSharedVideoInternal(cacheId) }.getOrDefault(false)
+        }
+
+        /**
+         * 本机运行诊断快照。只读取系统状态，不读取聊天、角色、截图或账号数据。
+         * 诊断页通过此方法区分「旧 APK / 权限未开 / 系统环境差异」。
+         */
+        @JavascriptInterface
+        fun getLastNativeCrashLog(): String = try {
+            val native = File(filesDir, "last-native-crash.txt")
+            val web = File(filesDir, "last-webview-crash.txt")
+            listOfNotNull(
+                native.takeIf { it.isFile }?.readText(),
+                web.takeIf { it.isFile }?.readText()?.let { "\n[WebView 渲染进程]\n$it" },
+            ).joinToString("\n").takeLast(30000)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        @JavascriptInterface
+        fun clearLastNativeCrashLog(): Boolean = try {
+            File(filesDir, "last-native-crash.txt").delete()
+            File(filesDir, "last-webview-crash.txt").delete()
+            true
+        } catch (_: Throwable) {
+            false
+        }
+
+        @JavascriptInterface
+        fun getWebConsoleLogs(): String = webConsoleLogsJson()
+
+        @JavascriptInterface
+        fun clearWebConsoleLogs(): Boolean = try {
+            synchronized(webConsoleLogs) { webConsoleLogs.clear() }
+            true
+        } catch (_: Throwable) { false }
+
+        @JavascriptInterface
+        fun getDiagnosticsSnapshot(): String = try {
+            val appOps = getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+            val usageMode = appOps.checkOpNoThrow(
+                android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                packageName
+            )
+            val accessibilityServices = Settings.Secure.getString(
+                contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ).orEmpty()
+            val expectedAccessibility = android.content.ComponentName(
+                this@MainActivity,
+                CallControlService::class.java
+            ).flattenToString()
+            val webViewPackage = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WebView.getCurrentWebViewPackage()
+            } else null
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(packageName, 0)
+            }
+            org.json.JSONObject()
+                .put("appId", packageName)
+                .put("appVersion", BuildConfig.VERSION_NAME)
+                .put("versionCode", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) packageInfo.longVersionCode else packageInfo.versionCode.toLong())
+                .put("androidVersion", Build.VERSION.RELEASE ?: "unknown")
+                .put("sdkInt", Build.VERSION.SDK_INT)
+                .put("manufacturer", Build.MANUFACTURER ?: "unknown")
+                .put("model", Build.MODEL ?: "unknown")
+                .put("webViewPackage", webViewPackage?.packageName ?: "unknown")
+                .put("webViewVersion", webViewPackage?.versionName ?: "unknown")
+                .put("permissions", org.json.JSONObject()
+                    .put("notifications", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED &&
+                            notificationManager.areNotificationsEnabled()
+                    } else notificationManager.areNotificationsEnabled())
+                    .put("overlay", Settings.canDrawOverlays(this@MainActivity))
+                    .put("usageAccess", usageMode == android.app.AppOpsManager.MODE_ALLOWED)
+                    .put("accessibility", accessibilityServices.split(':').any {
+                        it.equals(expectedAccessibility, ignoreCase = true)
+                    })
+                )
+                .toString()
+        } catch (error: Throwable) {
+            org.json.JSONObject()
+                .put("diagnosticsError", error.javaClass.simpleName + ": " + (error.message ?: "unknown"))
+                .put("appVersion", BuildConfig.VERSION_NAME)
+                .toString()
+        }
 
         /** 实测系统状态栏高度（CSS px）。页面侧兜底轮询用；主要注入路径见 injectStatusBarHeight。 */
         @JavascriptInterface
@@ -588,7 +1682,50 @@ class MainActivity : AppCompatActivity() {
          * 会构成 JVM 平台声明冲突（之前 openUrl 就这么炸过一次）。
          */
         @JavascriptInterface
-        fun readUsageStats(maxEntries: Int): String = perception.usageStatsJson(maxEntries)
+        fun readUsageStats(maxEntries: Int): String {
+            if (!isTrustedShellPage()) return "[]"
+            return perception.usageStatsJson(maxEntries)
+        }
+
+        /**
+         * 把网页端感知开关/连续使用阈值持久化给原生无障碍服务。
+         * 这里只同步最小配置，不上传任何数据；后台事件仍经登录态站点 API 发送。
+         */
+        @JavascriptInterface
+        fun configureBackgroundPerception(json: String): Boolean = try {
+            val config = org.json.JSONObject(json)
+            val threshold = config.optInt("thresholdMinutes", 20).coerceIn(2, 180)
+            getSharedPreferences("native_background_perception", Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("enabled", config.optBoolean("enabled", false))
+                .putBoolean("foregroundAppEnabled", config.optBoolean("foregroundAppEnabled", false))
+                .putBoolean("usageStatsEnabled", config.optBoolean("usageStatsEnabled", false))
+                .putInt("thresholdMinutes", threshold)
+                .putInt("usageSignalMinutes", config.optInt("usageSignalMinutes", 60).coerceIn(0, 720))
+                .putString("usageOverrides", config.optJSONArray("usageOverrides")?.toString() ?: "[]")
+                .putString("ruleFilters", config.optJSONArray("ruleFilters")?.toString() ?: "[]")
+                .putString("targetPackage", config.optString("targetPackage", "").take(160))
+                .putString("targetFilter", config.optString("targetFilter", "").take(160))
+                .putLong("updatedAt", System.currentTimeMillis())
+                .apply()
+            true
+        } catch (_: Throwable) {
+            false
+        }
+
+        /** 将现实桥规则同步到本机执行器；规则和事件保存在应用私有存储。 */
+        @JavascriptInterface
+        fun configureNativeRealityBridge(json: String): Boolean =
+            NativeRealityBridge.configure(this@MainActivity, json)
+
+        /** 读取本机现实桥执行流水，供网页诊断面板显示。 */
+        @JavascriptInterface
+        fun getNativeRealityBridgeLog(): String =
+            NativeRealityBridge.recentLog(this@MainActivity)
+
+        /** 原生无障碍服务是否支持独立后台停留计时（供网页避免重复触发）。 */
+        @JavascriptInterface
+        fun supportsBackgroundDwellTracking(): Boolean = true
 
         /** 活动识别权限是否已授予（步数感知的前提）。 */
         @JavascriptInterface
@@ -645,7 +1782,10 @@ class MainActivity : AppCompatActivity() {
 
         /** 按包名打开另一个应用。 */
         @JavascriptInterface
-        fun openApp(packageName: String): String = deviceAction.openApp(packageName).toString()
+        fun openApp(packageName: String): String {
+            if (!isTrustedShellPage()) return "{\"ok\":false,\"reason\":\"blocked\"}"
+            return deviceAction.openApp(packageName).toString()
+        }
 
         /** 按应用显示名找包名（找不到返回空串）。 */
         @JavascriptInterface
@@ -709,8 +1849,10 @@ class MainActivity : AppCompatActivity() {
 
         /** 读未来 daysAhead 天（可含过去 daysBack 天）的系统日程，返回 JSON 数组。 */
         @JavascriptInterface
-        fun readCalendarEvents(daysAhead: Int, daysBack: Int): String =
-            calendar.readEventsJson(daysAhead, daysBack)
+        fun readCalendarEvents(daysAhead: Int, daysBack: Int): String {
+            if (!isTrustedShellPage()) return "[]"
+            return calendar.readEventsJson(daysAhead, daysBack)
+        }
 
         /**
          * 往系统日历新增一条日程。只新增，不修改不删除用户已有安排。
@@ -774,7 +1916,10 @@ class MainActivity : AppCompatActivity() {
          * 同步返回缓存值：定位本身是异步的，网页按采样周期先 refresh 再读。
          */
         @JavascriptInterface
-        fun readLocation(): String = locationBridge.readJson().toString()
+        fun readLocation(): String {
+            if (!isTrustedShellPage()) return "{}"
+            return locationBridge.readJson().toString()
+        }
 
         /**
          * 主动取一次实时位置（一次性，不是持续追踪）。
@@ -822,7 +1967,10 @@ class MainActivity : AppCompatActivity() {
 
         /** 读缓存的最近一觉（JSON；读不到返回空对象）。 */
         @JavascriptInterface
-        fun readSleep(): String = healthBridge.readJson().toString()
+        fun readSleep(): String {
+            if (!isTrustedShellPage()) return "{}"
+            return healthBridge.readJson().toString()
+        }
 
         /** 请健康桥在后台取一次睡眠数据（结果落缓存，随后的 readSleep 能读到）。 */
         @JavascriptInterface
@@ -861,7 +2009,9 @@ class MainActivity : AppCompatActivity() {
          * @return 是否已发出（JS 端据此决定要不要退回浏览器通知路径）。
          */
         @JavascriptInterface
-        fun notify(title: String, body: String, avatarUrl: String, sessionId: String?): Boolean = runCatching {
+        fun notify(title: String, body: String, avatarUrl: String, sessionId: String?): Boolean {
+            if (!isTrustedShellPage()) return false
+            return runCatching {
             ensureMessageChannel()
             val manager = getSystemService(NotificationManager::class.java)
             val icon = loadAvatarBitmap(avatarUrl)
@@ -910,7 +2060,8 @@ class MainActivity : AppCompatActivity() {
             manager.notify(webNotifId++, builder.build())
             if (webNotifId > 900) webNotifId = 500
             true
-        }.getOrDefault(false)
+            }.getOrDefault(false)
+        }
 
         /**
          * 按直链交给系统下载管理器下载（真·后台）。
@@ -921,7 +2072,9 @@ class MainActivity : AppCompatActivity() {
          * 完成后通知栏提示。返回是否成功入队。
          */
         @JavascriptInterface
-        fun downloadUrl(url: String, fileName: String): Boolean = runCatching {
+        fun downloadUrl(url: String, fileName: String): Boolean {
+            if (!isTrustedShellPage()) return false
+            return runCatching {
             if (!url.startsWith("http://") && !url.startsWith("https://")) return@runCatching false
             val request = DownloadManager.Request(Uri.parse(url)).apply {
                 addRequestHeader("Cookie", CookieManager.getInstance().getCookie(url) ?: "")
@@ -930,7 +2083,8 @@ class MainActivity : AppCompatActivity() {
             }
             (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
             true
-        }.getOrDefault(false)
+            }.getOrDefault(false)
+        }
 
         // ── 通话浮窗 ──────────────────────────────
 
@@ -1059,7 +2213,10 @@ class MainActivity : AppCompatActivity() {
          * takeScreenshot 是回调式 API，且编码几 MB 的 PNG 不能阻塞主线程。
          */
         @JavascriptInterface
-        fun captureScreenshot(): String = ScreenshotBridge.capture().toString()
+        fun captureScreenshot(): String {
+            if (!isTrustedShellPage()) return "{\"ok\":false,\"error\":\"blocked\"}"
+            return ScreenshotBridge.capture().toString()
+        }
 
         // ── 查岗预览浮层（截屏先给用户过目，同意才发给角色）────
 
@@ -1147,24 +2304,18 @@ class MainActivity : AppCompatActivity() {
             CheckInService.stop(this@MainActivity)
         }
 
-        /**
-         * 读走并清空「通知栏直接回复」的待发队列（JSON 数组字符串）。
-         *
-         * 网页在页面挂载时、以及收到 userReply 事件时各拉一次：前者补发
-         * 「页面被回收期间用户从通知里回的话」，后者处理当场送达的。
-         * 旧网页调用 consume 时读取即清空；新网页使用 read + ack，避免页面异常时丢回复。
-         */
-        /** 旧网页兼容接口：读取后清空原生队列。 */
+        /** Read pending notification replies without deleting them; JS acknowledges after persistence. */
+        @JavascriptInterface
+        fun peekPendingReplies(): String = NotificationReplyReceiver.peekPendingReplies(this@MainActivity)
+
+        /** Acknowledge only successfully persisted reply IDs (JSON string array). */
+        @JavascriptInterface
+        fun acknowledgePendingReplies(idsJson: String): Boolean =
+            NotificationReplyReceiver.acknowledgePendingReplies(this@MainActivity, idsJson)
+
+        /** Legacy read-and-clear bridge retained for older web builds. */
         @JavascriptInterface
         fun consumePendingReplies(): String = NotificationReplyReceiver.consumePendingReplies(this@MainActivity)
-
-        /** 新网页读取队列快照，写入聊天成功后再 ack。 */
-        @JavascriptInterface
-        fun readPendingReplies(): String = NotificationReplyReceiver.readPendingReplies(this@MainActivity)
-
-        /** 网页逐条确认已写入聊天的通知回复，未确认项保留在原生队列中等待重试。 */
-        @JavascriptInterface
-        fun ackPendingReplies(idsJson: String) = NotificationReplyReceiver.ackPendingReplies(this@MainActivity, idsJson)
 
         /**
          * 弹一次查岗预览：截当前屏 → 浮层给用户过目 → 结果经 'checkIn' 事件回推。
@@ -1174,45 +2325,6 @@ class MainActivity : AppCompatActivity() {
         fun requestCheckIn(characterId: String, name: String, avatar: String) {
             CheckInService.show(this@MainActivity, characterId, name, avatar)
         }
-
-        /**
-         * 把网页计算出的下一次查岗时间交给 Android 原生闹钟。
-         * 原生闹钟到点只发提醒，不会截屏；用户点通知回到 App 后，
-         * 网页再走原有的预览与明确同意流程。
-         */
-        @JavascriptInterface
-        fun scheduleNativeCheckIn(json: String): Boolean =
-            CheckInAlarmScheduler.schedule(this@MainActivity, json)
-
-        /** 没有角色继续开启查岗时取消原生闹钟。 */
-        @JavascriptInterface
-        fun cancelNativeCheckIn() {
-            CheckInAlarmScheduler.cancel(this@MainActivity)
-        }
-
-        /** 读取并清空用户点开查岗提醒后留下的待处理请求。 */
-        @JavascriptInterface
-        fun hasPendingCheckIn(): Boolean =
-            CheckInAlarmScheduler.hasPending(this@MainActivity)
-
-        @JavascriptInterface
-        fun consumePendingCheckIn(): String =
-            CheckInAlarmScheduler.consumePending(this@MainActivity)
-
-        /** 原生闹钟与待处理提醒状态（诊断面板用，不含截图内容）。 */
-        @JavascriptInterface
-        fun getNativeCheckInDiagnostics(): String =
-            CheckInAlarmScheduler.diagnosticsJson(this@MainActivity)
-
-        /** 查岗发现无障碍实例断连时，给用户发带修复入口的系统横幅。 */
-        @JavascriptInterface
-        fun notifyCheckInUnavailable(characterName: String) {
-            CheckInAlarmScheduler.showAccessibilityRecoveryNotification(
-                this@MainActivity,
-                characterName.ifBlank { "角色" },
-            )
-        }
-
 
         /**
          * 读查岗 / 截屏确认浮层的配色（JSON 原文）。
@@ -1265,7 +2377,10 @@ class MainActivity : AppCompatActivity() {
          * 返回是否写入成功；文件名里的非法字符会被替换，避免路径穿越。
          */
         @JavascriptInterface
-        fun saveBase64File(fileName: String, base64: String): Boolean = runCatching {
+        fun saveBase64File(fileName: String, base64: String): Boolean {
+            // 保存到公共下载目录是用户主动动作；不再被“可信页面”门禁挡住，
+            // 否则保存图片会只返回 false，而网页只能看到“原生保存接口失败”。
+            return runCatching {
             val safeName = fileName
                 .replace(Regex("[\\\\/:*?\"<>|]"), "_")
                 .trim()
@@ -1292,7 +2407,94 @@ class MainActivity : AppCompatActivity() {
                 FileOutputStream(File(dir, safeName)).use { it.write(bytes) }
             }
             true
+            }.onFailure { error ->
+                synchronized(webConsoleLogs) {
+                    webConsoleLogs.add("saveBase64File failed: " + (error.message ?: error.javaClass.simpleName))
+                }
+            }.getOrDefault(false)
+        }
+
+        /** 原生剪贴板兜底：WebView 的 navigator.clipboard 在部分机型会静默失败。 */
+        @JavascriptInterface
+        fun copyText(text: String): Boolean = runCatching {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("小手机", text))
+            true
         }.getOrDefault(false)
+
+        /**
+         * 大文件分块写入：网页先 begin，拿 token 后逐块 append，最后 finish。
+         * 这样不用把整个备份文件序列化成一个巨大的 Base64 字符串，避免 WebView OOM。
+         */
+        @JavascriptInterface
+        fun beginChunkedFile(fileName: String): String {
+            val safeName = fileName
+                .replace(Regex("[\\/:*?\"<>|]"), "_")
+                .trim()
+                .ifBlank { "download" }
+                .take(120)
+            return runCatching {
+                val token = UUID.randomUUID().toString()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, safeName)
+                        put(MediaStore.Downloads.MIME_TYPE, guessMimeType(safeName))
+                        put(MediaStore.Downloads.IS_PENDING, 1)
+                    }
+                    val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        ?: return@runCatching ""
+                    val stream = contentResolver.openOutputStream(uri)
+                        ?: run { contentResolver.delete(uri, null, null); return@runCatching "" }
+                    chunkedFileWrites[token] = ChunkedFileWrite(uri, null, stream)
+                } else {
+                    @Suppress("DEPRECATION")
+                    val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    if (!dir.exists()) dir.mkdirs()
+                    val file = File(dir, safeName)
+                    chunkedFileWrites[token] = ChunkedFileWrite(null, file, FileOutputStream(file))
+                }
+                token
+            }.getOrDefault("")
+        }
+
+        @JavascriptInterface
+        fun appendChunkedFile(token: String, base64: String): Boolean {
+            val session = chunkedFileWrites[token] ?: return false
+            return runCatching {
+                val bytes = Base64.decode(base64, Base64.DEFAULT)
+                synchronized(session) {
+                    session.stream.write(bytes)
+                    session.bytes += bytes.size
+                }
+                true
+            }.getOrDefault(false)
+        }
+
+        @JavascriptInterface
+        fun finishChunkedFile(token: String): Boolean {
+            val session = chunkedFileWrites.remove(token) ?: return false
+            return runCatching {
+                synchronized(session) { session.stream.flush(); session.stream.close() }
+                if (session.bytes <= 0L) throw IllegalStateException("没有写入任何字节")
+                val uri = session.uri
+                if (uri != null) {
+                    val values = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
+                    contentResolver.update(uri, values, null, null)
+                }
+                true
+            }.onFailure {
+                session.uri?.let { uri -> runCatching { contentResolver.delete(uri, null, null) } }
+                session.file?.delete()
+            }.getOrDefault(false)
+        }
+
+        @JavascriptInterface
+        fun abortChunkedFile(token: String) {
+            val session = chunkedFileWrites.remove(token) ?: return
+            runCatching { synchronized(session) { session.stream.close() } }
+            session.uri?.let { uri -> runCatching { contentResolver.delete(uri, null, null) } }
+            session.file?.delete()
+        }
 
         /**
          * 打开另一个 App（桌宠联动用）。给出目标包名；可选的 dataUrl 会作为
@@ -1300,14 +2502,17 @@ class MainActivity : AppCompatActivity() {
          * 返回是否成功发起跳转——目标未安装时返回 false，页面据此提示。
          */
         @JavascriptInterface
-        fun launchExternalApp(packageName: String, dataUrl: String): Boolean = runCatching {
+        fun launchExternalApp(packageName: String, dataUrl: String): Boolean {
+            if (!isTrustedShellPage()) return false
+            return runCatching {
             val intent = packageManager.getLaunchIntentForPackage(packageName)
                 ?: return@runCatching false
             if (dataUrl.isNotBlank()) intent.data = Uri.parse(dataUrl)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
             true
-        }.getOrDefault(false)
+            }.getOrDefault(false)
+        }
 
         /**
          * 用 ACTION_VIEW 打开任意 URL / 自定义 scheme（如桌宠的 deskpet://xxx）。
@@ -1316,13 +2521,16 @@ class MainActivity : AppCompatActivity() {
          * 而且对方没在运行时也能把它的入口 Activity 拉起来。
          */
         @JavascriptInterface
-        fun openUrl(url: String): Boolean = runCatching {
+        fun openUrl(url: String): Boolean {
+            if (!isTrustedShellPage()) return false
+            return runCatching {
             startActivity(
                 Intent(Intent.ACTION_VIEW, Uri.parse(url))
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
             true
-        }.getOrDefault(false)
+            }.getOrDefault(false)
+        }
     }
 
     /**
@@ -1419,12 +2627,32 @@ class MainActivity : AppCompatActivity() {
          * 网页不该把返回值当作「已经显示出来了」。
          */
         @JavascriptInterface
-        fun update(html: String, widthDp: Int, heightDp: Int, scale: Int): Boolean = runCatching {
+        fun update(html: String, widthDp: Int, heightDp: Int, scale: Int): Boolean {
+            if (!isTrustedShellPage()) return false
+            return runCatching {
             // 尺寸记一份：系统定时刷新（onUpdate）时网页不在场，只能靠这里存的值。
             PhoneWidgetProvider.saveSize(this@MainActivity, widthDp, heightDp, scale)
             PhoneWidgetRenderer.renderAndPush(this@MainActivity, html, widthDp, heightDp, scale)
             true
-        }.getOrDefault(false)
+            }.getOrDefault(false)
+        }
+
+        /** Update an independent profile without overwriting the legacy single-widget cache. */
+        @JavascriptInterface
+        fun updateProfile(profileId: String, html: String, widthDp: Int, heightDp: Int, scale: Int): Boolean {
+            if (!isTrustedShellPage()) return false
+            return runCatching {
+            if (profileId.isBlank() || profileId == "default") return false
+            PhoneWidgetRenderer.renderAndPush(this@MainActivity, profileId, html, widthDp, heightDp, scale)
+            true
+            }.getOrDefault(false)
+        }
+
+        @JavascriptInterface
+        fun deleteProfile(profileId: String): Boolean = PhoneWidgetProvider.deleteProfile(this@MainActivity, profileId)
+
+        @JavascriptInterface
+        fun requestPinProfile(profileId: String): Boolean = PhoneWidgetProvider.requestPinProfile(this@MainActivity, profileId)
 
         /** 用上次缓存的 HTML 重画一次（用户改完尺寸/主题时调用）。 */
         @JavascriptInterface
@@ -1445,6 +2673,14 @@ class MainActivity : AppCompatActivity() {
          * 用户在设置页看到的预览又是正常的（那是 iframe 渲染的，走不到原生）。
          * 有了它，设置页能如实列出「HTML 推到了没 / PNG 落盘了没 / 最后一次渲染成败」。
          */
+        /** 保存网页侧的小组件 profile 列表，供系统配置 Activity 选择。 */
+        @JavascriptInterface
+        fun setProfiles(json: String): Boolean = runCatching {
+            getSharedPreferences("shell_phone_widget", Context.MODE_PRIVATE).edit()
+                .putString("profiles_json", json.take(30000)).apply()
+            true
+        }.getOrDefault(false)
+
         @JavascriptInterface
         fun diagnostics(): String = PhoneWidgetRenderer.diagnosticsJson(this@MainActivity)
 
@@ -1454,5 +2690,61 @@ class MainActivity : AppCompatActivity() {
             PhoneWidgetProvider.requestPin(this@MainActivity)
             true
         }.getOrDefault(false)
+    }
+    /**
+     * The only object exposed to every WebView frame. It reveals method names, but every
+     * invocation requires a nonce that is injected into the trusted top-level document only.
+     */
+    private inner class SecureJavascriptBridge(private val target: Any) {
+        @JavascriptInterface
+        fun getMethodNames(): String = org.json.JSONArray(
+            target.javaClass.methods
+                .filter { it.isAnnotationPresent(JavascriptInterface::class.java) }
+                .map { it.name }
+                .distinct()
+                .sorted(),
+        ).toString()
+
+        @JavascriptInterface
+        fun invoke(nonce: String, methodName: String, argsJson: String): String {
+            if (!isTrustedShellPage() || !java.security.MessageDigest.isEqual(nonce.toByteArray(Charsets.UTF_8), bridgeNonce.toByteArray(Charsets.UTF_8))) {
+                return org.json.JSONObject().put("ok", false).put("error", "Untrusted native bridge caller").toString()
+            }
+            if (argsJson.length > 8_000_000) {
+                return org.json.JSONObject().put("ok", false).put("error", "Native bridge payload too large").toString()
+            }
+            return try {
+                val args = org.json.JSONArray(argsJson)
+                val candidates = target.javaClass.methods.filter {
+                    it.name == methodName && it.isAnnotationPresent(JavascriptInterface::class.java) && it.parameterCount == args.length()
+                }
+                val methodAndArgs = candidates.firstNotNullOfOrNull { method ->
+                    runCatching { method to convertBridgeArguments(method.parameterTypes, args) }.getOrNull()
+                } ?: throw IllegalArgumentException("Unsupported native bridge method or arguments")
+                methodAndArgs.first.isAccessible = true
+                val result = methodAndArgs.first.invoke(target, *methodAndArgs.second)
+                val value = if (result == Unit || result == null) org.json.JSONObject.NULL else result
+                org.json.JSONObject().put("ok", true).put("value", value).toString()
+            } catch (error: Throwable) {
+                val cause = (error as? java.lang.reflect.InvocationTargetException)?.targetException ?: error
+                org.json.JSONObject().put("ok", false).put("error", (cause.message ?: cause.javaClass.simpleName).take(500)).toString()
+            }
+        }
+
+        private fun convertBridgeArguments(types: Array<Class<*>>, args: org.json.JSONArray): Array<Any?> {
+            return Array(types.size) { index ->
+                val raw = args.opt(index)
+                val type = types[index]
+                when {
+                    type == String::class.java -> if (raw == org.json.JSONObject.NULL) null else raw.toString()
+                    type == java.lang.Boolean.TYPE || type == java.lang.Boolean::class.java -> raw as? Boolean ?: throw IllegalArgumentException("Expected boolean argument")
+                    type == java.lang.Integer.TYPE || type == java.lang.Integer::class.java -> (raw as? Number)?.toInt() ?: throw IllegalArgumentException("Expected integer argument")
+                    type == java.lang.Long.TYPE || type == java.lang.Long::class.java -> (raw as? Number)?.toLong() ?: throw IllegalArgumentException("Expected long argument")
+                    type == java.lang.Double.TYPE || type == java.lang.Double::class.java -> (raw as? Number)?.toDouble() ?: throw IllegalArgumentException("Expected number argument")
+                    type == java.lang.Float.TYPE || type == java.lang.Float::class.java -> (raw as? Number)?.toFloat() ?: throw IllegalArgumentException("Expected number argument")
+                    else -> throw IllegalArgumentException("Unsupported native bridge argument type: ${type.simpleName}")
+                }
+            }
+        }
     }
 }

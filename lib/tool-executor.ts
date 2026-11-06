@@ -22,8 +22,12 @@ import {
     toolNameMatches,
 } from "./tool-storage";
 import { executeCustomAppToolCall } from "./custom-app-tool-runtime";
+import { executeLifeToolCall } from "./life/life-tools";
+import { appendLifeTimelineEntry, loadVirtualLifeState, saveVirtualLifeState } from "./life/life-storage";
 import { characterWorkspace, agentComputerRequest, isAgentComputerConfigured } from "./agent-computer";
-import { AGENT_COMPUTER_CAPABILITY_ID, CHECK_IN_REQUEST_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, PHONE_WIDGET_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, SYSTEM_CALENDAR_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import { AGENT_COMPUTER_CAPABILITY_ID, CHECK_IN_REQUEST_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PHOTO_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, PHONE_WIDGET_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, SYSTEM_CALENDAR_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import { createPhotoWallId, loadPhotoWallState, savePhotoWallState, type PhotoWallDoodle, type PhotoWallCreationRecord, type PhotoWallPhoto } from "./photo-wall-storage";
+import { generateImageFromConfiguredApi } from "./image-generation-service";
 import {
     checkQueryCooldown,
     describeStatusByFocus,
@@ -34,9 +38,11 @@ import {
     markQueryPerformed,
 } from "./perception";
 import { notifyDeviceAction, runDeviceAction } from "./device-action";
-import { renderWidgetHtml } from "./widget/template";
+import { renderWidgetHtml, injectWidgetCss } from "./widget/template";
 import { canGenerateAvatar, generateWidgetAvatar } from "./widget/avatar";
-import { loadWidgetConfig, saveWidgetData, loadWidgetData } from "./widget/storage";
+import { loadWidgetConfig, saveWidgetData, loadWidgetData, loadWidgetProfiles, loadWidgetProfileData, saveWidgetProfileData } from "./widget/storage";
+import { pushWidgetProfileHtml } from "./widget/bridge";
+import type { WidgetData } from "./widget/types";
 import { syncWidgetToNative } from "./widget/bridge";
 import {
     formatEventTime,
@@ -463,7 +469,52 @@ export function parseToolCalls(text: string): { cleanText: string; toolCalls: To
 
 export async function executeToolCalls(toolCalls: ToolCall[], context?: ToolExecutionContext): Promise<ToolResult[]> {
     throwIfAborted(context?.signal);
-    return Promise.all(toolCalls.map(call => executeSingleToolCall(call, context, { depth: 0 })));
+    // Life tools read and write one shared snapshot. Serialize those calls to prevent
+    // concurrent invitations/schedule changes from overwriting one another, while keeping
+    // independent non-life tools parallel. Results stay aligned with the model's call order.
+    const results = new Array<ToolResult>(toolCalls.length);
+    const independentCalls = toolCalls
+        .map((call, index) => ({ call, index }))
+        .filter(item => !item.call.name.startsWith("life_"));
+    await Promise.all(independentCalls.map(async ({ call, index }) => {
+        throwIfAborted(context?.signal);
+        results[index] = await executeSingleToolCall(call, context, { depth: 0 });
+    }));
+    for (let index = 0; index < toolCalls.length; index++) {
+        const call = toolCalls[index];
+        if (!call.name.startsWith("life_")) continue;
+        throwIfAborted(context?.signal);
+        results[index] = await executeSingleToolCall(call, context, { depth: 0 });
+    }
+    if ((context?.appId === "chat" || context?.appId === "group_chat") && context.characterId && typeof window !== "undefined") {
+        try {
+            let life = loadVirtualLifeState();
+            if (life.settings.enabled) {
+                const characterName = loadCharacters().find(character => character.id === context.characterId)?.name ?? "角色";
+                let changed = false;
+                for (let index = 0; index < toolCalls.length; index++) {
+                    const call = toolCalls[index];
+                    if (call.name.startsWith("life_")) continue; // Life tools record their own richer event.
+                    const result = results[index];
+                    const detail = result?.success === false
+                        ? "调用未成功：" + (result.error || "工具返回失败")
+                        : "角色在消息互动中执行了该工具。";
+                    life = appendLifeTimelineEntry(life, {
+                        category: "tool",
+                        title: characterName + "调用了" + call.name + "工具",
+                        details: detail,
+                        actorId: context.characterId,
+                        actorName: characterName,
+                    });
+                    changed = true;
+                }
+                if (changed) saveVirtualLifeState(life);
+            }
+        } catch {
+            // Tool execution must not fail because optional Life timeline logging failed.
+        }
+    }
+    return results;
 }
 
 type ToolExecutionHint = {
@@ -542,6 +593,12 @@ async function executeSingleToolCall(
         return null;
     };
     const tryCustomApp = () => executeCustomAppToolCall(call, context, nameMacroContext);
+    const tryLife = () => executeLifeToolCall(call, context);
+
+    if (call.name.startsWith("life_")) {
+        const lifeResult = await tryLife();
+        if (lifeResult) return lifeResult;
+    }
 
     if (preferredType === "internal") {
         const result = await tryInternal();
@@ -807,6 +864,7 @@ function normalizeInternalToolResult(result: ToolResult): ToolResult {
 
 async function executeInternalTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult | null> {
     if (isNoteWallToolName(call.name)) return executeNoteWallTool(call, context);
+    if (isPhotoWallToolName(call.name)) return executePhotoWallTool(call, context);
     if (isMusicControlToolName(call.name)) return executeMusicControlTool(call, context);
     if (isCalendarToolName(call.name)) return executeCalendarTool(call, context);
     if (isLocalDataToolName(call.name)) return executeLocalDataTool(call);
@@ -918,45 +976,88 @@ async function executePhoneWidgetTool(call: ToolCall, context?: ToolExecutionCon
         };
     }
 
-    const text = String(call.args?.text ?? "").trim().slice(0, 300);
-    if (!text) return { name: call.name, success: false, error: "需要 text 参数" };
-    const status = String(call.args?.status ?? "").trim().slice(0, 30);
+    // 参数健壮化：模型偶尔会把 text 包进代码围栏/引号，或用 content/message 传参——
+    // 都接住并清理，不要一遇到就「需要 text 参数」报错。
+    const rawText = String(call.args?.text ?? call.args?.content ?? call.args?.message ?? "");
+    const text = rawText
+        .replace(/^```(?:json|text|markdown)?\s*/i, "")
+        .replace(/```\s*$/i, "")
+        .trim()
+        .replace(/^["「『“]|["」』”]$/g, "")
+        .slice(0, 300);
+    if (!text) return { name: call.name, success: false, error: "需要 text 参数：要留在桌面上的那句话（60 字内效果最好）" };
+    const status = String(call.args?.status ?? "").replace(/^["「『“]|["」』”]$/g, "").trim().slice(0, 30);
+    // 可选：指定写入哪个桌面实例（设置 → 桌面小组件里创建的独立配置）。
+    // 不传时写默认实例——多实例用户可以让不同小组件显示不同角色/不同内容。
+    const profileId = String(call.args?.profileId ?? call.args?.instance ?? "").trim();
 
     const character = loadCharacters().find(item => item.id === context.characterId);
     const userName = resolveUserIdentity(context.characterId, context.appId)?.name || "用户";
 
     // 配了生图且用户开了开关时，顺带换一张配当前状态的头像。
     // 失败/没配都静默沿用旧头像——不能因为头像让「留话」整体失败。
-    let avatar = loadWidgetData()?.avatar ?? "";
+    const previousData = profileId ? loadWidgetProfileData(profileId) ?? loadWidgetData() : loadWidgetData();
+    let avatar = previousData?.avatar ?? "";
     if (config.useGeneratedAvatar && canGenerateAvatar() && character) {
         const generated = await generateWidgetAvatar(character, status, text, context.signal);
         if (generated) avatar = generated;
     }
 
-    saveWidgetData({
+    const widgetData: WidgetData = {
         characterId: context.characterId,
         text,
         status,
         avatar,
         updatedAt: new Date().toISOString(),
         source: "tool",
-    });
-
-    // 立刻推给桌面。没装壳/老壳时这一步失败也无所谓——
-    // 内容已经存下了，用户下次打开设置页会看到，装壳后自然同步过去。
-    try {
-        const html = renderWidgetHtml(config.customTemplate, loadWidgetData()!, character?.name ?? "角色", userName);
-        syncWidgetToNative(html);
-    } catch (err) {
-        console.warn("[Widget] 推送原生失败", err);
-    }
-
-    return {
-        name: call.name,
-        success: true,
-        data: `已在 TA 的桌面上留下：「${text}」${status ? `（状态：${status}）` : ""}`,
-        userNotice: "在桌面上留了句话",
     };
+
+    try {
+        if (profileId) {
+            const profile = loadWidgetProfiles().find(item => item.id === profileId);
+            if (!profile) {
+                return { name: call.name, success: false, error: `没有找到桌面实例 ${profileId}；可在设置 → 桌面小组件查看已有实例 ID` };
+            }
+            saveWidgetProfileData(profileId, widgetData);
+            const html = injectWidgetCss(
+                renderWidgetHtml(profile.template, loadWidgetProfileData(profileId)!, character?.name ?? "角色", userName),
+                profile.customCss,
+            );
+            const pushed = pushWidgetProfileHtml(profileId, html, { widthDp: profile.widthDp, heightDp: profile.heightDp, scale: profile.scale });
+            if (!pushed) console.warn("[Widget] 推送独立实例失败（可能是旧壳），内容已保存");
+            return {
+                name: call.name,
+                success: true,
+                data: pushed
+                    ? "已在桌面实例「" + profile.name + "」留下：「" + text + "」" + (status ? "（状态：" + status + "）" : "")
+                    : "内容已保存到桌面实例「" + profile.name + "」，但原生桌面未确认刷新；请检查小组件壳版本或重新打开设置页同步。",
+                userNotice: pushed ? "已在桌面实例上留了句话" : "留言已保存，但桌面尚未确认刷新",
+            };
+        }
+
+        saveWidgetData(widgetData);
+
+        // 立刻推给桌面。没装壳/老壳时这一步失败也无所谓——
+        // 内容已经存下了，用户下次打开设置页会看到，装壳后自然同步过去。
+        let pushed = false;
+        try {
+            const html = renderWidgetHtml(config.customTemplate, loadWidgetData()!, character?.name ?? "角色", userName);
+            pushed = syncWidgetToNative(html);
+        } catch (err) {
+            console.warn("[Widget] 推送原生失败", err);
+        }
+
+        return {
+            name: call.name,
+            success: true,
+            data: pushed
+                ? "已在 TA 的桌面上留下：「" + text + "」" + (status ? "（状态：" + status + "）" : "")
+                : "内容已保存，但原生桌面未确认刷新；请检查小组件是否已添加、安卓壳版本是否支持，并重新打开设置页同步。",
+            userNotice: pushed ? "已在桌面上留了句话" : "留言已保存，但桌面尚未确认刷新",
+        };
+    } catch (err) {
+        return { name: call.name, success: false, error: err instanceof Error ? err.message : "桌面留话失败" };
+    }
 }
 
 /** 角色查看用户真实手机的系统日历（只读，且只读摘要字段）。 */
@@ -1439,6 +1540,10 @@ function isNoteWallToolName(name: string): boolean {
         || name === "查看便签详情及评论"
         || name === "发送便签"
         || name === "发送便签评论";
+}
+
+function isPhotoWallToolName(name: string): boolean {
+    return name === "查看照片墙" || name === "添加照片到照片墙" || name === "在照片墙涂鸦";
 }
 
 function isMusicControlToolName(name: string): boolean {
@@ -2257,6 +2362,117 @@ async function executeNoteWallTool(call: ToolCall, context?: ToolExecutionContex
         persistToHistory: false,
         userNotice: "未知便签墙动作",
     };
+}
+
+async function executePhotoWallTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+    const capability = getInternalCapability(PHOTO_WALL_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") {
+        return { name: call.name, success: false, error: "照片墙能力未启用（工具箱 → 内置能力）", continueConversation: false, persistToHistory: false, userNotice: "照片墙能力未启用" };
+    }
+    if (!isSupportedChatToolContext(context)) {
+        return { name: call.name, success: false, error: "照片墙角色工具仅在私聊或群聊中可用", continueConversation: false, persistToHistory: false };
+    }
+    const character = loadCharacters().find(item => item.id === context.characterId);
+    if (!character) return { name: call.name, success: false, error: "找不到当前角色档案。" };
+    try {
+        const state = loadPhotoWallState();
+        if (call.name === "查看照片墙") {
+            const rawLimit = Number(call.args?.limit);
+            const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(5, Math.floor(rawLimit))) : 3;
+            const visible = state.photos.filter(photo => photo.shareWithCharacters === true)
+                .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
+            if (!visible.length) return { name: call.name, success: true, data: "照片墙目前没有用户共享给角色查看的照片。不要读取未共享的私人照片。" };
+            return {
+                name: call.name,
+                success: true,
+                data: "以下是用户明确共享给角色查看的照片。图片附件按顺序对应照片 ID；请基于真实图像描述，不要只根据标题臆测：\n"
+                    + visible.map((photo, index) => `[${index + 1}] photoId=${photo.id}；标题=${photo.title || "未命名"}；说明=${photo.caption || "无"}；类型=${photo.kind}；背面留言=${photo.backNote || "无"}`).join("\n"),
+                mediaAttachments: visible.slice(0, 3).map(photo => ({ type: "image" as const, url: photo.mediaRef, title: photo.title || "照片墙共享照片" })),
+            };
+        }
+        if (call.name === "添加照片到照片墙") {
+            const description = String(call.args?.description ?? "").trim().slice(0, 1200);
+            if (description.length < 5) return { name: call.name, success: false, error: "请提供至少 5 个字符的具体画面描述。" };
+            const rawKind = String(call.args?.kind ?? "moment");
+            const kinds = ["favorite", "selfie", "candid", "scenery", "object", "moment"] as const;
+            const kind = (kinds as readonly string[]).includes(rawKind) ? rawKind as PhotoWallPhoto["kind"] : "moment";
+            const result = await generateImageFromConfiguredApi({ description, characterId: character.id, appId: "photo_wall", participantIds: [character.id] });
+            if (!result?.mediaRef) throw new Error("生图服务没有返回图片，请检查图像生成 API 配置。");
+            const createdAt = new Date().toISOString();
+            const photo: PhotoWallPhoto = {
+                id: createPhotoWallId(), mediaRef: result.mediaRef, createdAt, ownerType: "character",
+                ownerId: character.id, ownerName: character.name, kind,
+                title: String(call.args?.title ?? "").trim().slice(0, 80) || (character.name + "留下的照片"),
+                caption: String(call.args?.caption ?? "").trim().slice(0, 300) || "由角色主动添加到照片墙的生活照片。",
+                backNote: "", tags: [kind], annotations: [], shareWithCharacters: true,
+                generationPrompt: result.prompt, source: "generated",
+            };
+            const record: PhotoWallCreationRecord = {
+                id: createPhotoWallId(), createdAt, authorType: "character", authorId: character.id,
+                authorName: character.name, narrative: character.name + "主动生成并添加了一张照片到共同照片墙。",
+                photoIds: [photo.id], layers: [], doodles: [],
+            };
+            savePhotoWallState({ ...state, photos: [...state.photos, photo], creationRecords: [...(state.creationRecords ?? []), record] });
+            return { name: call.name, success: true, data: character.name + "已把新照片「" + photo.title + "」添加到照片墙。", mediaAttachments: [{ type: "image", url: photo.mediaRef, title: photo.title }], userNotice: character.name + "添加了一张照片到照片墙" };
+        }
+        if (call.name === "在照片墙涂鸦") {
+            const target = call.args?.target === "wall" ? "wall" : "photo";
+            const photoId = String(call.args?.photoId ?? "").trim();
+            const photo = target === "photo"
+                ? state.photos.find(item => item.id === photoId && item.shareWithCharacters === true)
+                : undefined;
+            if (target === "photo" && !photo) return { name: call.name, success: false, error: "找不到该照片，或该照片没有共享给角色。请先调用「查看照片墙」获取可用 photoId；若要在公共画布创作，请设置 target=wall。" };
+            const kind = call.args?.kind === "stroke" ? "stroke" : call.args?.kind === "sticker" ? "sticker" : "";
+            const pointsRaw = call.args?.points;
+            if (!kind || !Array.isArray(pointsRaw)) return { name: call.name, success: false, error: "需要 kind 和 points 参数。" };
+            const points = pointsRaw.slice(0, 80).map((point: unknown) => {
+                if (!point || typeof point !== "object") return null;
+                const x = Number((point as { x?: unknown }).x), y = Number((point as { y?: unknown }).y);
+                return Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x <= 1 && y >= 0 && y <= 1 ? { x, y } : null;
+            });
+            if (points.some(point => point === null) || points.length < (kind === "stroke" ? 2 : 1)) return { name: call.name, success: false, error: kind === "stroke" ? "笔迹至少需要 2 个有效的 0-1 坐标点。" : "贴纸需要 1 个有效的 0-1 坐标点。" };
+            const color = String(call.args?.color ?? "#c2705a");
+            if (!/^#[0-9a-f]{3,8}$/i.test(color)) return { name: call.name, success: false, error: "颜色必须是十六进制颜色值。" };
+            const side = call.args?.side === "back" ? "back" : "front";
+            const doodle: PhotoWallDoodle = {
+                id: createPhotoWallId(), kind, content: kind === "sticker" ? String(call.args?.content ?? "✦").slice(0, 12) : undefined,
+                rotation: Math.max(-45, Math.min(45, Number(call.args?.rotation) || 0)),
+                authorType: "character", authorId: character.id, authorName: character.name,
+                color, width: Math.max(1, Math.min(12, Number(call.args?.width) || 4)),
+                points: points as Array<{ x: number; y: number }>, createdAt: new Date().toISOString(),
+            };
+            const createdAt = new Date().toISOString();
+            if (target === "wall") {
+                const record: PhotoWallCreationRecord = {
+                    id: createPhotoWallId(), createdAt, authorType: "character", authorId: character.id,
+                    authorName: character.name,
+                    narrative: character.name + "在照片墙公共画布上留下了新的涂鸦。",
+                    photoIds: [], layers: [{ kind: "wall", doodles: [doodle] }], doodles: [doodle],
+                };
+                savePhotoWallState({ ...state, wallDoodles: [...(state.wallDoodles ?? []), doodle], creationRecords: [...(state.creationRecords ?? []), record] });
+                return { name: call.name, success: true, data: character.name + "已在照片墙公共画布上追加了一笔涂鸦，原有内容没有被覆盖。", userNotice: character.name + "在照片墙留下了涂鸦" };
+            }
+            const nextPhoto = side === "back"
+                ? { ...photo!, backDoodles: [...(photo!.backDoodles ?? []), doodle] }
+                : { ...photo!, doodles: [...(photo!.doodles ?? []), doodle] };
+            const record: PhotoWallCreationRecord = {
+                id: createPhotoWallId(), createdAt, authorType: "character", authorId: character.id,
+                authorName: character.name,
+                narrative: character.name + "在「" + (photo!.title || "这张照片") + "」的" + (side === "back" ? "背面留言纸" : "正面相框") + "留下了新的涂鸦。",
+                photoIds: [photo!.id], layers: [{ kind: "photo", photoId: photo!.id, side, doodles: [doodle] }], doodles: [doodle],
+            };
+            savePhotoWallState({
+                ...state,
+                photos: state.photos.map(item => item.id === photo!.id ? nextPhoto : item),
+                creationRecords: [...(state.creationRecords ?? []), record],
+            });
+            return { name: call.name, success: true, data: character.name + "已在「" + (photo!.title || "这张照片") + "」" + (side === "back" ? "背面" : "正面") + "追加了一笔涂鸦，原有内容没有被覆盖。", userNotice: character.name + "在照片墙留下了涂鸦" };
+        }
+        return { name: call.name, success: false, error: "未知照片墙动作。" };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { name: call.name, success: false, error: message, continueConversation: false, persistToHistory: false, userNotice: call.name + "失败：" + message };
+    }
 }
 
 async function executeMusicControlTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {

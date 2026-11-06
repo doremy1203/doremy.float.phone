@@ -1,7 +1,14 @@
 AI Virtual Phone
 
-This project is independently implemented and licensed under the GNU Affero
-General Public License v3.0 only (AGPL-3.0-only).
+This repository is a derivative fork licensed under the GNU Affero General Public
+License v3.0 only (AGPL-3.0-only).
+
+Upstream lineage:
+
+- Original project by 小笼包: https://github.com/xiaolongbao0709/ai-virtual-phone
+- Direct upstream fork and earlier development by 末末: https://github.com/jianchu-in/momo.float.phone
+- This repository continues the fork with additional applications, Android shell,
+  device integrations, reliability work, documentation, and maintenance.
 
 Some product ideas and interaction patterns were inspired by SillyTavern,
 including presets, regex-based processing, and world/lore book concepts.

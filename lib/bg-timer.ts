@@ -1,115 +1,68 @@
-// Background-safe timers using a Web Worker, with automatic native-timer recovery.
-// A Worker crash must not silently strand timers used by check-in, follow-up,
-// reality bridge, widgets, and other background schedulers.
-
-type TimerRecord = {
-    callback: () => void;
-    ms: number;
-    repeat: boolean;
-    dueAt: number;
-    nativeId: ReturnType<typeof setTimeout> | null;
-};
+// lib/bg-timer.ts
+// Background-safe timers using a Web Worker heartbeat.
+// Falls back to native setInterval/setTimeout when Worker is unavailable.
 
 let worker: Worker | null = null;
-const timers = new Map<string, TimerRecord>();
+const callbacks = new Map<string, () => void>();
 let idCounter = 0;
-
-function scheduleNative(id: string, delay: number): void {
-    const record = timers.get(id);
-    if (!record) return;
-    if (record.nativeId !== null) clearTimeout(record.nativeId);
-    record.dueAt = Date.now() + Math.max(0, delay);
-    record.nativeId = setTimeout(() => {
-        const current = timers.get(id);
-        if (!current) return;
-        current.nativeId = null;
-        if (!current.repeat) timers.delete(id);
-        try {
-            current.callback();
-        } finally {
-            if (current.repeat && timers.has(id) && !worker) {
-                scheduleNative(id, current.ms);
-            }
-        }
-    }, Math.max(0, delay));
-}
-
-function recoverWorkerTimers(failedWorker: Worker): void {
-    if (worker !== failedWorker) return;
-    worker = null;
-    try { failedWorker.terminate(); } catch { /* already terminated */ }
-    for (const [id, record] of timers) {
-        const remaining = Math.max(0, record.dueAt - Date.now());
-        scheduleNative(id, remaining);
-    }
-}
 
 function ensureWorker(): Worker | null {
     if (worker) return worker;
     if (typeof window === "undefined" || typeof Worker === "undefined") return null;
     try {
-        const created = new Worker("/timer-worker.js");
-        worker = created;
-        created.onmessage = (e) => {
-            if (e.data?.type !== "tick") return;
-            const record = timers.get(String(e.data.id));
-            if (!record) return;
-            if (!record.repeat) timers.delete(String(e.data.id));
-            record.dueAt = record.repeat ? Date.now() + record.ms : 0;
-            record.callback();
+        worker = new Worker("/timer-worker.js");
+        worker.onmessage = (e) => {
+            if (e.data.type === "tick") {
+                const cb = callbacks.get(e.data.id);
+                if (cb) cb();
+            }
         };
-        created.onerror = () => recoverWorkerTimers(created);
-        return created;
+        worker.onerror = () => { worker = null; };
+        return worker;
     } catch {
         return null;
     }
 }
 
-function startTimer(callback: () => void, ms: number, repeat: boolean): () => void {
-    const id = `bgt_${++idCounter}`;
-    const duration = Math.max(0, Number.isFinite(ms) ? ms : 0);
-    const record: TimerRecord = {
-        callback,
-        ms: duration,
-        repeat,
-        dueAt: Date.now() + duration,
-        nativeId: null,
-    };
-    timers.set(id, record);
-
+/** setInterval that survives background tab throttling. Returns a stop function. */
+export function bgSetInterval(callback: () => void, ms: number): () => void {
     const w = ensureWorker();
+    const id = `bgi_${++idCounter}`;
+
     if (w) {
-        try {
-            w.postMessage({
-                type: repeat ? "start-interval" : "start-timeout",
-                id,
-                ms: duration,
-            });
-        } catch {
-            recoverWorkerTimers(w);
-            if (timers.has(id) && record.nativeId === null) scheduleNative(id, duration);
-        }
-    } else {
-        scheduleNative(id, duration);
+        callbacks.set(id, callback);
+        w.postMessage({ type: "start-interval", id, ms });
+        return () => {
+            callbacks.delete(id);
+            w.postMessage({ type: "stop", id });
+        };
     }
 
-    return () => {
-        const current = timers.get(id);
-        if (!current) return;
-        timers.delete(id);
-        if (current.nativeId !== null) clearTimeout(current.nativeId);
-        try { worker?.postMessage({ type: "stop", id }); } catch { /* worker unavailable */ }
-    };
+    // Fallback: native setInterval
+    const nativeId = setInterval(callback, ms);
+    return () => clearInterval(nativeId);
 }
 
-/** setInterval that survives background tab throttling while the Worker is alive. */
-export function bgSetInterval(callback: () => void, ms: number): () => void {
-    return startTimer(callback, ms, true);
-}
-
-/** setTimeout that survives background tab throttling while the Worker is alive. */
+/** setTimeout that survives background tab throttling. Returns a cancel function. */
 export function bgSetTimeout(callback: () => void, ms: number): () => void {
-    return startTimer(callback, ms, false);
+    const w = ensureWorker();
+    const id = `bgt_${++idCounter}`;
+
+    if (w) {
+        callbacks.set(id, () => {
+            callbacks.delete(id); // auto-cleanup after one fire
+            callback();
+        });
+        w.postMessage({ type: "start-timeout", id, ms });
+        return () => {
+            callbacks.delete(id);
+            w.postMessage({ type: "stop", id });
+        };
+    }
+
+    // Fallback: native setTimeout
+    const nativeId = setTimeout(callback, ms);
+    return () => clearTimeout(nativeId);
 }
 
 /** Promise delay backed by the worker timer, with optional abort support. */
@@ -132,15 +85,12 @@ export function bgDelay(ms: number, signal?: AbortSignal): Promise<void> {
     });
 }
 
-/** Clean up all timers and terminate the Worker (call on app teardown). */
+/** Clean up the worker (call on app teardown). */
 export function bgTimerCleanup(): void {
     if (worker) {
-        try { worker.postMessage({ type: "stop-all" }); } catch { /* ignore */ }
+        worker.postMessage({ type: "stop-all" });
         worker.terminate();
         worker = null;
     }
-    for (const record of timers.values()) {
-        if (record.nativeId !== null) clearTimeout(record.nativeId);
-    }
-    timers.clear();
+    callbacks.clear();
 }

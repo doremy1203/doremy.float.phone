@@ -1,0 +1,83 @@
+name: Deploy video transcription service
+
+on:
+  workflow_dispatch:
+    inputs:
+      allowed_origins:
+        description: "Exact web-app origins, comma-separated (e.g. https://zfloat.netlify.app)"
+        required: true
+        type: string
+      allowed_media_hosts:
+        description: "Exact hostnames serving direct audio files, comma-separated (no https://, no paths)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-video-transcriber
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/cloudflare-video-transcriber
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Type-check Worker
+        run: npm run typecheck
+
+      - name: Validate deployment settings and configure Worker
+        env:
+          ALLOWED_ORIGINS_INPUT: ${{ inputs.allowed_origins }}
+          ALLOWED_MEDIA_HOSTS_INPUT: ${{ inputs.allowed_media_hosts }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          const file = "wrangler.jsonc";
+          const config = JSON.parse(fs.readFileSync(file, "utf8"));
+          const origins = process.env.ALLOWED_ORIGINS_INPUT.split(",").map(x => x.trim()).filter(Boolean);
+          const hosts = process.env.ALLOWED_MEDIA_HOSTS_INPUT.split(",").map(x => x.trim().toLowerCase()).filter(Boolean);
+          if (!origins.length || origins.some(x => {
+            try { const u = new URL(x); return u.origin !== x || !["https:", "http:"].includes(u.protocol); }
+            catch { return true; }
+          })) throw new Error("Origins must be exact origins such as https://example.com, without paths.");
+          if (!hosts.length || hosts.some(x => !/^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(x) || x === "*")) {
+            throw new Error("Media hosts must be exact hostnames, without scheme, port, path, or wildcard.");
+          }
+          config.vars = { ...(config.vars || {}), ALLOWED_ORIGINS: origins.join(","), ALLOWED_MEDIA_HOSTS: hosts.join(",") };
+          fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+          NODE
+
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TRANSCRIBE_TOKEN: ${{ secrets.TRANSCRIBE_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || (echo "::error::Add CLOUDFLARE_API_TOKEN to GitHub Actions secrets" && exit 1)
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || (echo "::error::Add CLOUDFLARE_ACCOUNT_ID to GitHub Actions secrets" && exit 1)
+          test -n "$TRANSCRIBE_TOKEN" || (echo "::error::Add TRANSCRIBE_TOKEN to GitHub Actions secrets" && exit 1)
+          printf '%s' "$TRANSCRIBE_TOKEN" | npx wrangler secret put TRANSCRIBE_TOKEN
+          npx wrangler deploy
+
+      - name: Smoke test deployment
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "Worker deployment completed. Test the /health endpoint shown in the Wrangler deploy output."

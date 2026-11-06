@@ -3,7 +3,7 @@
 import {
     chatDb,
     initChatDb,
-    dbPutMessage, dbPutMessageAndWait, dbDeleteMessage, dbDeleteMessagesBySession, dbDeleteMessagesByIds,
+    dbPutMessage, dbDeleteMessage, dbDeleteMessagesBySession, dbDeleteMessagesByIds,
     dbPutMessages, dbPutSessions, dbPutContacts, dbDeleteSession,
     dbReplaceContacts, dbReplaceSessions, dbBulkPutMessages,
 } from "./chat-db";
@@ -14,6 +14,12 @@ import { emitChatPluginEvent, runChatPluginTransformSync } from "./chat-plugin-h
 import { parseAIResponse } from "./rich-message-parser";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
 import { findUserAvatarChangeIntent, inferAvatarDecisionFromReply } from "./chat-avatar-intent";
+import { appendLifeTimelineEntry, loadVirtualLifeState, saveVirtualLifeState } from "./life/life-storage";
+import { getActorClock, resolveActorLifeNow } from "./life/life-runtime";
+import { resolveCharacterIdReference, resolveSessionCharacterIdentity } from "./character-id-contract";
+import { migrateLegacyCharacterIdentityData } from "./character-id-migration";
+import { recordLifeDiagnostic } from "./life/life-diagnostics";
+import { recordPerformanceMetric } from "./performance-diagnostics";
 
 export const DEFAULT_VISION_IMAGE_PROMPT_LIMIT = 1;
 export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
@@ -36,6 +42,8 @@ export type ChatContact = {
 
 export type ChatSession = {
     id: string;
+    /** Canonical Character.id for private chats; contactId remains the legacy relationship/session reference. */
+    characterId?: string;
     contactId: string;
     lastMessageId?: string;
     lastMessagePreview?: string;
@@ -97,6 +105,20 @@ export type ChatSession = {
     isSpectator?: boolean; // 围观群：用户不在群内，只能生成/线下
 };
 
+export type ChatChannel =
+    | "chat"
+    | "group_chat"
+    | "offline"
+    | "call"
+    | "call_end"
+    | "story"
+    | "watch_together"
+    | "photo_wall"
+    | "custom_app"
+    | "weixin"
+    | "reality_bridge"
+    | "life_scene";
+
 export type ChatMessageStatus = "sending" | "sent" | "read" | "failed" | "rejected";
 export type ChatMessageRole = "user" | "assistant" | "system" | "tool";
 
@@ -147,6 +169,11 @@ export type ChatMessage = {
      * 于是通话期间在聊天室发的消息、卡片也被一起折进去了（用户实报）。
      */
     origin?: "chat" | "reading_discuss" | "custom_app" | "custom_app_background" | "story_floating_phone" | "call";
+    /**
+     * 更细的来源标记：只用于提示词/记忆/UI 追溯，不参与通话折叠判定。
+     * 旧消息没有该字段时按 origin/session 推断。
+     */
+    channel?: ChatChannel;
     mediaUrl?: string;
     mediaData?: {
         amount?: number;          // 红包/转账金额
@@ -228,6 +255,8 @@ export type ChatMessage = {
         callDuration?: string;    // 通话时长（如 05:23）
         /** 用户手动标记的「通话开头」(右键菜单)。老通话留痕丢失时用它圈定区间起点。 */
         callStartMarker?: boolean;
+        /** 用户手动标记的「通话结尾」(右键菜单)。 */
+        callEndMarker?: boolean;
         /**
          * 通话语音留档引用（media-store://…）。通话屏把角色这句的原音存进媒体库后写在
          * 这里，供「通话统计」直接复听原音，不必重新合成（音色/语气才和当时一致）。
@@ -256,8 +285,18 @@ export type ChatMessage = {
         fileName?: string;
         fileDuration?: number;
         useReferenceImage?: boolean; // AI photo tag: whether to send the character reference image to the generator
+        disableReferenceImage?: boolean; // Explicit per-image opt-out; missing means use identity references automatically
+        imageRefs?: string[]; // 微信式合并发送的多图消息；旧数据可能含主图，新数据存主图之外的引用
+        imageRefsExcludePrimary?: boolean; // true 表示 imageRefs 明确不含 mediaUrl，兼容重复选择同一图片
+        imageCollection?: boolean; // true 时作为单条横向轮播集合消息展示
+        imageIndex?: number; // 普通多图逐条发送时的原始选择顺序（从 1 开始）
+        imageGroupId?: string;
+        imageGroupIndex?: number;
+        imageGroupCount?: number;
         imageGenerationMediaRef?: string;
         imageGenerationPrompt?: string;
+        /** 图像提示要求多人同框时保留参与者 ID，供失败重试/重新生成继续使用身份参考。 */
+        imageGenerationCharacterIds?: string[];
         imageGenerationUsedReference?: boolean;
         imageGenerationStatus?: "pending" | "failed" | "generated";
         imageGenerationError?: string;
@@ -286,8 +325,6 @@ export type ChatMessage = {
         compactSystemInstruction?: boolean;
         /** 该内部系统事件需要作为私聊短期事件进入统一记忆时间线。 */
         shortTermMemoryEvent?: boolean;
-        /** 用户手动指定的通话折叠区间终点标记。 */
-        callEndMarker?: boolean;
     };
     isTyping?: boolean; // temporary flag for UI rendering
     statusPanel?: string; // AI display-only status content from [状态栏] tags
@@ -511,16 +548,18 @@ function resolvePendingAvatarRecommendation(message: ChatMessage): void {
 
     const session = _sessionsCache.find(item => item.id === message.sessionId);
     if (!session || session.isGroup) return;
+    const characterId = resolveSessionCharacterId(session);
+    if (!characterId) return;
     const legacyRecommendation = [..._messagesCache].reverse().find(item =>
         item.sessionId === message.sessionId
         && item.role === "user"
         && item.mediaType === "image"
-        && item.mediaData?.avatarRecommendationForCharacterId === session.contactId
+        && item.mediaData?.avatarRecommendationForCharacterId === resolveSessionCharacterId(session)
         && item.mediaData?.avatarRecommendationStatus === "pending"
         && Boolean(item.mediaUrl),
     );
     const recommendation = legacyRecommendation
-        || findUserAvatarChangeIntent(_messagesCache, message.sessionId, session.contactId)?.image;
+        || findUserAvatarChangeIntent(_messagesCache, message.sessionId, characterId)?.image;
     if (!recommendation) return;
 
     const explicitAccepted = AVATAR_ACCEPT_RE.test(message.rawResponseText);
@@ -534,14 +573,15 @@ function resolvePendingAvatarRecommendation(message: ChatMessage): void {
 
     recommendation.mediaData = {
         ...recommendation.mediaData,
-        avatarRecommendationForCharacterId: session.contactId,
+        avatarRecommendationForCharacterId: characterId,
         avatarRecommendationStatus: accepted ? "accepted" : "declined",
     };
     dbPutMessage(recommendation);
 
     if (accepted && recommendation.mediaUrl) {
         const characters = loadCharacters();
-        const index = characters.findIndex(character => character.id === session.contactId);
+        const characterId = resolveSessionCharacterId(session);
+        const index = characterId ? characters.findIndex(character => character.id === characterId) : -1;
         if (index >= 0) {
             characters[index] = {
                 ...characters[index],
@@ -640,7 +680,7 @@ export function getChatMessagePreview(msg: ChatMessage): string {
         if (msg.role === "user") return `你向${callInit[1]}发起了${callInit[2]}`;
         const sess = _sessionsCache.find(s => s.id === msg.sessionId);
         const charName = msg.senderName || (!sess?.isGroup
-            ? loadCharacters().find(c => c.id === sess?.contactId)?.name
+            ? (sess && !sess.isGroup ? loadCharacters().find(c => c.id === resolveSessionCharacterId(sess))?.name : undefined)
             : undefined);
         if (sess?.isGroup || callInit[1] === "群聊") {
             return `${charName || "对方"}向群聊发起了${callInit[2]}`;
@@ -759,22 +799,71 @@ export function compareChatMessages(a: ChatMessage, b: ChatMessage): number {
     return a.id.localeCompare(b.id);
 }
 
+function ensureSortedSessionMessageCache(): void {
+    if (_sortedSessionMessagesSource === _messagesCache && _sortedSessionMessagesLength === _messagesCache.length) return;
+    const rebuildStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const grouped = new Map<string, ChatMessage[]>();
+    const nextOrders = new Map<string, number>();
+    for (const message of _messagesCache) {
+        const bucket = grouped.get(message.sessionId);
+        if (bucket) bucket.push(message);
+        else grouped.set(message.sessionId, [message]);
+        const order = getStableMessageOrder(message);
+        if (order !== null) nextOrders.set(message.sessionId, Math.max(nextOrders.get(message.sessionId) ?? 0, order + 1));
+    }
+    for (const bucket of grouped.values()) bucket.sort(compareChatMessages);
+    _sortedSessionMessagesCache = grouped;
+    _nextMessageOrderBySession = nextOrders;
+    _sortedSessionMessagesSource = _messagesCache;
+    _sortedSessionMessagesLength = _messagesCache.length;
+    recordPerformanceMetric("chat.storage.session_index_rebuild",
+        (typeof performance !== "undefined" ? performance.now() : Date.now()) - rebuildStartedAt,
+        { scannedMessages: _messagesCache.length, sessionCount: grouped.size });
+}
+
 function getSortedSessionMessages(sessionId: string): ChatMessage[] {
-    return _loadAllMessages()
-        .filter(m => m.sessionId === sessionId)
-        .sort(compareChatMessages);
+    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    ensureSortedSessionMessageCache();
+    const cached = _sortedSessionMessagesCache.get(sessionId) ?? [];
+    recordPerformanceMetric("chat.storage.session_messages_read",
+        (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
+        { matchedMessages: cached.length, cacheHit: _sortedSessionMessagesCache.has(sessionId) });
+    return cached.slice();
+}
+
+function appendSortedSessionMessageCache(message: ChatMessage): void {
+    if (_sortedSessionMessagesSource !== _messagesCache || _sortedSessionMessagesLength !== _messagesCache.length - 1) {
+        invalidateSortedSessionMessageCache();
+        return;
+    }
+    const bucket = _sortedSessionMessagesCache.get(message.sessionId) ?? [];
+    let low = 0;
+    let high = bucket.length;
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (compareChatMessages(bucket[middle], message) <= 0) low = middle + 1;
+        else high = middle;
+    }
+    bucket.splice(low, 0, message);
+    _sortedSessionMessagesCache.set(message.sessionId, bucket);
+    const order = getStableMessageOrder(message);
+    if (order !== null) {
+        _nextMessageOrderBySession.set(
+            message.sessionId,
+            Math.max(_nextMessageOrderBySession.get(message.sessionId) ?? 0, order + 1),
+        );
+    }
+    _sortedSessionMessagesLength = _messagesCache.length;
 }
 
 function getNextMessageOrder(sessionId: string): number {
-    let maxOrder = -1;
-    for (const msg of _messagesCache) {
-        if (msg.sessionId !== sessionId) continue;
-        const order = getStableMessageOrder(msg);
-        if (order !== null && order > maxOrder) maxOrder = order;
-    }
-    return maxOrder + 1;
+    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    ensureSortedSessionMessageCache();
+    const next = _nextMessageOrderBySession.get(sessionId) ?? 0;
+    recordPerformanceMetric("chat.storage.next_message_order",
+        (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt);
+    return next;
 }
-
 function reindexSessionMessageOrders(sessionId: string): void {
     const ordered = getSortedSessionMessages(sessionId);
     const changed = new Map<string, ChatMessage>();
@@ -821,12 +910,22 @@ export function reindexSessionMessageOrdersByTime(sessionId: string): void {
 }
 
 export function getLastVisibleSessionMessage(sessionId: string): ChatMessage | null {
-    const messages = getSortedSessionMessages(sessionId);
+    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    ensureSortedSessionMessageCache();
+    const messages = _sortedSessionMessagesCache.get(sessionId) ?? [];
+    let scannedBackwards = 0;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
+        scannedBackwards += 1;
         const msg = messages[i];
         if (!isSessionPreviewCandidate(msg)) continue;
+        recordPerformanceMetric("chat.storage.last_visible_message",
+            (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
+            { scannedBackwards });
         return msg;
     }
+    recordPerformanceMetric("chat.storage.last_visible_message",
+        (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
+        { scannedBackwards });
     return null;
 }
 
@@ -844,6 +943,17 @@ const DEFAULT_CHAT_APP_SETTINGS: ChatAppSettings = {
 let _contactsCache: ChatContact[] = [];
 let _sessionsCache: ChatSession[] = [];
 let _messagesCache: ChatMessage[] = [];
+let _sortedSessionMessagesSource: ChatMessage[] | null = null;
+let _sortedSessionMessagesLength = -1;
+let _sortedSessionMessagesCache = new Map<string, ChatMessage[]>();
+let _nextMessageOrderBySession = new Map<string, number>();
+
+function invalidateSortedSessionMessageCache(): void {
+    _sortedSessionMessagesSource = null;
+    _sortedSessionMessagesLength = -1;
+    _sortedSessionMessagesCache.clear();
+    _nextMessageOrderBySession.clear();
+}
 let _hydrated = false;
 let _hydratePromise: Promise<void> | null = null;
 
@@ -922,9 +1032,15 @@ function normalizeChatSessions(sessions: ChatSession[]): NormalizedSessionList {
             changed = true;
             continue;
         }
-        const item = id === session.id && contactId === session.contactId
+        const characterId = resolveSessionCharacterIdentity(
+            { contactId, characterId: session.characterId, isGroup: session.isGroup },
+            _contactsCache,
+            new Set(loadCharacters().map(character => character.id)),
+        );
+        const item = id === session.id && contactId === session.contactId && characterId === session.characterId
             ? session
-            : { ...session, id, contactId };
+            : { ...session, id, contactId, ...(characterId ? { characterId } : {}) };
+        if (!characterId && "characterId" in item) delete (item as ChatSession).characterId;
         const existing = byId.get(id);
         if (!existing) {
             byId.set(id, item);
@@ -950,9 +1066,10 @@ function normalizeChatSessions(sessions: ChatSession[]): NormalizedSessionList {
             continue;
         }
 
-        const existingIndex = privateIndexByContact.get(session.contactId);
+        const identityKey = session.characterId || session.contactId;
+        const existingIndex = privateIndexByContact.get(identityKey);
         if (existingIndex === undefined) {
-            privateIndexByContact.set(session.contactId, normalized.length);
+            privateIndexByContact.set(identityKey, normalized.length);
             normalized.push(session);
             continue;
         }
@@ -1014,13 +1131,12 @@ function unmarkContactRemoved(characterId: string): void {
 function restoreContactsForPrivateSessions(contacts: ChatContact[], sessions: ChatSession[]): NormalizedList<ChatContact> {
     const characterIds = new Set(loadCharacters().map(character => character.id));
     const removedByUser = loadRemovedContactIds();
-    const privateSessionsWithMessages = sessions.filter(session =>
-        !session.isGroup
-        && session.contactId
-        && characterIds.has(session.contactId)
-        && !removedByUser.has(session.contactId)
-        && Boolean(getLastVisibleSessionMessage(session.id))
-    );
+    const privateSessionsWithMessages = sessions.filter(session => {
+        const characterId = resolveCharacterIdReference(session.contactId, session.characterId, contacts, characterIds);
+        return !session.isGroup && Boolean(characterId)
+            && !removedByUser.has(characterId!)
+            && Boolean(getLastVisibleSessionMessage(session.id));
+    });
     if (privateSessionsWithMessages.length === 0 || contacts.length >= privateSessionsWithMessages.length) {
         return { items: contacts, changed: false };
     }
@@ -1033,14 +1149,15 @@ function restoreContactsForPrivateSessions(contacts: ChatContact[], sessions: Ch
     let changed = false;
 
     for (const session of privateSessionsWithMessages) {
-        if (contactIds.has(session.contactId)) continue;
-        const safeId = session.contactId.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 80) || Date.now().toString(36);
+        const characterId = resolveCharacterIdReference(session.contactId, session.characterId, contacts, characterIds);
+        if (!characterId || contactIds.has(characterId)) continue;
+        const safeId = characterId.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 80) || Date.now().toString(36);
         restored.push({
             id: `contact_recovered_${safeId}`,
-            characterId: session.contactId,
+            characterId,
             addedAt: session.updatedAt || new Date().toISOString(),
         });
-        contactIds.add(session.contactId);
+        contactIds.add(characterId);
         changed = true;
     }
 
@@ -1243,13 +1360,16 @@ function refreshSessionPreviewMetadata(sessions: ChatSession[]): NormalizedList<
 export function hydrateChatStorage(): Promise<void> {
     if (_hydrated || typeof window === "undefined") return Promise.resolve();
     if (_hydratePromise) return _hydratePromise;
-    _hydratePromise = initChatDb().then(data => {
+    _hydratePromise = initChatDb().then(async data => {
         const normalizedToolHistory = normalizeLegacyTextToolHistory(data.messages);
         _messagesCache = normalizedToolHistory.items;
         if (normalizedToolHistory.changedMessages.length > 0) {
             dbPutMessages(normalizedToolHistory.changedMessages);
         }
         let normalizedContacts = normalizeChatContacts(data.contacts);
+        // Session normalization must see the freshly hydrated contact→character map;
+        // otherwise legacy contact_ sessions cannot be canonicalized on first load.
+        _contactsCache = normalizedContacts.items;
         const normalizedSessions = normalizeChatSessions(data.sessions);
         const redirectedMessages = redirectMessagesToPreferredSessions(normalizedSessions.redirects);
         const refreshedSessions = refreshSessionPreviewMetadata(normalizedSessions.items);
@@ -1259,6 +1379,36 @@ export function hydrateChatStorage(): Promise<void> {
         if (normalizedContacts.changed) dbReplaceContacts(normalizedContacts.items);
         if (normalizedSessions.changed || redirectedMessages > 0 || refreshedSessions.changed) dbReplaceSessions(refreshedSessions.items);
         _hydrated = true;
+
+        const identityMappings = normalizedContacts.items
+            .filter(contact => contact.id && contact.characterId && contact.id !== contact.characterId)
+            .map(contact => ({ fromId: contact.id, toId: contact.characterId }));
+        if (identityMappings.length > 0) {
+            try {
+                const migration = await migrateLegacyCharacterIdentityData(identityMappings);
+                const migratedCount = migration.memoryEntries + migration.memoryMetadata + migration.calendarPlans + migration.lifeRecords;
+                if (migratedCount > 0) {
+                    recordLifeDiagnostic({
+                        source: "角色身份迁移", event: "旧角色数据已归并到规范 ID", status: "ok",
+                        detail: "已将旧联系人 ID 下的记忆、日历和生活状态迁移到对应 Character.id。",
+                        meta: { mappings: identityMappings.length, ...migration },
+                    });
+                }
+                if (!migration.memoryAvailable || migration.errors.length > 0) {
+                    recordLifeDiagnostic({
+                        source: "角色身份迁移", event: "部分历史数据迁移需要重试", status: "warning",
+                        detail: migration.errors.join("；") || "记忆数据库暂不可用；聊天身份映射已完成，历史记忆迁移将在后续启动时重试。",
+                        meta: { mappings: identityMappings.length, ...migration },
+                    });
+                }
+            } catch (error) {
+                recordLifeDiagnostic({
+                    source: "角色身份迁移", event: "历史数据迁移失败", status: "error",
+                    detail: error instanceof Error ? error.message : String(error),
+                    meta: { mappings: identityMappings.length },
+                });
+            }
+        }
     }).catch(err => {
         console.warn("[ChatStorage] hydration failed, will retry on next call:", err);
         _hydratePromise = null;
@@ -1294,6 +1444,21 @@ export function saveChatContacts(contacts: ChatContact[]) {
         return;
     }
     dbReplaceContacts(normalized.items);
+}
+
+/**
+ * 统一解析「私聊会话 → 角色 ID」。
+ *
+ * 历史数据里 session.contactId 既可能是 Character.id，也可能是
+ * ChatContact.id（contact_...）；所有需要按会话找角色的链路都必须走这里，
+ * 否则会出现「聊天能回、但记忆/睡眠/冷场静默跳过」的分裂行为。
+ */
+export function resolveSessionCharacterId(session: Pick<ChatSession, "contactId"> & Partial<Pick<ChatSession, "characterId" | "isGroup">>): string | null {
+    return resolveSessionCharacterIdentity(
+        session,
+        loadChatContacts(),
+        new Set(loadCharacters().map(character => character.id)),
+    );
 }
 
 export function addChatContact(characterId: string): ChatContact | null {
@@ -1346,12 +1511,14 @@ export function saveChatSessions(sessions: ChatSession[]) {
 
 export function createOrGetSession(contactId: string): ChatSession {
     const sessions = loadChatSessions();
-    const existing = sessions.find(s => s.contactId === contactId);
+    const characterId = resolveSessionCharacterId({ contactId });
+    const existing = sessions.find(s => s.contactId === contactId || (characterId && s.characterId === characterId));
     if (existing) return existing;
 
     const newSession: ChatSession = {
         id: `sess_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         contactId,
+        ...(characterId ? { characterId } : {}),
         unreadCount: 0,
         updatedAt: new Date().toISOString(),
         isPinned: false,
@@ -1438,6 +1605,18 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     status?: ChatMessageStatus;
     createdAt?: string;
 }): ChatMessage {
+    const pushStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    // Explicit IDs are used by retryable imports/notification delivery. Treat them as
+    // idempotency keys so a native queue replay cannot duplicate the same chat bubble.
+    if (msg.id) {
+        const existing = getSortedSessionMessages(msg.sessionId).find(item => item.id === msg.id);
+        if (existing) {
+            recordPerformanceMetric("chat.message.push_sync",
+                (typeof performance !== "undefined" ? performance.now() : Date.now()) - pushStartedAt,
+                { duplicate: true });
+            return existing;
+        }
+    }
     let newMsg: ChatMessage = {
         ...msg,
         id: msg.id || createMessageId(),
@@ -1445,6 +1624,20 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
         order: getNextMessageOrder(msg.sessionId),
         status: msg.status || "sent"
     };
+
+    // 来源推断：旧调用方没传 channel 时按 origin/session 兜底，保证每条消息都能追溯。
+    if (!newMsg.channel) {
+        const sessionForChannel = _sessionsCache.find(session => session.id === newMsg.sessionId);
+        newMsg.channel = sessionForChannel?.isGroup
+            ? "group_chat"
+            : newMsg.origin === "call"
+                ? "call"
+                : newMsg.origin === "story_floating_phone"
+                    ? "story"
+                    : newMsg.origin === "custom_app" || newMsg.origin === "custom_app_background"
+                        ? "custom_app"
+                        : "chat";
+    }
 
     // 聊天插件织入点：消息落库前同步改写（全部消息路径都会经过这里）
     const pluginResult = runChatPluginTransformSync("message.beforePersist", { message: newMsg });
@@ -1464,6 +1657,7 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     }
 
     _messagesCache.push(newMsg);
+    appendSortedSessionMessageCache(newMsg);
     dbPutMessage(newMsg);
     resolvePendingAvatarRecommendation(newMsg);
 
@@ -1509,23 +1703,79 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     }
     emitChatPluginEvent("message.persisted", { message: newMsg });
 
-    return newMsg;
-}
+    // Keep a lightweight cross-app breadcrumb in the Life timeline. Do not copy full
+    // chat history into Life; the canonical message remains in Chat storage.
+    // Defer this secondary write until the browser yields so it cannot delay the
+    // immediate local chat bubble. The callback reads the latest timeline state when
+    // it runs, preserving the existing merge-within-five-minutes behavior.
+    if ((newMsg.role === "user" || newMsg.role === "assistant") && typeof window !== "undefined") {
+        const writeLifeTimeline = () => {
+            const lifeTimelineStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+            try {
+                const life = loadVirtualLifeState();
+                if (life.settings.enabled) {
+                    const session = _sessionsCache.find(item => item.id === newMsg.sessionId);
+                    const characterId = session && !session.isGroup ? resolveSessionCharacterId(session) : null;
+                    const character = characterId ? loadCharacters().find(item => item.id === characterId) : undefined;
+                    if (session && !session.isGroup && character) {
+                        const playerSent = newMsg.role === "user";
+                        const content = typeof newMsg.content === "string" ? newMsg.content.trim() : "";
+                        const shortPreview = content.replace(/\s+/g, " ").slice(0, 120);
+                        const nowIso = resolveActorLifeNow(getActorClock(life, "player", "player")).toISOString();
+                        const chatTitle = "你和" + character.name + "在消息 APP 聊天";
+                        const line = (playerSent ? "你" : character.name) + "：" + (shortPreview || "发送了消息");
+                        const previous = [...(life.timeline ?? [])].reverse().find(entry =>
+                            entry.category === "chat" &&
+                            entry.actorId === character.id &&
+                            Number.isFinite(new Date(entry.recordedAt ?? entry.occurredAt).getTime()) &&
+                            Date.now() - new Date(entry.recordedAt ?? entry.occurredAt).getTime() >= 0 &&
+                            Date.now() - new Date(entry.recordedAt ?? entry.occurredAt).getTime() <= 5 * 60 * 1000
+                        );
+                        if (previous) {
+                            const priorLines = (previous.details ?? "").split("\n").filter(Boolean);
+                            const updated = {
+                                ...life,
+                                timeline: life.timeline.map(entry => entry.id === previous.id
+                                    ? { ...entry, occurredAt: nowIso, recordedAt: new Date().toISOString(), title: chatTitle, details: [...priorLines, line].slice(-3).join("\n"), sourceId: newMsg.id }
+                                    : entry),
+                                updatedAt: nowIso,
+                            };
+                            saveVirtualLifeState(updated);
+                        } else {
+                            const logged = appendLifeTimelineEntry(life, {
+                                category: "chat",
+                                title: chatTitle,
+                                details: line,
+                                actorId: character.id,
+                                actorName: character.name,
+                                sourceId: newMsg.id,
+                                occurredAt: nowIso,
+                            });
+                            saveVirtualLifeState(logged);
+                        }
+                    }
+                }
+            } catch {
+                // Life timeline logging must never block ordinary message persistence.
+            } finally {
+                recordPerformanceMetric("chat.message.life_timeline_write",
+                    (typeof performance !== "undefined" ? performance.now() : Date.now()) - lifeTimelineStartedAt);
+            }
+        };
+        const idleWindow = window as Window & {
+            requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+        };
+        if (typeof idleWindow.requestIdleCallback === "function") {
+            idleWindow.requestIdleCallback(writeLifeTimeline, { timeout: 1200 });
+        } else {
+            window.setTimeout(writeLifeTimeline, 80);
+        }
+    }
+    recordPerformanceMetric("chat.message.push_sync",
+        (typeof performance !== "undefined" ? performance.now() : Date.now()) - pushStartedAt,
+        { role: newMsg.role, media: Boolean(newMsg.mediaType) });
 
-/** Critical entry point: keep normal chat side effects, then wait for IndexedDB persistence. */
-export async function pushChatMessageAndPersist(
-    msg: Omit<ChatMessage, "id" | "createdAt" | "status"> & {
-        id?: string;
-        status?: ChatMessageStatus;
-        createdAt?: string;
-    },
-): Promise<ChatMessage> {
-    // Stable IDs make retries idempotent: a failed IndexedDB write or failed native ACK
-    // must not append the same notification reply to the in-memory chat twice.
-    const existing = msg.id ? _messagesCache.find(item => item.id === msg.id) : undefined;
-    const saved = existing ?? pushChatMessage(msg);
-    await dbPutMessageAndWait(saved);
-    return saved;
+    return newMsg;
 }
 
 export function upsertImportedChatMessage(msg: ChatMessage): { message: ChatMessage; inserted: boolean } {
@@ -1937,6 +2187,7 @@ export function editChatMessage(messageId: string, newContent: string) {
     const msgIdx = _messagesCache.findIndex(m => m.id === messageId);
     if (msgIdx !== -1) {
         _messagesCache[msgIdx] = { ..._messagesCache[msgIdx], content: newContent };
+    invalidateSortedSessionMessageCache();
         dbPutMessage(_messagesCache[msgIdx]);
 
         const sessionId = _messagesCache[msgIdx].sessionId;
@@ -1955,6 +2206,7 @@ export function retractChatMessage(messageId: string) {
     const msgIdx = _messagesCache.findIndex(m => m.id === messageId);
     if (msgIdx !== -1) {
         _messagesCache[msgIdx] = { ..._messagesCache[msgIdx], isRetracted: true };
+    invalidateSortedSessionMessageCache();
         dbPutMessage(_messagesCache[msgIdx]);
 
         const sessionId = _messagesCache[msgIdx].sessionId;
@@ -2147,6 +2399,7 @@ export function updateMessageMediaStatus(messageId: string, newStatus: "pending"
     const idx = _messagesCache.findIndex(m => m.id === messageId);
     if (idx !== -1) {
         _messagesCache[idx] = { ..._messagesCache[idx], mediaData: { ..._messagesCache[idx].mediaData, status: newStatus } };
+    invalidateSortedSessionMessageCache();
         dbPutMessage(_messagesCache[idx]);
     }
 }
@@ -2156,6 +2409,7 @@ export function updateMessageMediaData(messageId: string, data: ChatMessage["med
     const idx = _messagesCache.findIndex(m => m.id === messageId);
     if (idx !== -1) {
         _messagesCache[idx] = { ..._messagesCache[idx], mediaData: data };
+    invalidateSortedSessionMessageCache();
         dbPutMessage(_messagesCache[idx]);
     }
 }
@@ -2164,6 +2418,7 @@ export function updateMessageMediaUrl(messageId: string, mediaUrl: string) {
     const idx = _messagesCache.findIndex(m => m.id === messageId);
     if (idx !== -1) {
         _messagesCache[idx] = { ..._messagesCache[idx], mediaUrl };
+    invalidateSortedSessionMessageCache();
         dbPutMessage(_messagesCache[idx]);
     }
 }
@@ -2186,6 +2441,7 @@ export async function persistMessageVoiceAudio(
             mediaData: { ..._messagesCache[idx].mediaData, synthesizedFromText },
         };
         _messagesCache[idx] = next;
+    invalidateSortedSessionMessageCache();
         dbPutMessage(next);
         return;
     }
@@ -2211,6 +2467,7 @@ export function updateChatMessage(
     if (idx === -1) return null;
 
     _messagesCache[idx] = { ..._messagesCache[idx], ...patch };
+    invalidateSortedSessionMessageCache();
     const updated = _messagesCache[idx];
     dbPutMessage(updated);
 
@@ -2323,6 +2580,7 @@ export function replaceMessageWithParts(
 
     // Remove original
     _messagesCache.splice(idx, 1);
+    invalidateSortedSessionMessageCache();
     dbDeleteMessage(originalId);
 
     // Insert parsed parts at the same position, preserving timestamp
@@ -2353,6 +2611,7 @@ export function replaceMessageWithParts(
             senderName: original.senderName,
         };
         _messagesCache.splice(idx + i, 0, newMsg);
+    invalidateSortedSessionMessageCache();
         dbPutMessage(newMsg);
         newMsgs.push(newMsg);
     }
@@ -2447,6 +2706,7 @@ export function replaceResponseBatchWithParts(
     const newMessages = toolCallMessage ? [...visibleMessages, toolCallMessage] : visibleMessages;
 
     _messagesCache.splice(insertIdx, 0, ...newMessages);
+    invalidateSortedSessionMessageCache();
     dbPutMessages(newMessages);
     reindexSessionMessageOrders(sessionId);
 
@@ -2546,6 +2806,7 @@ export function replaceGroupResponseRound(
     }));
 
     _messagesCache.splice(insertIdx, 0, ...newMessages);
+    invalidateSortedSessionMessageCache();
     dbPutMessages(newMessages);
     reindexSessionMessageOrders(sessionId);
 
@@ -2587,7 +2848,7 @@ function getStateOwnerCharacterId(
 
     const session = sessionsById.get(msg.sessionId);
     if (!session || session.isGroup) return null;
-    return session.contactId || null;
+    return resolveSessionCharacterId(session);
 }
 
 function isBeforeStateCutoff(

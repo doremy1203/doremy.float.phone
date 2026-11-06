@@ -413,8 +413,12 @@ export function extractReasoningContent(data: Record<string, unknown>): string {
     // Anthropic: thinking blocks in content array
     if (Array.isArray(d?.content)) {
         const thinkingBlocks = d.content
-            .filter((b: any) => b.type === "thinking" && b.thinking)
-            .map((b: any) => String(b.thinking).trim());
+            .filter((block: unknown): block is { type: "thinking"; thinking: string } => {
+                if (!block || typeof block !== "object") return false;
+                const candidate = block as { type?: unknown; thinking?: unknown };
+                return candidate.type === "thinking" && typeof candidate.thinking === "string";
+            })
+            .map((block: { type: "thinking"; thinking: string }) => block.thinking.trim());
         if (thinkingBlocks.length > 0) return thinkingBlocks.join("\n\n");
     }
 

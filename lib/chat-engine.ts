@@ -4,6 +4,9 @@ import { createSseJsonParser } from "./sse-json";
 import { maybeAppendShortcutCapability, maybeAppendPerceptionStatus } from "./offline-shortcut-capability";
 import { maybeBuildStatusInjection } from "./perception/describe";
 import { loadCharacters } from "./character-storage";
+import { createBuiltinPreset } from "./builtin-preset";
+import { IMAGE_CHARACTER_NAMING_RULE } from "./image-prompt-rules";
+import { buildLifeMemoryContext, buildLifePresenceContext } from "./life/life-memory-bridge";
 import { buildScreenEffectPromptHint } from "./chat-screen-effects";
 import { emitChatPluginEvent, runChatPluginTransform } from "./chat-plugin-hooks";
 import { buildChatPluginPromptFragments } from "./chat-plugin-storage";
@@ -24,8 +27,9 @@ import {
     createToolExecutionId,
     isSessionStreamingEnabled,
     resolveMeetingInviteCardConfig,
+    resolveSessionCharacterId,
 } from "./chat-storage";
-import { extractTextToolDirectiveText, stripTextToolDirectives } from "./text-tool-protocol";
+import { extractTextToolDirectiveText, stripMalformedTextToolDirectives, stripTextToolDirectives } from "./text-tool-protocol";
 import { applyWithProtectedAvatarDecisionMarkers, findUserAvatarChangeIntent } from "./chat-avatar-intent";
 import type { ApiConfig, PresetConfig, Prompt, PromptOrderEntry, RegexConfig } from "./settings-types";
 import type { CustomAppPromptProfile } from "./custom-app-types";
@@ -327,10 +331,28 @@ function stripVisionPromptImageData(msg: ChatMessage): ChatMessage {
 export function applyVisionImagePromptLimit(history: ChatMessage[], limitValue: unknown): ChatMessage[] {
     const limit = normalizeVisionImagePromptLimit(limitValue);
     let remaining = limit;
+    const groupedDecisions = new Map<string, boolean>();
 
     for (let index = history.length - 1; index >= 0; index -= 1) {
         const msg = history[index];
         if (!isVisionPromptImageMessage(msg) || !hasVisionPromptImageData(msg)) continue;
+        const groupId = msg.mediaData?.imageGroupId;
+        if (groupId) {
+            const keepGroup = groupedDecisions.get(groupId);
+            if (keepGroup === true) continue;
+            if (keepGroup === false) {
+                history[index] = stripVisionPromptImageData(msg);
+                continue;
+            }
+            const keep = remaining > 0;
+            groupedDecisions.set(groupId, keep);
+            if (keep) {
+                remaining -= 1;
+                continue;
+            }
+            history[index] = stripVisionPromptImageData(msg);
+            continue;
+        }
         if (remaining > 0) {
             remaining -= 1;
             continue;
@@ -339,6 +361,44 @@ export function applyVisionImagePromptLimit(history: ChatMessage[], limitValue: 
     }
 
     return history;
+}
+
+/**
+ * Expand a merged multi-image chat message into one prompt message per image.
+ *
+ * IMPORTANT: this must run BEFORE prepareShortTermContext(), because
+ * prepareShortTermContext() returns unifiedRecentItems whose historyIndex values
+ * point into the history array it was given. If we expand the array afterwards,
+ * every history item after a multi-image message shifts and the assembler reads
+ * the wrong message (often dropping the newest user/assistant turns).
+ */
+export function expandVisionImageHistoryForPrompt(history: ChatMessage[]): ChatMessage[] {
+    return history.flatMap(msg => {
+        const extraRefs = msg.mediaType === "image" && Array.isArray(msg.mediaData?.imageRefs)
+            ? msg.mediaData.imageRefs.filter((ref): ref is string => typeof ref === "string" && Boolean(ref))
+            : [];
+        // 新数据通过 imageRefsExcludePrimary 明确表示只存额外图；旧版数组常包含主图。
+        // 不能简单按 URL 去重：用户可能重复选择同一张图片，必须保留那一张。
+        const legacyFullRefs = msg.mediaData?.imageRefsExcludePrimary !== true
+            && Boolean(msg.mediaUrl)
+            && extraRefs[0] === msg.mediaUrl;
+        const normalizedExtraRefs = legacyFullRefs ? extraRefs.slice(1) : extraRefs;
+        const refs = msg.mediaUrl ? [msg.mediaUrl, ...normalizedExtraRefs] : extraRefs;
+        if (refs.length < 2) return [{ ...msg }];
+        return refs.map((ref, index) => ({
+            ...msg,
+            id: `${msg.id}__group_image_${index + 1}`,
+            mediaUrl: ref,
+            mediaData: {
+                ...msg.mediaData,
+                imageRefs: undefined,
+                imageGroupId: msg.id,
+                imageGroupIndex: index,
+                imageGroupCount: refs.length,
+                label: msg.mediaData?.label ? `${msg.mediaData.label}（第 ${index + 1} 张，共 ${refs.length} 张）` : `合并图片（第 ${index + 1} 张，共 ${refs.length} 张）`,
+            },
+        }));
+    });
 }
 
 // API 调用日志存储已抽到 ./api-log-store（聊天引擎与 simpleLLMCall 通用），
@@ -369,6 +429,9 @@ type ChatPromptBuildOptions = {
     /** 只随本次请求送出的系统提示：不落库、不进历史、下一轮读不到。
      *  定时查岗这类「一次性事件」用它告诉角色此刻该怎么回应。 */
     ephemeralSystemNote?: string;
+    /** 是否把当前角色的线上私聊作为 recent_chat 注入短期时间线。
+     *  默认按 offline 判断；生活场景/日程等显式传 false，避免线上话题串味。 */
+    includeDirectChatEntries?: boolean;
 };
 
 function matchesPromptProfileRef(prompt: { identifier: string; name?: string }, refs: Set<string>): boolean {
@@ -1807,8 +1870,12 @@ export async function buildChatPromptMessages(
     // 避免拉黑/解除拉黑刚切换后仍使用进入聊天室时的旧 session 快照。
     session = loadChatSessions().find(item => item.id === session.id) ?? session;
     const chars = loadCharacters();
-    const character = chars.find(c => c.id === session.contactId);
-    if (!character) throw new ChatEngineError(`Character not found: ${session.contactId}`);
+    // Normal chats store ChatContact.id; virtual life sessions may store Character.id.
+    const resolvedCharacterId = resolveSessionCharacterId(session);
+    const character = resolvedCharacterId
+        ? chars.find(c => c.id === resolvedCharacterId)
+        : undefined;
+    if (!character) throw new ChatEngineError(`Character not found for session contact ${session.contactId}; resolved character ID: ${resolvedCharacterId || "unresolved"}`);
 
     const resolvedAppId = options?.appId ?? "chat";
     const bindings = loadBindingConfig();
@@ -1862,19 +1929,23 @@ export async function buildChatPromptMessages(
         : history;
 
     const now = new Date();
-    const promptTimeContext = buildCharacterTimeContext(character.timeZone, now);
+    const promptTimeContext = buildCharacterTimeContext(character.timeZone, now, loadChatAppSettings().timeAware !== false);
     const promptTimestampOptions = getPromptTimestampOptionsForTimeContext(promptTimeContext);
     const memConfig = loadMemoryConfig();
     const isOfflineMode = options?.appTags?.includes("offline") === true;
     const effectiveAppTags = mergeAppTags(options?.appTags, promptProfile?.appTags, resolvedAppId);
     const toolsAllowed = options?.toolsAllowed !== false && !isOfflineMode;
     const enabledTools = toolsAllowed ? getEnabledTools(resolvedAppId) : [];
+    const hasLifeTools = enabledTools.some(tool => tool.source === "life");
     const toolsEnabled = enabledTools.length > 0
-        && (options?.forceEnableTools === true || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
+        && (options?.forceEnableTools === true || hasLifeTools || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
     const usesNativeActions = Boolean(toolsEnabled && nativeToolProtocolForConfig(config));
+    // 多图必须在 prepareShortTermContext 之前展开：后者的 unifiedRecentItems 下标
+    // 指向传入的 history 数组；先展开才能保证下标和最终 promptHistory 一致。
+    const historyForPromptExpanded = expandVisionImageHistoryForPrompt(historyForPrompt);
     const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(character.id, resolvedAppId, {
-        history: historyForPrompt,
-        includeDirectChatEntries: isOfflineMode,
+        history: historyForPromptExpanded,
+        includeDirectChatEntries: options?.includeDirectChatEntries ?? isOfflineMode,
         includeNativeToolHistory: usesNativeActions,
         excludeOfflineSessionId: options?.excludeOfflineSessionId,
         promptTimestampOptions,
@@ -1897,7 +1968,11 @@ export async function buildChatPromptMessages(
         buildMusicCloudMacro(),
     ]);
 
-    const longTermMemories = memResults ? formatLongTermMemories(memResults) : "";
+    const longTermMemories = [
+        memResults ? formatLongTermMemories(memResults) : "",
+        buildLifeMemoryContext(character.id),
+        buildLifePresenceContext(character.id),
+    ].filter(Boolean).join("\n\n");
     const coreMemories = coreResults ? formatCoreMemories(coreResults) : "";
     const scheduleSummary = buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now));
     const currentSchedule = getCurrentCalendarScheduleForPrompt("character", character.id, now);
@@ -1967,6 +2042,28 @@ export async function buildChatPromptMessages(
         offlineSummaryTag: preset?.story_summary_tag?.trim() || "summary",
         nativeToolHistory: usesNativeActions,
     });
+    // Tool-use policy: keep the model proactive for real app actions without forcing tools on ordinary conversation.
+    if (toolsEnabled) {
+        llmMessages.push({
+            role: "system",
+            content: [
+                "【工具调用策略】你可以使用当前会话已提供的工具完成真实查询和操作。不要只因为能用自然语言回答就跳过工具。",
+                "应主动调用工具的情况：用户要求查询/读取应用中的真实数据或当前状态；要求搜索外部/本地资料；要求保存、修改、删除、创建或发送内容；要求控制设备、日历、音乐、组件、快捷动作或其他已提供能力；以及完成任务必须依赖工具返回结果时。",
+                "优先级：真实数据以工具查询结果为准；实际操作必须执行对应工具后才能声称完成；不得把猜测当作查询结果，也不得把工具失败说成没有数据。",
+                "工具选择：先选择职责最匹配的已启用工具；如果工具套件/MCP 需要展开说明，遇到明确相关的任务时主动展开并继续执行，不要仅因为工具名称不熟悉就放弃。参数不确定时先读取说明或查询必要信息。",
+                "工具结果：执行后检查成功/失败及返回内容；失败时如有安全且合理的修复方式可调整参数重试一次，否则如实说明。不要重复执行已经成功且没有必要重复的操作。",
+                "不应滥用工具：纯闲聊、创作、解释常识、仅提出想法而未要求查询或保存时，可以直接回答；不要为了展示能力调用无关工具。涉及删除、对外发送、付费或其他高影响操作时，遵循工具权限和必要的用户确认。",
+                "如果当前提供的是文本动作协议，必须按可用动作说明中的格式先获取所需参数规范，再输出执行动作指令；如果使用原生工具调用，直接调用对应工具，不要把工具调用伪装成普通文字。",
+            ].join("\n"),
+        });
+    }
+
+    // 全局生图身份规则：所有非生活场景的文本生成都带一条，避免朋友圈/聊天/
+    // 自定义 App 的照片描述只写代词，导致其他角色参考图无法匹配。
+    if (!options?.appTags?.includes("life")) {
+        llmMessages.push({ role: "system", content: IMAGE_CHARACTER_NAMING_RULE });
+    }
+
     const avatarChangeIntent = !session.isGroup
         ? findUserAvatarChangeIntent(historyForPrompt, session.id, character.id)
         : null;
@@ -2100,14 +2197,18 @@ export type OfflineChatCompletionResult = ParsedOfflineResponse & {
 export async function generateOfflineChatCompletion(
     session: ChatSession,
     history: ChatMessage[],
-    options?: { signal?: AbortSignal; onStreamDelta?: (delta: string) => void },
+    options?: { signal?: AbortSignal; onStreamDelta?: (delta: string) => void; includeDirectChatEntries?: boolean; appId?: string; appTags?: string[] },
 ): Promise<OfflineChatCompletionResult> {
+    const appId = options?.appId ?? "chat";
+    const appTags = options?.appTags ?? ["chat", "offline"];
     const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
         session,
         history,
         {
-            appTags: ["chat", "offline"],
+            appId,
+            appTags,
             excludeOfflineSessionId: session.id,
+            includeDirectChatEntries: options?.includeDirectChatEntries,
         },
     );
     const summaryTag = preset?.story_summary_tag?.trim() || "summary";
@@ -2116,7 +2217,8 @@ export async function generateOfflineChatCompletion(
     let reasoning = "";
     const meta = { characterName: character.name, userName: userIdentity?.name };
     const requestOptions = {
-        appTags: ["chat", "offline"],
+        appId,
+        appTags,
         debugSessionId: session.id,
         signal: options?.signal,
         onReasoning: (t: string) => { reasoning = t; },
@@ -2126,8 +2228,8 @@ export async function generateOfflineChatCompletion(
         // 线下流式：正文边生成边通过 onStreamDelta 交给 UI 做实时预览；
         // 摘要补提仍走整段请求（输出短，无需流式）。
         const streamResult = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
-            appId: "chat",
-            appTags: ["chat", "offline"],
+            appId,
+            appTags,
             debugSessionId: session.id,
             signal: options?.signal,
         }, {
@@ -2225,7 +2327,7 @@ async function generateNativeChatCompletion(
     const requestMessages: LlmRequestMessage[] = toLlmRequestMessages(llmMessages);
     const parts: ChatCompletionPart[] = [];
     const meta = { characterName: character.name, userName: userIdentity?.name };
-    const actionContext = { characterId: session.contactId, sessionId: session.id, sourceEngine: "chat" as const, signal: options?.signal };
+    const actionContext = { characterId: character.id, sessionId: session.id, sourceEngine: "chat" as const, signal: options?.signal };
     const expandableSourceKeys = new Set(enabledTools.filter(tool => !isNativeSingleTool(tool)).map(nativeToolSourceKey));
 
     const maxToolRounds = getMaxToolRounds();
@@ -2348,7 +2450,7 @@ async function generateNativeChatCompletion(
                 realResults = await executeToolCalls(textCalls, {
                     appId: options?.appId ?? "chat",
                     sessionId: session.id,
-                    characterId: session.contactId,
+                    characterId: character.id,
                     sourceEngine: "chat",
                     signal: options?.signal,
                     onShortcutCommandCreated: onlyNativeCall ? async command => {
@@ -2682,7 +2784,7 @@ async function generateChatCompletionCore(
     // ── Tool calling loop with real-time callbacks ──
     const parts: ChatCompletionPart[] = [];
     const meta = { characterName: character.name, userName: userIdentity?.name };
-    const actionContext = { characterId: session.contactId, sessionId: session.id, sourceEngine: "chat" as const, signal: options?.signal };
+    const actionContext = { characterId: character.id, sessionId: session.id, sourceEngine: "chat" as const, signal: options?.signal };
 
     const maxToolRounds = getMaxToolRounds();
     const onlineThinking = {
@@ -2755,13 +2857,16 @@ async function generateChatCompletionCore(
         // Check for [获取指令:xxx] and [执行动作:xxx({...})]
         const toolFetches = toolsEnabled ? parseToolFetches(afterActionStrip) : [];
         const { toolCalls } = toolsEnabled ? parseToolCalls(afterActionStrip) : { toolCalls: [] };
+        // Tool directives are protocol, never user-facing prose. Strip valid directives
+        // (they are persisted separately below) and discard malformed directive lines.
+        const visibleText = stripMalformedTextToolDirectives(stripTextToolDirectives(afterActionStrip));
         const assistantForToolContext = stripStateAndInnerForPrompt(filteredOutput);
 
         // No tool activity — final round
         if (toolFetches.length === 0 && toolCalls.length === 0) {
             throwIfAborted(options?.signal);
-            await callbacks?.onTextPart?.(afterActionStrip);
-            parts.push({ text: afterActionStrip });
+            await callbacks?.onTextPart?.(visibleText);
+            parts.push({ text: visibleText });
             if (bailoutRef.shortcutHandles.length > 0) bailoutRef.shortcutCompleted = true;
             break;
         }
@@ -2771,14 +2876,14 @@ async function generateChatCompletionCore(
         throwIfAborted(options?.signal);
         const responseBatchId = createResponseBatchId();
         const toolDirectiveText = extractTextToolDirectiveText(afterActionStrip);
-        await callbacks?.onTextPart?.(afterActionStrip, undefined, {
+        await callbacks?.onTextPart?.(visibleText, undefined, {
             responseBatchId,
             rawResponseText: afterActionStrip,
         });
         if (toolDirectiveText) {
             callbacks?.onToolAssistantTurn?.(toolDirectiveText, { responseBatchId });
         }
-        parts.push({ text: filteredOutput });
+        parts.push({ text: visibleText });
 
         // Helper: find insert index for injecting after history
         const findInsertIdx = () => {
@@ -2831,7 +2936,7 @@ async function generateChatCompletionCore(
                 results = await executeToolCalls(toolCalls, {
                     appId: options?.appId ?? "chat",
                     sessionId: session.id,
-                    characterId: session.contactId,
+                    characterId: character.id,
                     sourceEngine: "chat",
                     signal: options?.signal,
                     onShortcutCommandCreated: onlyToolCall ? async command => {

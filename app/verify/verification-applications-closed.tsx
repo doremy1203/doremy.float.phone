@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { VERIFY_APPLICATIONS_CLOSED_MESSAGE } from "@/lib/verification-availability";
@@ -109,7 +110,7 @@ export function VerificationApplicationsClosed() {
         ) : null}
       </section>
 
-      <a className="vr-back" href="/">← 返回登录页</a>
+      <Link className="vr-back" href="/">← 返回登录页</Link>
       <div className="vr-footer">FLOAT · ACCESS STATUS</div>
     </main>
   );

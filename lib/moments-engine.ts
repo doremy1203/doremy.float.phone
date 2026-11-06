@@ -352,7 +352,7 @@ async function triggerAIPost(characterId: string): Promise<void> {
             authorId: characterId,
             content: parsed.content,
             photoDescription: parsed.photoDescription,
-            photoUseReferenceImage: parsed.photoUseReferenceImage === true,
+            photoUseReferenceImage: parsed.photoUseReferenceImage,
             photoGenerationStatus: parsed.photoDescription ? "pending" : undefined,
             visibility,
         });
@@ -362,7 +362,7 @@ async function triggerAIPost(characterId: string): Promise<void> {
         }
 
         if (parsed.photoDescription) {
-            attachMomentPhotoInBackground(post.id, parsed.photoDescription, characterId, parsed.photoUseReferenceImage === true);
+            attachMomentPhotoInBackground(post.id, parsed.photoDescription, characterId, parsed.photoUseReferenceImage);
         }
 
         // Increment event counter for auto-summarization (native data read at summarization time)
@@ -1161,8 +1161,8 @@ export function parseMomentPostResponse(rawText: string): {
     const photoUseReferenceImage = explicitPhotoMatch
         ? explicitPhotoMatch[1] === "使用参考图"
         : legacyPhotoMatch
-            ? /(?:自拍|对镜拍|selfie)/i.test(photoDescription || "")
-            : false;
+            ? (/(?:自拍|对镜拍|selfie)/i.test(photoDescription || "") ? true : undefined)
+            : undefined;
 
     const content = text
         .replace(/\[照片[:：]\s*(?:使用参考图|不使用参考图)\s*[:：]\s*[\s\S]*?\]/g, "")
@@ -1185,7 +1185,7 @@ export function attachMomentPhotoInBackground(
     postId: string,
     description: string,
     characterId: string,
-    useReferenceImage: boolean,
+    useReferenceImage: boolean | undefined,
     signal?: AbortSignal,
 ): void {
     void (async () => {
@@ -1218,7 +1218,7 @@ function dispatchMomentPhotoGenerationFailed(message: string): void {
 export async function generateMomentPhotoUrl(
     description: string,
     characterId: string,
-    useReferenceImage: boolean,
+    useReferenceImage: boolean | undefined,
     signal?: AbortSignal,
 ): Promise<string | undefined> {
     try {

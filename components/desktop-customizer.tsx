@@ -108,7 +108,7 @@ export function DesktopCustomizer({ draft, onDraftChange, onApply, onClose }: De
     onDraftChange(next)
   }
 
-  const handlePropUpdate = (key: keyof ThemeProfile, value: any) => {
+  const handlePropUpdate = <K extends keyof ThemeProfile,>(key: K, value: ThemeProfile[K]) => {
     const next = { ...draft, [key]: value } as ThemeProfile;
     onDraftChange(next);
   }
@@ -203,7 +203,7 @@ export function DesktopCustomizer({ draft, onDraftChange, onApply, onClose }: De
         ].map(tab => (
           <button 
             key={tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
+            onClick={() => setActiveTab(tab.id as "icons" | "widgets" | "global")}
             className={`flex-1 flex justify-center py-1.5 rounded-full text-[calc(13px*var(--app-text-scale,1))] font-medium transition-colors ${activeTab === tab.id ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-600'}`}
           >
             {tab.label}

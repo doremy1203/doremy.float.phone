@@ -137,9 +137,7 @@ export function ToolboxSettings() {
     const [toolboxImportError, setToolboxImportError] = useState<string | null>(null);
     const [expandedCompositePackageIds, setExpandedCompositePackageIds] = useState<Set<string>>(() => new Set());
     const [expandedCustomAppGroupIds, setExpandedCustomAppGroupIds] = useState<Set<string>>(() => new Set());
-    const [maxToolRounds, setMaxToolRounds] = useState(() => getMaxToolRounds());
-
-    const handleMaxToolRoundsChange = (value: number) => {
+    const [maxToolRounds, setMaxToolRounds] = useState(() => getMaxToolRounds());const handleMaxToolRoundsChange = (value: number) => {
         const settings = loadChatAppSettings();
         saveChatAppSettings({ ...settings, maxToolRounds: value });
         setMaxToolRounds(value);
@@ -208,6 +206,7 @@ export function ToolboxSettings() {
     function updateInternalCapability(id: string, updates: Partial<InternalCapabilityConfig>) {
         persistInternal(internalCapabilities.map(item => item.id === id ? { ...item, ...updates, updatedAt: Date.now() } : item));
     }
+
     async function updateCustomAppToolEnabled(tool: CustomAppToolEntry, enabled: boolean) {
         const now = new Date().toISOString();
         const nextApps = loadInstalledCustomApps().map(app => {

@@ -29,6 +29,13 @@ export type MemoryConfig = {
     summarizationPrompt: string;            // user-editable prompt template for memory summarization
     coreMemoryPrompt: string;               // user-editable prompt template for core-memory extraction
     vnSummaryPrompt: string;                // user-editable prompt for VN chapter summarization
+    /** 独立控制哪些来源参与长期记忆总结；不影响短期提示词注入。 */
+    longTermAllowedSources?: {
+        chat?: boolean; group_chat?: boolean; moments?: boolean; checkphone?: boolean; diary?: boolean;
+        xiaohongshu?: boolean; interview_magazine?: boolean; cocreate?: boolean; game?: boolean;
+        story?: boolean; vn?: boolean; adventure?: boolean; custom_app?: boolean; photo_wall?: boolean;
+        life?: boolean; phone_widget?: boolean; watch?: boolean; global_watch?: boolean;
+    };
     shortTermAllowedSources?: {
         chat?: boolean;
         group_chat?: boolean;
@@ -43,6 +50,41 @@ export type MemoryConfig = {
         vn?: boolean;
         adventure?: boolean;
         custom_app?: boolean;
+        photo_wall?: boolean;
+        life?: boolean;
+        phone_widget?: boolean;
+        watch?: boolean;
+        global_watch?: boolean;
+    };
+    /** 每个消费 APP 从所有已允许来源合并读取的短期记忆总条数上限；0=不限制。最终仍受 shortTermTokenBudget 约束。 */
+    /** Internal one-time settings migration marker; does not affect stored memories. */
+    shortTermLimitVersion?: number;
+    shortTermAppLimits?: {
+        chat?: number; group_chat?: number; life?: number; photo_wall?: number; watch?: number;
+        global_watch?: number; phone_widget?: number; story?: number; vn?: number; adventure?: number;
+        interview_magazine?: number; cocreate?: number; diary?: number; moments?: number;
+        checkphone?: number; xiaohongshu?: number; game?: number; map?: number; custom_app?: number;
+    };
+    /** @deprecated 旧版按来源裁剪；保留读取兼容，不再作为注入上限。 */
+    shortTermSourceLimits?: {
+        chat?: number;
+        group_chat?: number;
+        moments?: number;
+        checkphone?: number;
+        photo_wall?: number;
+        life?: number;
+        phone_widget?: number;
+        watch?: number;
+        global_watch?: number;
+        story?: number;
+        vn?: number;
+        map?: number;
+        game?: number;
+        diary?: number;
+        xiaohongshu?: number;
+        interview_magazine?: number;
+        cocreate?: number;
+        custom_app?: number;
     };
 };
 
@@ -116,6 +158,12 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     summarizationPrompt: DEFAULT_SUMMARIZATION_PROMPT,
     coreMemoryPrompt: DEFAULT_CORE_MEMORY_PROMPT,
     vnSummaryPrompt: "",
+    longTermAllowedSources: {
+        chat: true, group_chat: true, moments: true, checkphone: true, diary: true,
+        xiaohongshu: true, interview_magazine: true, cocreate: true, game: true,
+        story: true, vn: true, adventure: true, custom_app: true, photo_wall: true,
+        life: true, phone_widget: true, watch: true, global_watch: true,
+    },
     shortTermAllowedSources: {
         chat: true,
         group_chat: true,
@@ -130,5 +178,22 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
         vn: true,
         adventure: true,
         custom_app: true,
+        photo_wall: true,
+        life: true,
+        phone_widget: true,
+        watch: true,
+        global_watch: true,
+    },
+    shortTermAppLimits: {
+        chat: 0, group_chat: 0, life: 0, photo_wall: 8, watch: 8, global_watch: 5,
+        phone_widget: 50, story: 12, vn: 12, adventure: 8, interview_magazine: 8,
+        cocreate: 8, diary: 8, moments: 10, checkphone: 6, xiaohongshu: 8,
+        game: 8, map: 8, custom_app: 10,
+    },
+    shortTermSourceLimits: {
+        chat: 30, group_chat: 20, moments: 10, checkphone: 6,
+        photo_wall: 8, life: 10, phone_widget: 4, watch: 5, global_watch: 4,
+        story: 10, vn: 10, map: 8, game: 8, diary: 8, xiaohongshu: 8,
+        interview_magazine: 8, cocreate: 8, custom_app: 10,
     },
 };

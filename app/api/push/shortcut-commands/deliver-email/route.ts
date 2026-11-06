@@ -89,14 +89,16 @@ async function claimDeliverySlot(userId: string): Promise<boolean> {
     const count = withinWindow ? Number(row.cloud_delivery_count) || 0 : 0;
     if (withinWindow && count >= CLOUD_DELIVERY_MAX_PER_WINDOW) return false;
 
-    await supabaseRestFetch(filter, {
+    const updated = await supabaseRestFetch(filter, {
         method: "PATCH",
         headers: { Prefer: "return=minimal" },
         body: JSON.stringify({
             cloud_delivery_count: count + 1,
             ...(withinWindow ? {} : { cloud_delivery_window_start: new Date(now).toISOString() }),
         }),
-    }).catch(() => undefined);
+    });
+    // Fail closed: a database write error must not silently disable the email throttle.
+    if (!updated.ok) throw new Error(updated.error || "无法更新云端代发频控状态。");
     return true;
 }
 

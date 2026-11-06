@@ -347,12 +347,12 @@ export function CheckPhonePhonePage({ character, onBack }: CheckPhonePhonePagePr
                         <div className="cp-accordion-inner">
                           <div className="cp-phone-memo">
                             <span className="cp-memo-tape"></span>
-                            <span className="cp-memo-title">// TRANSCRIPT_LOG</span>
+                            <span className="cp-memo-title">{"// TRANSCRIPT_LOG"}</span>
                             <p className="cp-memo-body"><CheckPhoneBilingualText text={item.summary} tone="phone" /></p>
                           </div>
                           <div className="cp-phone-memo cp-phone-memo--thought">
                             <span className="cp-memo-tape cp-memo-tape--thought"></span>
-                            <span className="cp-memo-title">// INNER_RESONANCE</span>
+                            <span className="cp-memo-title">{"// INNER_RESONANCE"}</span>
                             <p className="cp-memo-body cp-memo-body--italic"><CheckPhoneBilingualText text={item.innerThought} tone="phone" /></p>
                           </div>
                         </div>
@@ -392,7 +392,7 @@ export function CheckPhonePhonePage({ character, onBack }: CheckPhonePhonePagePr
                         <div className="cp-accordion-inner">
                           <div className="cp-phone-memo cp-phone-memo--contact">
                             <span className="cp-memo-tape"></span>
-                            <span className="cp-memo-title">// DIRECTIVE_NOTE</span>
+                            <span className="cp-memo-title">{"// DIRECTIVE_NOTE"}</span>
                             <p className="cp-memo-body cp-memo-body--italic"><CheckPhoneBilingualText text={item.note} tone="phone" /></p>
                           </div>
                         </div>
@@ -429,7 +429,7 @@ export function CheckPhonePhonePage({ character, onBack }: CheckPhonePhonePagePr
                         <div className="cp-accordion-inner">
                           <div className="cp-phone-memo">
                             <span className="cp-memo-tape"></span>
-                            <span className="cp-memo-title">// VOICEMAIL_TRANSCRIPT</span>
+                            <span className="cp-memo-title">{"// VOICEMAIL_TRANSCRIPT"}</span>
                             <p className="cp-memo-body"><CheckPhoneBilingualText text={item.transcript} tone="phone" /></p>
                           </div>
                         </div>

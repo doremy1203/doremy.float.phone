@@ -20,6 +20,8 @@ import {
     getMemoryCountByType,
     getLastSummarizedTimestamp,
     getLastCoreSummarizedTimestamp,
+    getEventCounter,
+    loadMemorySummaryStatus,
 } from "@/lib/memory-storage";
 import { hydrateChatStorage } from "@/lib/chat-storage";
 import { loadNativeTimeline, type NativeTimelineEntry } from "@/lib/short-term-assembler";
@@ -28,6 +30,7 @@ import { runCoreMemoryPipeline } from "@/lib/core-memory-builder";
 import { resolveAuxiliaryApiConfig, resolveUserIdentity } from "@/lib/settings-storage";
 import { generateEmbedding, resolveEmbeddingModel } from "@/lib/memory-embedding";
 import { BINDING_ACCENTS } from "@/lib/ui-accent-colors";
+import { memorySourceLabel } from "@/lib/memory-injector";
 
 type MemoryView = "list" | "detail" | "settings";
 type MemoryTab = "short" | "shared" | "core" | "long";
@@ -90,6 +93,11 @@ const MEMORY_SOURCE_OPTIONS: Array<{ key: MemorySourceKey; label: string }> = [
     { key: "vn", label: "漫卷" },
     { key: "adventure", label: "地图冒险" },
     { key: "custom_app", label: "自定义应用" },
+    { key: "photo_wall", label: "照片墙" },
+    { key: "life", label: "生活系统" },
+    { key: "phone_widget", label: "桌面小组件" },
+    { key: "watch", label: "一起看" },
+    { key: "global_watch", label: "全局陪看" },
 ];
 
 type MemoryEditorState = {
@@ -318,16 +326,19 @@ export function MemoryBankPage({
         }
         // Native timeline is sync (localStorage) — no await needed.
         // 只取最近一段（全量可能几万条），防止解析+渲染把 iOS Safari 内存顶爆
-        const timeline = loadNativeTimeline(charId).slice(-MEMORY_TIMELINE_ENTRY_CAP);
-        setShortTermEvents(timeline.filter(e =>
-            !(e.sourceApp === "moments" && e.postAuthorType === "user")
-            && !(e.sourceApp === "interview_magazine" && e.sourceDetail === "interview_shared_issue")
-        ));
-        setSharedEvents(timeline.filter(e =>
-            (e.sourceApp === "moments" && e.postAuthorType === "user") ||
-            (e.sourceApp === "chat" && e.sourceDetail === "group") ||
-            (e.sourceApp === "interview_magazine" && e.sourceDetail === "interview_shared_issue")
-        ));
+        const timeline = loadNativeTimeline(charId);
+        const isSharedEvent = (entry: NativeTimelineEntry) =>
+            (entry.sourceApp === "moments" && entry.postAuthorType === "user") ||
+            (entry.sourceApp === "chat" && entry.sourceDetail === "group") ||
+            (entry.sourceApp === "interview_magazine" && entry.sourceDetail === "interview_shared_issue") ||
+            (entry.sourceApp === "watch" && entry.sourceDetail === "custom_app_event") ||
+            (entry.sourceApp === "life" && entry.sourceDetail === "life_shared_event") ||
+            (entry.sourceApp === "photo_wall" && entry.sourceDetail === "photo_wall_creation");
+        const sharedEvents = timeline.filter(isSharedEvent);
+        setShortTermEvents(timeline.filter(e => !isSharedEvent(e)).slice(-MEMORY_TIMELINE_ENTRY_CAP));
+        // Give the Shared Events tab its own window so a busy chat/photo timeline
+        // cannot crowd out recent Life experiences or Photo Wall co-creations.
+        setSharedEvents(sharedEvents.slice(-MEMORY_TIMELINE_ENTRY_CAP));
         setLoading(false);
     }, []);
 
@@ -685,6 +696,7 @@ export function MemoryBankPage({
                                 </div>
                             </div>
                             <div className="ts-12 leading-[1.7]">
+                                <div className="mb-1 text-[10px] uppercase tracking-wide opacity-60">来源：{memorySourceLabel(entry)}</div>
                                 {expandedId === entry.id
                                     ? entry.content
                                     : entry.content.length > 100
@@ -724,7 +736,7 @@ export function MemoryBankPage({
                         /* ── Shared events: card view ── */
                         sharedEvents.length === 0 ? (
                             <p className="text-center ts-14 mt-10 text-secondary">
-                                暂无共享事件。用户发朋友圈或参与群聊后会自动显示。
+                                暂无共享事件。朋友圈、群聊、共创章节、一起看、生活共同经历、照片墙创作和共享访谈会在形成有效记录后显示。
                             </p>
                         ) : (
                             <MemoryTimeline
@@ -913,6 +925,8 @@ export function MemoryBankPage({
 
     // ── Settings View ──
     if (view === "settings") {
+        const summaryStatus = selectedCharId ? loadMemorySummaryStatus(selectedCharId) : null;
+        const summaryEventCount = selectedCharId ? getEventCounter(selectedCharId) : 0;
         const currentPrompt = editingPrompt ?? config.summarizationPrompt ?? DEFAULT_SUMMARIZATION_PROMPT;
         const currentCorePrompt = editingCorePrompt ?? config.coreMemoryPrompt ?? DEFAULT_CORE_MEMORY_PROMPT;
         const isModified = currentPrompt !== (config.summarizationPrompt ?? DEFAULT_SUMMARIZATION_PROMPT);
@@ -1044,6 +1058,46 @@ export function MemoryBankPage({
                                         );
                                     })}
                                 </div>
+                                <div style={{ marginTop: 14, display: "grid", gap: 7 }}>
+                                    <div className="menu-desc">长期记忆总结来源（独立于上方短期记忆注入开关）。关闭后不再把该来源的新事件纳入长期总结，但不会删除已有记忆。</div>
+                                    <div className="memory-source-chips" style={{ "--chip-accent": BINDING_ACCENTS.memory } as CSSProperties}>
+                                        {MEMORY_SOURCE_OPTIONS.map(source => {
+                                            const allowed = config.longTermAllowedSources ?? config.shortTermAllowedSources ?? {};
+                                            const isChecked = allowed[source.key] !== false;
+                                            return (
+                                                <button key={`long-${source.key}`} type="button" className="memory-source-chip"
+                                                    data-off={isChecked ? undefined : ""} aria-pressed={isChecked}
+                                                    onClick={() => {
+                                                        const next = { ...config, longTermAllowedSources: { ...allowed, [source.key]: !isChecked } };
+                                                        setConfig(next); saveMemoryConfig(next);
+                                                    }}>
+                                                    {source.label}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                                <div style={{ marginTop: 14, display: "grid", gap: 7 }}>
+                                    <div className="menu-desc">每个使用场景从所有已开启来源合并读取的短期记忆总条数（0 = 不限制）；先按上方来源开关过滤，再按时间取最近记录，最后仍受全局最大 Token 预算约束。聊天与生活系统默认不设条数上限，桌面小组件默认 50 条。只影响本次提示词，不删除原始记录。</div>
+                                    {([
+                                        ["chat", "私聊"], ["group_chat", "群聊"], ["life", "生活系统"],
+                                        ["photo_wall", "照片墙"], ["watch", "一起看"], ["global_watch", "全局陪看"],
+                                        ["phone_widget", "桌面小组件"], ["story", "剧情"], ["vn", "视觉小说"],
+                                        ["adventure", "冒险"], ["interview_magazine", "访谈"], ["cocreate", "共同创作"],
+                                        ["diary", "日记"], ["moments", "朋友圈"], ["checkphone", "查手机"],
+                                        ["xiaohongshu", "小红书"], ["game", "游戏"], ["map", "地图"], ["custom_app", "自定义应用"],
+                                    ] as const).map(([key, label]) => {
+                                        const limits = config.shortTermAppLimits ?? {};
+                                        return <label key={key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12 }}>
+                                            <span>{label}</span>
+                                            <input type="number" min={0} max={200} value={Number(limits[key] ?? 0)} onChange={event => {
+                                                const value = Math.max(0, Math.min(200, Number(event.target.value) || 0));
+                                                const next = { ...config, shortTermAppLimits: { ...limits, [key]: value } };
+                                                setConfig(next); saveMemoryConfig(next);
+                                            }} style={{ width: 70, padding: "6px 8px", borderRadius: 8, border: "1px solid var(--border, #ddd)", background: "var(--surface, #fff)", color: "inherit" }} />
+                                        </label>;
+                                    })}
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1064,6 +1118,17 @@ export function MemoryBankPage({
                                 setConfig(next);
                                 saveMemoryConfig(next);
                             }} />
+                        </div>
+                    </div>
+                    <div className="menu-item">
+                        <MemorySettingsIcon icon={Clock} color={BINDING_ACCENTS.api} />
+                        <div className="menu-label-group">
+                            <span className="menu-label">上次总结状态</span>
+                            <span className="menu-desc">
+                                {summaryStatus
+                                    ? `${summaryStatus.ok ? "成功" : "失败"} · ${new Date(summaryStatus.at).toLocaleString("zh-CN")}${summaryStatus.error ? ` · ${summaryStatus.error}` : ""} · 当前计数 ${summaryEventCount}`
+                                    : `暂无记录 · 当前计数 ${summaryEventCount}`}
+                            </span>
                         </div>
                     </div>
                     <div className="menu-item">

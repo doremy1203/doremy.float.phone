@@ -162,7 +162,8 @@
 
 .phone-status-bar {
   position: absolute;
-  top: var(--status-bar-top, 12px);
+  /* 在刘海/挖孔设备上让虚拟状态栏避开系统安全区；普通浏览器的 env 值为 0。 */
+  top: calc(var(--status-bar-top, 12px) + env(safe-area-inset-top, 0px));
   left: 0;
   right: 0;
   display: grid;
@@ -174,6 +175,14 @@
   color: var(--status-bar-color);
   font-family: inherit;
   transition: color 0.3s ease;
+  /* 状态栏是纯装饰层（时钟/信号/岛），没有任何可点元素。
+     它是 absolute + z-index:10 横跨整屏顶部 36~48px，而 App 打开时
+     .phone-shell.app-open-shell 的内边距归零、工作区只有 z-index:2，
+     于是这条横带稳稳盖在所有 App 的顶部之上，把返回键/设置键的点击
+     全部吃掉（触摸比鼠标更容易命中，因为手指落点偏上）。
+     加 pointer-events: none 让点击穿透到下方 App，是这类
+     「多个页面同一位置按钮失灵」的真正公共根因。 */
+  pointer-events: none;
 }
 
 .status-island {
@@ -316,10 +325,9 @@
   flex: 0 0 100%;
   width: 100%;
   -webkit-touch-callout: none;
-  /* 窄视口（系统显示大小调大，CSS 视口 330~370px）下格子收缩；
-     视口 ≥374px 算出值 ≥66 被钳回 66px——正常手机零变化。dock 用同一公式保持上下对齐。 */
-  --slot-size: clamp(56px, calc((100vw - 108px) / 4), 66px);
-  --slot-gap-x: 20px;
+  /* 所有手机宽度共用流式网格，不再针对单一设计稿尺寸/机型单独缩放。 */
+  --slot-size: clamp(48px, calc((100vw - 96px) / 4), 66px);
+  --slot-gap-x: clamp(8px, 5vw, 20px);
   --slot-gap-y: var(--home-row-gap-y);
   --slot-icon-width: min(62px, var(--slot-size));
   --slot-icon-height: min(62px, var(--slot-size));
@@ -440,7 +448,7 @@
   justify-items: center;
   gap: 5px;
   width: var(--slot-size);
-  min-height: 84px;
+  min-height: clamp(64px, 10vh, 84px);
   padding: 0;
   cursor: pointer;
   box-shadow: none;
@@ -1028,29 +1036,20 @@
   padding: 20px 0 36px;
 }
 
-/* 更窄视口（≤373px）：按 390px 设计稿整体等比缩放（格 66→16.92vw、
-   距 20→5.13vw、图标 58→14.87vw、dock 354→90.77vw），窄屏呈现与正常
-   手机完全相同的比例观感，无多余留白；网格/dock 同源，天然对齐。
-   ≥374px 不受影响。 */
-@media (max-width: 373px) and (hover: none) and (pointer: coarse) {
+/* 窄屏统一采用流式尺寸，不为单一设计稿宽度建立专用断点。 */
+@media (max-width: 500px) and (hover: none) and (pointer: coarse) {
   .icon-grid,
   .dock {
-    --slot-size: 16.92vw;
-    --slot-gap-x: 5.13vw;
-    --slot-icon-width: 15.9vw;
-    --slot-icon-height: 15.9vw;
-  }
-  .icon-glyph-box {
-    width: 14.87vw;
-    height: 14.87vw;
+    --slot-size: clamp(48px, calc((100vw - 96px) / 4), 66px);
+    --slot-gap-x: clamp(8px, 5vw, 20px);
+    --slot-icon-width: min(62px, var(--slot-size));
+    --slot-icon-height: min(62px, var(--slot-size));
   }
   .dock {
-    /* 同样按数量自适应；count=4 时等于原 90.77vw。 */
-    width: min(calc((var(--dock-count) * var(--slot-size)) + ((var(--dock-count) - 1) * var(--slot-gap-x)) + 30px), calc(100% - 8px));
-  }
-  .dock .dock-glyph-box {
-    width: 14.87vw;
-    height: 14.87vw;
+    width: min(
+      calc((var(--dock-count) * var(--slot-size)) + ((var(--dock-count) - 1) * var(--slot-gap-x)) + 30px),
+      calc(100% - 8px)
+    );
   }
 }
 
@@ -1085,14 +1084,14 @@
 
   :root {
     --phone-screen-width: 100vw;
-    --phone-screen-height: 100lvh;
+    --phone-screen-height: 100dvh;
   }
 
   html,
   body {
     overflow: hidden;
     width: 100%;
-    height: 100lvh;
+    height: 100dvh;
     background: var(--c-page-body-bg);
   }
 
@@ -1124,7 +1123,7 @@
        .app-root 被裁掉，底部栏随之顶回可视区。上移量可在「状态栏」弹窗里按设备调节，
        让它约等于真实状态栏高度即可铺满。0 = 不上移（iOS 等能全屏的浏览器保持 0）。 */
     margin-top: calc(-1 * var(--status-bar-drop, 0px));
-    transform: translate3d(0, calc(-1 * var(--mobile-keyboard-lift, 0px)), 0);
+    transform: translate3d(0, calc(-1 * var(--mobile-keyboard-lift, 0px)), 0) scale(var(--compat-layout-scale, 1));
     /* 移除 transform 过渡动画：Android 键盘弹出后该过渡会让 .phone-shell-wrap 在
        点击交互期间持续移动（pointerdown→pointerup 间按钮被顶走数十像素），导致
        Chrome 判断 pointerdown 与 pointerup 命中不同元素、click 落到 app-root 而
@@ -1457,4 +1456,12 @@
 }
 .folder-dots .dot.active {
   background: color-mix(in srgb, var(--c-home-label, #ffffff) 85%, transparent);
+}
+
+/* 大屏触控设备（平板/折叠屏展开态）也支持兼容性缩放；小屏手机由上面的键盘感知规则处理。 */
+@media (min-width: 501px) and (hover: none) and (pointer: coarse) {
+  .phone-shell-wrap {
+    transform: scale(var(--compat-layout-scale, 1));
+    transform-origin: top left;
+  }
 }

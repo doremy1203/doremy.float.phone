@@ -100,7 +100,10 @@ function toServerRule(rule: BridgeRule): (ServerBridgeRule & { actions: BridgeRu
         id: rule.id,
         name: rule.name,
         matchType: rule.matchType,
+        payloadFilter: rule.payloadFilter,
         cooldownMinutes: rule.cooldownMinutes,
+        ...(rule.schedule ? { schedule: rule.schedule, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" } : {}),
+        createdAt: rule.createdAt,
         process: { mode: rule.process?.mode ?? "raw", template: rule.process?.template },
         chat: chatMeta,
         notify: rule.actions?.notify === true,
@@ -383,13 +386,26 @@ async function runSync(): Promise<void> {
         const { config: cloudConfig, ready } = bridgeConnection();
         const usePersonal = isPersonalPushCloudActive();
         const screenCloudReady = isPersonalScreenChatCloudReady();
-        if ((!settings.enabled && !screenSettings.enabled) || !ready) return;
+        const hasScheduledRules = loadBridgeRules().some(rule => rule.enabled && Boolean(rule.schedule));
+        if ((!settings.enabled && !screenSettings.enabled && !hasScheduledRules) || !ready) return;
         // 自部署站点没有共享回传身份，但配置好个人云后应完整支持规则和屏幕速聊。
         if (isSelfHostedModeEnabled() && !usePersonal) return;
         // 屏幕速聊不依赖推送订阅（快捷指令直连 screen-chat 函数），启用时照常同步快照
         if (!screenSettings.enabled && !(await hasAccountPushSubscription())) return;
 
-        const rules = settings.enabled ? loadBridgeRules().filter(rule => rule.enabled) : [];
+        // 原生无障碍服务不能读取 WebView 的 IndexedDB 配置。
+        // 即使规则指纹没有变化，也要确保站点侧保存了加密的个人云中继配置。
+        if (usePersonal) {
+            await fetch("/api/push/bridge-config", {
+                method: "POST",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ cloudConfig: { url: cloudConfig.url, key: cloudConfig.key } }),
+            }).catch(() => null);
+        }
+
+        // The signal-intake switch must not disable independent scheduled rules.
+        const rules = loadBridgeRules().filter(rule => rule.enabled && (settings.enabled || Boolean(rule.schedule)));
         const serverRules = rules.map(toServerRule).filter(Boolean);
         const ruleRuns = getBridgeRuleRunsMap();
 

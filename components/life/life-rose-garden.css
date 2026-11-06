@@ -1,0 +1,13 @@
+/* Intentionally neutral compatibility stylesheet.
+   The life-system appearance is controlled by settings.sceneTheme,
+   settings.accentColor and settings.customSceneCss in life-engine-app.tsx.
+   Keep this file so existing imports remain valid; do not override theme colors here. */
+
+
+/* Keep the life system within the actual mobile viewport; settings grids must shrink rather than widen the page. */
+.life-rose-garden { position: relative; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; isolation: isolate; }
+.life-rose-garden > * { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.life-rose-garden .grid, .life-rose-garden section, .life-rose-garden article { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.life-rose-garden > * { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.life-rose-garden input, .life-rose-garden textarea, .life-rose-garden select, .life-rose-garden button, .life-rose-garden img { max-width: 100%; box-sizing: border-box; }
+.life-rose-garden textarea, .life-rose-garden input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]), .life-rose-garden select { min-width: 0; }

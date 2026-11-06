@@ -97,6 +97,10 @@ export const WIDGET_CATALOG: WidgetCatalogEntry[] = [
   // 2×4 wide
   { type: "music", name: "\u97F3\u4E50\u64AD\u653E\u5668", desc: "\u5C01\u9762 + \u6B4C\u540D + \u64AD\u653E\u63A7\u5236", size: "2x4" },
   { type: "interviewMagazine", name: "在场摘录", desc: "照片 + 本期访谈摘录翻页卡", size: "2x4" },
+  // Virtual life widgets
+  { type: "lifeTimeline", name: "我的生活时间线", desc: "显示今天正在做什么、实际地点和下一段日程", size: "2x4" },
+  { type: "lifeNow", name: "此刻生活卡", desc: "独立显示当前虚拟时间、正在做的事和地点", size: "2x2" },
+  { type: "lifeCharacter", name: "角色此刻", desc: "查看选定角色当前活动、地点线索和下一段安排", size: "2x2" },
   // 2×2
   { type: "calendar", name: "\u65E5\u5386", desc: "\u6708\u89C6\u56FE + \u9AD8\u4EAE\u4ECA\u5929", size: "2x2" },
   { type: "clock", name: "\u65F6\u949F + \u65E5\u671F", desc: "\u5927\u53F7\u65F6\u95F4 + \u65E5\u671F\u661F\u671F", size: "2x2" },

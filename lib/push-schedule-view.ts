@@ -5,7 +5,7 @@
 // 自己续排的 `+` 后缀链（idleRepeat 在 push-generate 里排队），那些任务本地
 // 根本不知道存在，只有列出来才看得见。
 
-import { loadChatSessions } from "./chat-storage";
+import { loadChatSessions, resolveSessionCharacterId } from "./chat-storage";
 import { loadCharacters } from "./character-storage";
 import { loadIdleReconnectRules } from "./idle-reconnect-storage";
 import { loadTimedWakeSchedules } from "./timed-wake-storage";
@@ -48,10 +48,11 @@ function resolveSession(sessionId: string): { name: string; characterId: string 
   const session = loadChatSessions().find(item => item.id === sessionId);
   if (!session) return { name: "", characterId: "" };
   if (session.isGroup) return { name: session.groupName?.trim() || "群聊", characterId: "" };
+  const characterId = resolveSessionCharacterId(session) || "";
   const alias = session.alias?.trim();
   return {
-    name: alias || characterNameFor(session.contactId) || "（会话已删除）",
-    characterId: session.contactId || "",
+    name: alias || characterNameFor(characterId) || "（会话已删除）",
+    characterId,
   };
 }
 
@@ -144,6 +145,20 @@ function describeTriggerKey(triggerKey: string): Described {
       sessionId: "",
       characterName: characterNameFor(characterId),
       label: "经期关怀",
+      system: false,
+    };
+  }
+  if (key.startsWith("life-scene:")) {
+    // life-scene:<sceneId>:<characterId>
+    const rest = key.slice("life-scene:".length);
+    const sep = rest.lastIndexOf(":");
+    const sceneId = sep > 0 ? rest.slice(0, sep) : "";
+    const characterId = sep > 0 ? rest.slice(sep + 1) : rest;
+    return {
+      characterId,
+      sessionId: "",
+      characterName: characterNameFor(characterId),
+      label: "生活现场主动" + (sceneId ? "" : "（场景未知）"),
       system: false,
     };
   }

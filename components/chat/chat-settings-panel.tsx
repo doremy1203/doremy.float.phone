@@ -462,6 +462,9 @@ export function ChatSettingsPanel({
     const [showComputer, setShowComputer] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [submittedSearchQuery, setSubmittedSearchQuery] = useState("");
+    const [searchFrom, setSearchFrom] = useState("");
+    const [searchTo, setSearchTo] = useState("");
+    const [searchKind, setSearchKind] = useState<"all" | "text" | "image" | "video" | "audio" | "file" | "rich">("all");
     const [searchHistoryMessages, setSearchHistoryMessages] = useState<ChatMessage[]>([]);
     const [searchHasMore, setSearchHasMore] = useState(false);
     const [searchResults, setSearchResults] = useState<ChatMessage[]>([]);
@@ -486,6 +489,9 @@ export function ChatSettingsPanel({
         searchRunRef.current += 1;
         setSearchQuery("");
         setSubmittedSearchQuery("");
+        setSearchFrom("");
+        setSearchTo("");
+        setSearchKind("all");
         setSearchResults([]);
         setIsSearching(false);
         loadSearchHistoryWindow();
@@ -497,6 +503,9 @@ export function ChatSettingsPanel({
         setShowSearch(false);
         setSearchQuery("");
         setSubmittedSearchQuery("");
+        setSearchFrom("");
+        setSearchTo("");
+        setSearchKind("all");
         setSearchResults([]);
         setSearchHistoryMessages([]);
         setSearchHasMore(false);
@@ -516,7 +525,8 @@ export function ChatSettingsPanel({
         searchRunRef.current = runId;
         setSubmittedSearchQuery(rawQuery);
 
-        if (!rawQuery) {
+        const hasFilters = Boolean(searchFrom || searchTo || searchKind !== "all");
+        if (!rawQuery && !hasFilters) {
             setSearchResults([]);
             setIsSearching(false);
             loadSearchHistoryWindow();
@@ -524,6 +534,8 @@ export function ChatSettingsPanel({
         }
 
         const needle = rawQuery.toLowerCase();
+        const startTime = searchFrom ? new Date(searchFrom + "T00:00:00").getTime() : -Infinity;
+        const endTime = searchTo ? new Date(searchTo + "T23:59:59.999").getTime() : Infinity;
         const results: ChatMessage[] = [];
         setSearchResults([]);
         setIsSearching(true);
@@ -540,8 +552,18 @@ export function ChatSettingsPanel({
                 for (; index > stop && results.length < SEARCH_RESULT_LIMIT; index -= 1) {
                     const msg = msgs[index];
                     if (!isSearchVisibleMessage(msg)) continue;
+                    const time = new Date(msg.createdAt).getTime();
+                    if (!Number.isFinite(time) || time < startTime || time > endTime) continue;
+                    const media = msg.mediaType || "";
+                    const kind = media === "image" || /image/.test(media) ? "image"
+                        : media === "video" || /video/.test(media) ? "video"
+                        : media === "audio" || /audio|voice/.test(media) ? "audio"
+                        : media === "media_file" || /file|document|attachment/.test(media) || (Boolean(msg.mediaUrl) && !media) ? "file"
+                        : media ? "rich" : "text";
+                    if (searchKind !== "all" && kind !== searchKind) continue;
                     const haystack = getSearchHaystack(msg);
-                    if (haystack && haystack.toLowerCase().includes(needle)) results.push(msg);
+                    if (needle && (!haystack || !haystack.toLowerCase().includes(needle))) continue;
+                    results.push(msg);
                 }
 
                 if (results.length >= SEARCH_RESULT_LIMIT || index < 0) {
@@ -1037,7 +1059,7 @@ export function ChatSettingsPanel({
         );
     };
 
-    const searchMode = submittedSearchQuery.trim().length > 0;
+    const searchMode = submittedSearchQuery.trim().length > 0 || Boolean(searchFrom || searchTo || searchKind !== "all");
     const displayedSearchMessages = searchMode ? searchResults : searchHistoryMessages;
 
     return (
@@ -1964,6 +1986,14 @@ export function ChatSettingsPanel({
                             >
                                 <Search size={20} strokeWidth={2.1} />
                             </button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 px-4 pb-3">
+                            <label className="min-w-0 text-xs text-[var(--c-icon)]">开始日期<input type="date" value={searchFrom} max={searchTo || undefined} onChange={e => setSearchFrom(e.target.value)} className="ui-input mt-1 w-full min-w-0"/></label>
+                            <label className="min-w-0 text-xs text-[var(--c-icon)]">结束日期<input type="date" value={searchTo} min={searchFrom || undefined} onChange={e => setSearchTo(e.target.value)} className="ui-input mt-1 w-full min-w-0"/></label>
+                            <label className="col-span-2 min-w-0 text-xs text-[var(--c-icon)]">消息类型<select value={searchKind} onChange={e => setSearchKind(e.target.value as typeof searchKind)} className="ui-input mt-1 w-full">
+                                <option value="all">全部类型</option><option value="text">文字</option><option value="image">图片</option><option value="video">视频</option><option value="audio">音频 / 语音</option><option value="file">文件 / 附件</option><option value="rich">卡片 / 其他</option>
+                            </select></label>
+                            <button type="button" onClick={runSearch} disabled={isSearching} className="ui-btn ui-btn-outline col-span-2 w-full disabled:opacity-40">应用筛选</button>
                         </div>
                         <div className="flex flex-col gap-4 px-4 pb-4">
                             {!searchMode && searchHistoryMessages.length === 0 && (

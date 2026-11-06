@@ -35,6 +35,7 @@ import {
   bridgeConnection,
   getBridgeRuleLastRunAt,
   loadBridgeRules,
+  loadBridgeFeed,
   loadBridgeSettings,
   loadBridgeShortcutActions,
   markBridgeRuleRun,
@@ -68,6 +69,40 @@ function expandBridgeMacros(text: string, characterId?: string): string {
   }
 }
 
+const USAGE_REMINDER_TYPES = new Set(["应用用太久", "长时间使用"]);
+
+/** 旧的默认使用提醒规则是 raw：直接把“抖音已使用 90 分钟”写进聊天。
+ * 运行时把它升级成“AI 生成角色口吻 + 作为角色消息”，不覆盖用户自定义模板/提示词。 */
+function upgradeUsageReminderRule(rule: BridgeRule): BridgeRule {
+  if (!USAGE_REMINDER_TYPES.has(rule.matchType)) return rule;
+  if (rule.process?.mode !== "raw" || rule.process?.template?.trim()) return rule;
+  const characterId = rule.actions?.chat?.characterId;
+  if (!characterId) return rule;
+  return {
+    ...rule,
+    process: {
+      mode: "ai",
+      prompt: "你刚注意到{{user}}的使用情况：{payload}。不要复述分钟数，不要写“你今天使用 xx 分钟了”。先用角色自己的感受或关系开口，再轻轻提醒；一到两句，像你本人在说话。不要和最近几次提醒重复。",
+    },
+    actions: {
+      ...rule.actions,
+      chat: { ...rule.actions.chat!, role: "assistant", requestReply: false },
+    },
+  };
+}
+
+function usageCharacterContext(characterId?: string): { charName: string; userName: string; details: string } {
+  const character = characterId ? loadCharacters().find(item => item.id === characterId) : undefined;
+  const charName = character?.name || "角色";
+  const userName = resolveUserIdentity(characterId)?.name || "你";
+  const details = character
+    ? [character.persona, character.briefPersona, character.personality]
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        .join("\n").slice(0, 1800)
+    : "";
+  return { charName, userName, details };
+}
+
 async function processText(rule: BridgeRule, item: BridgeItem): Promise<string> {
   const mode = rule.process?.mode ?? "raw";
   if (mode === "template" && rule.process.template) {
@@ -77,15 +112,40 @@ async function processText(rule: BridgeRule, item: BridgeItem): Promise<string> 
     const config = resolveAuxiliaryApiConfig("memorySummaryApiConfigId") ?? loadApiConfigs()[0];
     if (config) {
       const prompt = fillTemplate(rule.process.prompt, item);
-      const result = await simpleLLMCall(config, [
-        { role: "system", content: "你是「现实桥」的数据加工器。按用户指令处理数据，只输出处理结果本身，不要解释。" },
-        { role: "user", content: prompt + "\n\n数据内容：" + item.payload },
-      ], { temperature: 0.5 });
-      const text = (result.content ?? "").trim();
-      if (text) return text.slice(0, 4000);
+      const isUsage = USAGE_REMINDER_TYPES.has(rule.matchType);
+      const context = isUsage ? usageCharacterContext(rule.actions.chat?.characterId) : null;
+      const recent = isUsage
+        ? loadBridgeFeed().filter(entry => entry.type === item.type).slice(0, 3)
+            .map(entry => (entry.processed || entry.payload).slice(0, 220))
+        : [];
+      const systemContent = isUsage && context
+        ? `你是${context.charName}，正在和${context.userName}相处。你不是数据播报器；用角色自己的口吻说话。\n${context.details}`
+        : "你是「现实桥」的数据加工器。按用户指令处理数据，只输出处理结果本身，不要解释。";
+      const contextBlock = isUsage
+        ? `\n\n最近三次同类提醒（不要重复这些说法）：\n${recent.length ? recent.map(text => "- " + text).join("\n") : "- 无"}\n\n当前时间：${new Date().toLocaleString("zh-CN")}`
+        : "";
+      try {
+        const result = await simpleLLMCall(config, [
+          { role: "system", content: systemContent },
+          { role: "user", content: prompt + "\n\n数据内容：" + item.payload + contextBlock },
+        ], { temperature: 0.8 });
+        const text = (result.content ?? "").trim();
+        if (text) return text.slice(0, 4000);
+      } catch (error) {
+        console.warn("[现实桥] 温暖提醒生成失败，使用本机兜底", error);
+      }
+    }
+    if (USAGE_REMINDER_TYPES.has(rule.matchType)) {
+      const { charName } = usageCharacterContext(rule.actions.chat?.characterId);
+      return `${charName}看了你一眼，没急着报数字，只轻声说：“这个是不是有点久了？先歇一会儿吧，陪我说两句话。”`;
     }
   }
   return item.payload;
+}
+
+/** 只预览加工后的文本，不执行任何动作；供规则编辑器“模拟测试”使用。 */
+export async function previewBridgeRuleText(rule: BridgeRule, item: BridgeItem): Promise<string> {
+  return processText(upgradeUsageReminderRule(rule), item);
 }
 
 /** 广播 bridge.data 事件给已订阅的自定义 APP（规则动作与「允许自定义APP订阅」总开关共用） */
@@ -430,7 +490,8 @@ export async function processBridgeItem(item: BridgeItem): Promise<BridgeFeedEnt
     actions: [],
     receivedAt: new Date().toISOString(),
   };
-  for (const rule of rules) {
+  for (const rawRule of rules) {
+    const rule = upgradeUsageReminderRule(rawRule);
     // 触发间隔：间隔内再次收到同信号，只存档不执行（避免反复打开某 APP 时刷屏）
     const cooldownMs = Math.max(0, Number(rule.cooldownMinutes) || 0) * 60_000;
     if (cooldownMs > 0 && Date.now() - getBridgeRuleLastRunAt(rule.id) < cooldownMs) {

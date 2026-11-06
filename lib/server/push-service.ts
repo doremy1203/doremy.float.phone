@@ -45,7 +45,7 @@ const SHELL_ENDPOINT_PREFIX = "shell:";
 /** 向安卓壳的个人频道 shellpush:<userId> 广播一条通知（尽力而为）。 */
 export async function broadcastShellNotify(
   userId: string,
-  message: { title: string; body: string; url?: string },
+  message: { title: string; body: string; url?: string; kind?: string; sessionId?: string; sceneId?: string; characterName?: string; avatar?: string },
 ): Promise<boolean> {
   const config = getSupabaseServerConfig();
   if (!config) return false;
@@ -61,7 +61,7 @@ export async function broadcastShellNotify(
         messages: [{
           topic: `shellpush:${userId}`,
           event: "notify",
-          payload: { title: message.title, body: message.body, url: message.url || "/" },
+          payload: { title: message.title, body: message.body, url: message.url || "/", kind: message.kind || "", sessionId: message.sessionId || "", sceneId: message.sceneId || "", characterName: message.characterName || "", avatar: message.avatar || "" },
         }],
       }),
       cache: "no-store",

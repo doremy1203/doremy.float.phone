@@ -1,5 +1,32 @@
 // lib/stt-service.ts — 语音识别服务（浏览器 Web Speech API）
 
+type SpeechRecognitionAlternativeLike = { transcript: string };
+type SpeechRecognitionResultLike = {
+    isFinal: boolean;
+    0: SpeechRecognitionAlternativeLike;
+};
+type SpeechRecognitionResultsLike = ArrayLike<SpeechRecognitionResultLike>;
+type SpeechRecognitionEventLike = { results: SpeechRecognitionResultsLike };
+type SpeechRecognitionErrorEventLike = { error: string };
+
+interface SpeechRecognitionLike {
+    lang: string;
+    continuous: boolean;
+    interimResults: boolean;
+    maxAlternatives: number;
+    onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+    onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+    onend: (() => void) | null;
+    start(): void;
+    stop(): void;
+    abort(): void;
+}
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+type SpeechRecognitionWindow = Window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+};
+
 export type STTCallbacks = {
     onInterim: (text: string) => void;
     onFinal: (text: string) => void;
@@ -23,7 +50,7 @@ export function createSTTSession(
     lang = "zh-CN",
 ): STTSession {
     const SpeechRecognition =
-        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        (window as SpeechRecognitionWindow).SpeechRecognition || (window as SpeechRecognitionWindow).webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
         return {
@@ -44,7 +71,7 @@ export function createSTTSession(
     let finalText = "";
     let hadNoSpeech = false;
 
-    recognition.onresult = (event: any) => {
+    recognition.onresult = (event: SpeechRecognitionEventLike) => {
         if (aborted) return;
 
         let interim = "";
@@ -61,7 +88,7 @@ export function createSTTSession(
         callbacks.onInterim(finalText + interim);
     };
 
-    recognition.onerror = (event: any) => {
+    recognition.onerror = (event: SpeechRecognitionErrorEventLike) => {
         if (aborted) return;
         if (event.error === "aborted") return;
 

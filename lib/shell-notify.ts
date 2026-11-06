@@ -1,3 +1,4 @@
+import { isCompatibilityFeatureEnabled } from "./device-compatibility";
 // lib/shell-notify.ts
 //
 // 壳（FloatShell）原生系统通知的网页侧出口。
@@ -31,7 +32,7 @@ type ShellNotificationBridge = {
 const MAX_AVATAR_URL_CHARS = 400_000;
 
 function getBridge(): ShellNotificationBridge | null {
-    if (typeof window === "undefined") return null;
+    if (typeof window === "undefined" || !isCompatibilityFeatureEnabled("notifications")) return null;
     const bridge = (window as unknown as { AndroidShell?: ShellNotificationBridge }).AndroidShell;
     return bridge && typeof bridge.notify === "function" ? bridge : null;
 }

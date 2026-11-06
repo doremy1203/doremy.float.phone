@@ -26,8 +26,23 @@ android {
         // 1.0.10：浮窗改圆角矩形；浮窗左上角显示「待发 N」角标。
         // 1.0.11：截屏与主动查岗（含查岗浮层回复框）；通知栏「直接回复」。
         // 1.0.12：截屏可选收件人；位置感知；睡眠（Health Connect）。
-        versionCode 11
-        versionName "1.0.12"
+        // 1.0.13：原生后台应用时长监测、现实桥事件补传与返回学习软件通知。
+        // 1.0.14：运行诊断页与原生设备/权限快照。
+        // 1.0.16：短视频分享链接原生解析与限额临时缓存。
+        // 1.0.18：原生桥改用 UI 线程缓存的页面 URL，修复后台线程读 WebView 导致的 Java exception。
+        // 1.0.19：保存图片不再被可信页面门禁挡住；允许本地解析 localhost 明文 + WebView 混合内容。
+        // 1.0.20：大文件分块写入，修复导出/下载大备份时 WebView OOM；持久化 WebView 崩溃报告。
+        // 1.0.21：全局陪看改走无障碍截屏 + 网页分析，原生不再二次解析 API Key。
+        // 1.0.22：全局陪看横幅折叠/贴顶；小组件 pin 回调 profileId 双通道。
+        // 1.0.23：全局陪看横幅改为 WebView，支持用户 CSS + 预览。
+        // 1.0.24：小组件增加系统配置 Activity，多实例显式绑定 profile。
+        // 1.0.25：查岗浮层横屏滚动/关闭按钮/动态高度。
+        // 1.0.26：通知回复原生队列改为 peek/ack，网页持久化成功后再确认。
+        // 1.0.27：移除当前功能未使用的敏感权限，统一原生诊断与 APK 版本号。
+        // 1.0.28：release 关闭 WebView 调试，并禁用 Android 自动备份，使用应用内显式导出。
+        // 1.0.29：AndroidShell / PhoneWidget 使用顶层 nonce 桥，第三方 iframe 无法调用原生能力。
+        versionCode 28
+        versionName "1.0.29"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 
@@ -69,6 +84,7 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.activity:activity-ktx:1.9.0'
+    implementation 'androidx.webkit:webkit:1.12.1'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     // Health Connect：读睡眠。选它而不是各厂商自己的运动 App SDK，
     // 是因为它由系统统一汇聚（华为/小米/三星健康都往里写），接一次就够，

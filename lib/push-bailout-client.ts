@@ -7,9 +7,10 @@ import { bgSetInterval, bgSetTimeout } from "./bg-timer";
 import { BAILOUT_DIRTY_EVENT } from "./bailout-dirty";
 import { BAILOUT_CANCEL_EVENT, type BailoutCancelDetail } from "./bailout-cancel";
 import { buildChatPromptMessages } from "./chat-engine";
+import { resolveLifeCharacterIdForContact } from "./life/life-autonomy";
 import { isCallActiveForSession } from "./call-session-store";
 import { buildProviderRequest, toLlmRequestMessages, type LlmRequestPayload } from "./llm-provider-adapter";
-import { loadChatMessages, loadChatSessions, loadFollowUpSchedule, type ChatMessage, type ChatSession } from "./chat-storage";
+import { loadChatContacts, loadChatMessages, loadChatSessions, loadFollowUpSchedule, resolveSessionCharacterId as resolveChatSessionCharacterId, type ChatMessage, type ChatSession } from "./chat-storage";
 import { hasAccountPushSubscription, isShellEnvironment, isWithinPushQuietHours, loadPushQuietHours, peekAccountPushSubscribed } from "./push-client";
 import { isPersonalPushCloudActive, pushJobsFetch } from "./personal-push-cloud";
 import {
@@ -32,6 +33,7 @@ import {
     type IdleReconnectRule,
 } from "./idle-reconnect-storage";
 import { loadCharacters } from "./character-storage";
+import { loadVirtualLifeState } from "./life/life-storage";
 import type { RegexConfig } from "./settings-types";
 import type { LLMMessage } from "./llm-prompt-assembler";
 
@@ -64,7 +66,8 @@ function resolveNotifyAvatar(sessionId: string | undefined): string | undefined 
     try {
         const session = loadChatSessions().find(s => s.id === sessionId);
         if (!session || session.isGroup) return undefined;
-        const avatar = loadCharacters().find(c => c.id === session.contactId)?.avatar;
+        const characterId = resolveSessionCharacterId(session);
+        const avatar = characterId ? loadCharacters().find(c => c.id === characterId)?.avatar : undefined;
         if (typeof avatar !== "string") return undefined;
         const trimmed = avatar.trim();
         if (!trimmed || trimmed.length > NOTIFY_AVATAR_MAX_CHARS) return undefined;
@@ -135,6 +138,24 @@ function bailoutEnabled(): boolean {
         && (isPersonalPushCloudActive() || isShellEnvironment());
 }
 
+/** Session.contactId is a contact-record ID in newer data; life scenes use character IDs. */
+function resolveSessionCharacterId(session: Pick<ChatSession, "contactId">): string | null {
+    return resolveChatSessionCharacterId(session);
+}
+
+/**
+ * 主动消息快照的因果锚点：记录挂单时最后一条用户消息。
+ * 回端时如果用户已经发了更新消息，这条主动消息必须丢弃，否则会被排到
+ * 新用户消息后面，模型就会接着旧话题说。
+ */
+function buildCausalSnapshot(sessionId: string): { lastUserMessageId: string; lastUserMessageAt: string } | null {
+    const messages = loadChatMessages(sessionId);
+    const lastUser = [...messages].reverse().find(message =>
+        message.role === "user" && message.status !== "failed" && !message.isRetracted,
+    );
+    return lastUser ? { lastUserMessageId: lastUser.id, lastUserMessageAt: lastUser.createdAt } : null;
+}
+
 function resolveTimedWakeElapsedMinutes(schedule: TimedWakeSchedule, history: ChatMessage[]): number {
     if (schedule.source === "user") {
         const lastUser = [...history].reverse().find(message => message.role === "user");
@@ -175,11 +196,20 @@ export async function armReplyBailout(params: {
     signal?: AbortSignal;
 }): Promise<ReplyBailoutHandle | null> {
     if (!bailoutEnabled()) return null;
+    // The online chat's server fallback must not race the life-scene channel for a
+    // character physically present with the player. Otherwise killing the app can
+    // produce a chat notification for a turn that belongs to the life scene.
+    const replySession = loadChatSessions().find(item => item.id === params.sessionId);
+    if (replySession && !replySession.isGroup) {
+        const characterId = resolveSessionCharacterId(replySession);
+        if (characterId && isCharacterCoPresentInLifeScene(characterId)) return null;
+    }
     if (!(await hasAccountPushSubscription())) return null;
     if (params.signal?.aborted) return null;
 
     const triggerKey = `reply:${params.sessionId}`;
     const armAt = new Date().toISOString();
+    const causalSnapshot = buildCausalSnapshot(params.sessionId);
     const response = await pushJobsFetch({
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -204,6 +234,12 @@ export async function armReplyBailout(params: {
                     appId: "chat",
                     appTags: ["chat", "text"],
                     armAt,
+                    ...(causalSnapshot
+                        ? {
+                            snapshotLastUserMessageId: causalSnapshot.lastUserMessageId,
+                            snapshotLastUserMessageAt: causalSnapshot.lastUserMessageAt,
+                        }
+                        : {}),
                     ...(params.replyAfter?.localMessageId
                         ? {
                             replyAfterLocalMessageId: params.replyAfter.localMessageId,
@@ -308,11 +344,14 @@ export async function armFollowUpBailout(
         if (isWithinPushQuietHours(fireAt + FOLLOWUP_BAILOUT_GRACE_MS)) return; // 安静时段不打扰
         const session = loadChatSessions().find(s => s.id === sessionId);
         if (!session || session.isGroup) return; // 第一期只覆盖单聊追问
+        const characterId = resolveSessionCharacterId(session);
+        if (characterId && isCharacterCoPresentInLifeScene(characterId)) return; // 同场时不再从线上聊天渠道主动追问
         // 正在通话中：不挂追问兜底。通话期间角色其实一直在说话，但系统看不到
         // 你的文字回复，会按沉默判成「对方没回」，到点生成一条主动消息弹通知——
         // 人明明在电话里聊着（用户实报）。通话本身就是最强的「在场」信号。
         if (isCallActiveForSession(sessionId)) return;
         const latestMessages = loadChatMessages(sessionId);
+        const causalSnapshot = buildCausalSnapshot(sessionId);
         const count = prevCount + 1;
         const messagesWithHint = buildFollowUpSilenceMessages(session, latestMessages, fireAt);
 
@@ -361,6 +400,12 @@ export async function armFollowUpBailout(
                         appId: "chat",
                         appTags: ["chat", "text", "followup"],
                         followUpCount: count,
+                        ...(causalSnapshot
+                            ? {
+                                snapshotLastUserMessageId: causalSnapshot.lastUserMessageId,
+                                snapshotLastUserMessageAt: causalSnapshot.lastUserMessageAt,
+                            }
+                            : {}),
                     },
                 },
             }),
@@ -442,6 +487,123 @@ export async function cancelBailoutPrefix(triggerPrefix: string, excludeKey?: st
 }
 
 /**
+ * Schedule one server-side life-scene proactive turn. The model request is snapshotted
+ * while the app is available; push-generate runs it if the app is backgrounded/killed.
+ * The outbox carries lifeScene metadata so the reply is restored to the scene, not chat.
+ */
+export async function armLifeSceneProactiveBailout(input: {
+    sessionId: string;
+    sceneId: string;
+    characterId: string;
+    characterName: string;
+    prompt: string;
+    appId?: string;
+    appTags?: string[];
+    executeAtMs: number;
+    /** 可选：服务端在这一单完成后继续按 interval 续排，实现 App 关闭后的循环主动消息。 */
+    repeat?: { intervalMs: number; remaining: number };
+    /** Separate foreground, manual and schedule-owned jobs so they cannot overwrite one another. */
+    source?: "foreground" | "manual" | "schedule";
+}): Promise<BailoutArmResult> {
+    if (!bailoutEnabled()) return { ok: false, reason: "当前环境不支持服务端离线预约" };
+    try {
+        if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
+        if (isWithinPushQuietHours(input.executeAtMs)) return { ok: false, reason: "触发时间落在推送安静时段内" };
+        const session = loadChatSessions().find(item => item.id === input.sessionId);
+        if (!session || session.isGroup || resolveLifeCharacterIdForContact(session.contactId, loadChatContacts()) !== input.characterId) return { ok: false, reason: "找不到对应的单聊会话" };
+        if (isCallActiveForSession(session.id)) return { ok: false, reason: "会话正在通话中" };
+        const promptMessage: ChatMessage = {
+            id: "life-autonomy-snapshot-" + Date.now().toString(36),
+            sessionId: session.id,
+            role: "user",
+            status: "sent",
+            createdAt: new Date().toISOString(),
+            content: input.prompt,
+        };
+        const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
+            session,
+            [promptMessage],
+            { appId: input.appId ?? "life", appTags: input.appTags ?? ["life", "turn", "autonomy"], includeDirectChatEntries: false },
+        );
+        const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
+        const posted = await postBailoutJob({
+            triggerKey: "life-scene:" + input.sceneId + ":" + input.characterId + ":" + (input.source ?? "foreground"),
+            kind: "timed_task",
+            executeAtMs: input.executeAtMs,
+            request,
+            // Make the life-scene channel visually distinct from normal online-chat push.
+            notifyTitle: "生活现场 · " + (input.characterName || character.name),
+            merge: {
+                sessionId: session.id,
+                prevCount: 0,
+                regexes,
+                characterName: input.characterName || character.name,
+                userName: userIdentity?.name ?? "用户",
+                appId: "chat",
+                appTags: ["chat", "text", "offline", "life-scene"],
+                armAt: new Date(input.executeAtMs).toISOString(),
+                lifeScene: { sceneId: input.sceneId, characterId: input.characterId, characterName: input.characterName || character.name },
+                ...(input.repeat && input.repeat.intervalMs > 0 && input.repeat.remaining > 0
+                    ? { idleRepeat: { intervalMs: input.repeat.intervalMs, remaining: input.repeat.remaining, quietWin: null } }
+                    : {}),
+            },
+        });
+        return posted ? { ok: true } : { ok: false, reason: "服务端预约接口没有确认成功" };
+    } catch (err) {
+        console.warn("[PushBailout] life-scene arm failed:", err);
+        return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+}
+
+/** Cancel only stale foreground fallbacks when a local foreground turn takes over.
+ * Background schedule/manual jobs remain armed and are deferred by the foreground lease.
+ */
+export async function cancelLifeSceneProactiveBailouts(sceneId: string, characterIds: string[]): Promise<void> {
+    if (!sceneId || !characterIds.length) return;
+    await Promise.all([...new Set(characterIds)].map(characterId =>
+        cancelBailoutPrefix("life-scene:" + sceneId + ":" + characterId + ":foreground"),
+    ));
+}
+
+/** Prevent a second proactive channel from talking while a character is physically co-present. */
+export function isCharacterCoPresentInLifeScene(characterId: string): boolean {
+    try {
+        const state = loadVirtualLifeState();
+        if (!state.settings.enabled) return false;
+        return state.scenes.some(scene => scene.status === "active"
+            && scene.participants.some(participant => participant.ownerType === "player" && participant.ownerId === "player")
+            && scene.participants.some(participant => participant.ownerType === "character" && participant.ownerId === characterId && participant.activity !== "离开"));
+    } catch {
+        return false;
+    }
+}
+
+/** Keep online cold-reconnect and life-scene autonomy mutually exclusive per character.
+ * Re-evaluate persisted scene presence every time the life scene changes or resumes:
+ * cancel queued online tasks only for genuinely co-present characters; re-arm the
+ * existing online rule as soon as the character is no longer in the player's scene. */
+export async function reconcileIdleReconnectWithLifeScenes(characterIds?: string[]): Promise<void> {
+    if (!bailoutEnabled()) return;
+    const rules = loadIdleReconnectRules();
+    const filter = characterIds?.length ? new Set(characterIds) : null;
+    for (const rule of rules) {
+        if (filter && !filter.has(rule.characterId)) continue;
+        if (isCharacterCoPresentInLifeScene(rule.characterId)) {
+            await cancelBailoutPrefix("idle:" + rule.id + ":");
+            const session = loadChatSessions().find(item => item.id === rule.sessionId);
+            if (session) await cancelBailoutPrefix("followup:" + session.id + ":");
+        } else {
+            await armIdleReconnectBailout(rule);
+        }
+    }
+}
+
+/** Backward-compatible helper used when entering a life scene. */
+export async function suspendIdleReconnectForLifeScene(characterIds: string[]): Promise<void> {
+    if (!characterIds.length) return;
+    await reconcileIdleReconnectWithLifeScenes(characterIds);
+}
+/**
  * 通话开始/结束时处理这个会话的离线预约。
  *
  * 为什么需要：离线任务（冷场重连 / 追问）按「用户最后一条文字消息 + 间隔」
@@ -482,7 +644,8 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
     try {
         if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
         const session = loadChatSessions().find(s => s.id === rule.sessionId);
-        if (!session || session.isGroup || session.contactId !== rule.characterId) return { ok: false, reason: "找不到对应的单聊会话" };
+        if (!session || session.isGroup || resolveSessionCharacterId(session) !== rule.characterId) return { ok: false, reason: "找不到对应的单聊会话" };
+        if (isCharacterCoPresentInLifeScene(rule.characterId)) return { ok: false, reason: "角色正在生活现场与玩家同场，已优先交给生活现场主动性" };
         // 正在通话中：不挂冷场重连。通话期间系统看不到文字回复，会误判成用户
         // 沉默了、按规则发来主动消息，只在通知里冒出来（用户实报）。
         if (isCallActiveForSession(session.id)) return { ok: false, reason: "会话正在通话中" };
@@ -490,6 +653,7 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         const lastUser = [...history].reverse().find(m => m.role === "user");
         if (!lastUser) return { ok: false, reason: "这个会话还没有你的消息，无法计算沉默时间" };
         const lastUserAt = new Date(lastUser.createdAt).getTime();
+        const causalSnapshot = { lastUserMessageId: lastUser.id, lastUserMessageAt: lastUser.createdAt };
 
         const effectiveConsecutive = rule.lastFiredAt && rule.lastFiredAt > lastUserAt ? rule.consecutiveCount : 0;
         if (effectiveConsecutive >= IDLE_RECONNECT_MAX_CONSECUTIVE) {
@@ -547,6 +711,12 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
                 appId: "chat",
                 appTags: ["chat", "text", "idle_wake"],
                 armAt: new Date(fireAt).toISOString(),
+                ...(causalSnapshot
+                    ? {
+                        snapshotLastUserMessageId: causalSnapshot.lastUserMessageId,
+                        snapshotLastUserMessageAt: causalSnapshot.lastUserMessageAt,
+                    }
+                    : {}),
                 idleReconnect: { ruleId: rule.id, firedAt: fireAt },
                 ...(remaining > 0 ? { idleRepeat: { intervalMs, remaining, quietWin: buildQuietWindowMeta() } } : {}),
             },
@@ -576,7 +746,7 @@ export async function armTimedWakeBailout(schedule: TimedWakeSchedule): Promise<
         if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
         if (isWithinPushQuietHours(schedule.fireAt)) return { ok: false, reason: "触发时间落在推送安静时段内" };
         const session = loadChatSessions().find(s => s.id === schedule.sessionId);
-        if (!session || session.isGroup || session.contactId !== schedule.characterId) return { ok: false, reason: "找不到对应的单聊会话" };
+        if (!session || session.isGroup || resolveSessionCharacterId(session) !== schedule.characterId) return { ok: false, reason: "找不到对应的单聊会话" };
         const history = loadChatMessages(session.id);
         const elapsedMinutes = resolveTimedWakeElapsedMinutes(schedule, history);
 
@@ -642,14 +812,15 @@ export async function armPeriodCareBailouts(): Promise<void> {
             if (isWithinPushQuietHours(executeAtMs)) return;
 
             const sessions = loadChatSessions()
-                .filter(session => !session.isGroup && config.periodCareCharacterIds.includes(session.contactId))
+                .filter(session => !session.isGroup && config.periodCareCharacterIds.includes(resolveSessionCharacterId(session) || ""))
                 .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
             const seen = new Set<string>();
             for (const session of sessions) {
-                if (seen.has(session.contactId)) continue;
-                seen.add(session.contactId);
-                if (hasMenstrualPeriodCareTriggered(session.contactId, event.cycleKey)) continue;
-                const characterName = loadCharacters().find(c => c.id === session.contactId)?.name ?? "小手机";
+                const characterId = resolveSessionCharacterId(session);
+                if (!characterId || seen.has(characterId)) continue;
+                seen.add(characterId);
+                if (hasMenstrualPeriodCareTriggered(characterId, event.cycleKey)) continue;
+                const characterName = loadCharacters().find(c => c.id === characterId)?.name ?? "小手机";
                 const history = loadChatMessages(session.id);
                 const { llmMessages, config: apiConfig, preset, regexes, userIdentity } = await buildChatPromptMessages(
                     session,
@@ -663,7 +834,7 @@ export async function armPeriodCareBailouts(): Promise<void> {
                     return { url: req.url, headers: req.headers, body: req.body, providerKind: req.providerKind };
                 }, apiConfig.enableImageRecognition === true);
                 await postBailoutJob({
-                    triggerKey: `periodcare:${session.contactId}:${event.cycleKey}`,
+                    triggerKey: `periodcare:${characterId}:${event.cycleKey}`,
                     kind: "timed_task",
                     executeAtMs,
                     request,
@@ -678,7 +849,7 @@ export async function armPeriodCareBailouts(): Promise<void> {
                         appId: "chat",
                         appTags: ["chat", "text", "period_care"],
                         armAt: new Date(executeAtMs).toISOString(),
-                        periodCare: { characterId: session.contactId, cycleKey: event.cycleKey },
+                        periodCare: { characterId, cycleKey: event.cycleKey },
                     },
                 });
             }
@@ -850,7 +1021,7 @@ export async function stopCharacterScheduledActivity(
     let localCleared = 0;
     try {
         // ① 追问 / 回复兜底：按会话撤（它们的键里带的是 sessionId，不是角色 id）
-        const sessions = loadChatSessions().filter(session => !session.isGroup && session.contactId === characterId);
+        const sessions = loadChatSessions().filter(session => !session.isGroup && resolveSessionCharacterId(session) === characterId);
         for (const session of sessions) {
             await cancelBailoutPrefix(`followup:${session.id}:`);
             await deleteScheduledJob(`reply:${session.id}`);

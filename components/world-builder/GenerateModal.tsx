@@ -247,9 +247,9 @@ export default function GenerateModal({ open, categories, characters = [], onClo
         setProgress("生成中...");
         await pollAndDownload(data.taskId);
       }
-    } catch (e: any) {
+    } catch (error: unknown) {
       setStatus("failed");
-      setProgress(e.message);
+      setProgress(error instanceof Error ? error.message : String(error));
     }
   }
 

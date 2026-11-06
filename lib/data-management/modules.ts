@@ -247,6 +247,8 @@ const PRIMARY_DATA_MODULES: DataModuleDefinition[] = [
           "ai_phone_calendar_plans_v1",
           "ai_phone_calendar_config_v1",
           "ai_phone_diary_entries_v1",
+          "ai_phone_photo_wall_v1",
+          "ai_phone_watch_together_v1",
           "ai_phone_diary_entry_timer_settings_v1",
           "ai_phone_diary_entry_font_asset_v1",
           "ai_phone_diary_entry_font_scale_v1",

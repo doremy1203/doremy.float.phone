@@ -1,0 +1,90 @@
+# Mainline life-system validation.
+name: Validate life system and compatibility
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+    paths:
+      - "components/life/**"
+      - "lib/life/**"
+      - "supabase/functions/push-generate/**"
+      - "lib/notification-reply.ts"
+      - "lib/push-bailout-client.ts"
+      - "scripts/test-life-*.mjs"
+      - "lib/tool-executor.ts"
+      - "lib/tool-storage.ts"
+      - "components/chat/chat-room.tsx"
+      - "components/desktop-shell.tsx"
+      - "components/phone-settings-app.tsx"
+      - "components/reality-bridge-app.tsx"
+      - "components/reality-bridge-scheduler.tsx"
+      - "components/perception/**"
+      - "lib/reality-bridge/**"
+      - "lib/perception/**"
+      - "android-shell/app/src/main/**"
+      - "lib/device-compatibility.ts"
+      - "styles/phone-shell.css"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/life-engine-validation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "components/life/**"
+      - "lib/life/**"
+      - "supabase/functions/push-generate/**"
+      - "lib/notification-reply.ts"
+      - "lib/push-bailout-client.ts"
+      - "scripts/test-life-*.mjs"
+      - "lib/tool-executor.ts"
+      - "lib/tool-storage.ts"
+      - "components/chat/chat-room.tsx"
+      - "components/desktop-shell.tsx"
+      - "components/phone-settings-app.tsx"
+      - "components/reality-bridge-app.tsx"
+      - "components/reality-bridge-scheduler.tsx"
+      - "components/perception/**"
+      - "lib/reality-bridge/**"
+      - "lib/perception/**"
+      - "android-shell/app/src/main/**"
+      - "lib/device-compatibility.ts"
+      - "styles/phone-shell.css"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/life-engine-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: life-engine-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: ESLint
+        run: npm run lint
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+      - name: Life schedule regression tests (UTC)
+        run: TZ=UTC npm run test:life
+      - name: Life schedule regression tests (daylight-saving timezone)
+        run: TZ=America/New_York npm run test:life
+      - name: Photo wall sizing regression tests
+        run: npm run test:photo-wall
+      - name: Production build
+        run: npm run build

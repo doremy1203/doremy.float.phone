@@ -4,6 +4,11 @@
 
 .qa-app-shell {
   --qa-header-safe-top: max(12px, var(--page-header-safe-top, 48px));
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
   /* 浅色（暖米白，Claude Light 风）：干净、无描边、柔和阴影 */
   --qa-bg-canvas: #fafaf7;
   --qa-bg-sidebar: #f3f2ec;
@@ -1121,7 +1126,11 @@
 .qa-sheet-backdrop {
   position: absolute;
   inset: 0;
-  z-index: 30;
+  z-index: 60;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -1132,6 +1141,9 @@
 }
 .qa-sheet {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   max-height: 88%;
   display: flex;
   flex-direction: column;

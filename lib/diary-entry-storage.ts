@@ -1,4 +1,5 @@
 import { kvGet, kvRemove, kvSet, registerKvMigration } from "./kv-db";
+import { appendLifeTimelineEntry, loadVirtualLifeState, saveVirtualLifeState } from "./life/life-storage";
 import {
   DEFAULT_DIARY_ENTRY_TIMER_SETTINGS,
   type DiaryEntry,
@@ -246,6 +247,23 @@ export function createDiaryEntry(input: DiaryEntryInput): DiaryEntry {
     updatedAt: now,
   };
   saveDiaryEntries([entry, ...loadDiaryEntries()]);
+  try {
+    const life = loadVirtualLifeState();
+    if (life.settings.enabled) {
+      const isCharacter = !!entry.characterId && entry.characterId !== "player" && entry.characterId !== "self";
+      const logged = appendLifeTimelineEntry(life, {
+        category: "diary",
+        title: isCharacter ? entry.characterName + "写了日记" : "你写了一篇日记",
+        details: entry.title + (entry.body ? " · " + entry.body.slice(0, 140) : ""),
+        actorId: isCharacter ? entry.characterId : "player",
+        actorName: isCharacter ? entry.characterName : "我",
+        sourceId: entry.id,
+      });
+      saveVirtualLifeState(logged);
+    }
+  } catch {
+    // Diary writing must not fail because the Life timeline is unavailable.
+  }
   return entry;
 }
 

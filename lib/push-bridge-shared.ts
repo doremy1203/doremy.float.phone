@@ -14,7 +14,13 @@ export type ServerBridgeRule = {
     id: string;
     name: string;
     matchType: string;
+    /** Optional case-insensitive payload keyword filter; terms separated by | or comma. */
+    payloadFilter?: string;
     cooldownMinutes?: number;
+    /** Scheduled rules are triggered by the personal-cloud minute scanner. */
+    schedule?: { kind: "daily" | "weekly" | "interval"; time?: string; weekday?: number; minutes?: number };
+    timeZone?: string;
+    createdAt?: string;
     process: {
         mode: "raw" | "template" | "ai";
         template?: string;

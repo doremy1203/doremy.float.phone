@@ -1,0 +1,47 @@
+name: Validate desktop widget output safety
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+    paths:
+      - "lib/widget/**"
+      - "lib/chat-engine.ts"
+      - "lib/text-tool-protocol.ts"
+      - "lib/tool-executor.ts"
+      - "scripts/test-phone-widget-output.mjs"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/widget-validation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "lib/widget/**"
+      - "scripts/test-phone-widget-output.mjs"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/widget-validation.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: widget-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Desktop widget output protocol tests
+        run: npm run test:widget-output
+      - name: TypeScript type check
+        run: npx tsc --noEmit

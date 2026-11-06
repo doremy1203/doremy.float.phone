@@ -160,37 +160,37 @@ function parseSourcePath(path?: string): SourcePath | { kind: "missing"; message
     const segments = splitPath(path);
     if (segments.length === 0) return { kind: "root" };
 
-    const module = getModule(segments[0]);
-    if (!module) return { kind: "missing", message: `资料模块不存在：/${segments[0]}` };
-    if (segments.length === 1) return { kind: "module", module };
+    const dataModule = getModule(segments[0]);
+    if (!dataModule) return { kind: "missing", message: `资料模块不存在：/${segments[0]}` };
+    if (segments.length === 1) return { kind: "module", module: dataModule };
 
     const sourceType = segments[1];
     if (sourceType !== "indexeddb" && sourceType !== "kv" && sourceType !== "localStorage") {
         return { kind: "missing", message: `资料源不存在：/${segments[0]}/${sourceType}` };
     }
-    if (segments.length === 2) return { kind: "sourceRoot", module, sourceType };
+    if (segments.length === 2) return { kind: "sourceRoot", module: dataModule, sourceType };
 
     if (sourceType === "indexeddb") {
         const dbName = segments[2];
-        const source = module.sources.find((item): item is IndexedDbSource =>
+        const source = dataModule.sources.find((item): item is IndexedDbSource =>
             item.type === "indexeddb" && item.dbName === dbName
         );
         if (!source) return { kind: "missing", message: `IndexedDB 不在该模块中：${dbName}` };
-        if (segments.length === 3) return { kind: "indexeddb", module, source, dbName };
-        return { kind: "indexeddbStore", module, source, dbName, storeName: segments[3] };
+        if (segments.length === 3) return { kind: "indexeddb", module: dataModule, source, dbName };
+        return { kind: "indexeddbStore", module: dataModule, source, dbName, storeName: segments[3] };
     }
 
     const fileName = segments[2];
     const key = keyFromJsonFileName(fileName);
     if (sourceType === "kv") {
-        const source = module.sources.find((item): item is KvSource => item.type === "kv" && matchesKey(key, item));
+        const source = dataModule.sources.find((item): item is KvSource => item.type === "kv" && matchesKey(key, item));
         if (!source) return { kind: "missing", message: `KV 文件不在该模块中：${key}` };
-        return { kind: "kvFile", module, source, key };
+        return { kind: "kvFile", module: dataModule, source, key };
     }
 
-    const source = module.sources.find((item): item is LocalStorageSource => item.type === "localStorage" && matchesKey(key, item));
+    const source = dataModule.sources.find((item): item is LocalStorageSource => item.type === "localStorage" && matchesKey(key, item));
     if (!source) return { kind: "missing", message: `localStorage 文件不在该模块中：${key}` };
-    return { kind: "localStorageFile", module, source, key };
+    return { kind: "localStorageFile", module: dataModule, source, key };
 }
 
 async function countStore(dbName: string, storeName: string): Promise<number> {
@@ -845,10 +845,10 @@ async function searchPath(path: SourcePath, input: LocalDataSearchInput, remaini
             : [];
     const results: unknown[] = [];
 
-    for (const module of modules) {
+    for (const dataModule of modules) {
         const sources = path.kind === "indexeddb"
             ? [path.source]
-            : module.sources.filter(source => {
+            : dataModule.sources.filter(source => {
                 if (path.kind !== "sourceRoot") return true;
                 return source.type === path.sourceType;
             });
@@ -858,12 +858,12 @@ async function searchPath(path: SourcePath, input: LocalDataSearchInput, remaini
                 const records = await readKvRecords(source);
                 for (const record of records) {
                     if (results.length >= remaining) break;
-                    results.push(...searchKeyValueRecord("kv", `/${module.id}/kv`, record.key, record.value, input.query, remaining - results.length, fields));
+                    results.push(...searchKeyValueRecord("kv", `/${dataModule.id}/kv`, record.key, record.value, input.query, remaining - results.length, fields));
                 }
             } else if (source.type === "localStorage") {
                 for (const record of readLocalStorageRecords(source)) {
                     if (results.length >= remaining) break;
-                    results.push(...searchKeyValueRecord("localStorage", `/${module.id}/localStorage`, record.key, record.value, input.query, remaining - results.length, fields));
+                    results.push(...searchKeyValueRecord("localStorage", `/${dataModule.id}/localStorage`, record.key, record.value, input.query, remaining - results.length, fields));
                 }
             } else if (source.type === "indexeddb") {
                 const db = await openDb(source.dbName);
@@ -875,14 +875,14 @@ async function searchPath(path: SourcePath, input: LocalDataSearchInput, remaini
                         if (results.length >= remaining) break;
                         const storePath: Extract<SourcePath, { kind: "indexeddbStore" }> = {
                             kind: "indexeddbStore",
-                            module,
+                            module: dataModule,
                             source,
                             dbName: source.dbName,
                             storeName,
                         };
                         const found = await searchIndexedDbStore(storePath, {
                             ...input,
-                            path: `/${module.id}/indexeddb/${encodeSegment(source.dbName)}/${encodeSegment(storeName)}`,
+                            path: `/${dataModule.id}/indexeddb/${encodeSegment(source.dbName)}/${encodeSegment(storeName)}`,
                             limit: remaining - results.length,
                             offset: 0,
                         });

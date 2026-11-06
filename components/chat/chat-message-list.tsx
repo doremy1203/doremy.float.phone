@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useSyncExternalStore } from "react";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, SlidersHorizontal } from "lucide-react";
 import { CHAT_MESSAGE_PUSHED_EVENT, loadChatSessions, loadChatContacts, ChatSession, createOrGetSession, createGroupSession, pushChatMessage, addChatContact, loadChatMessages, getLastVisibleSessionMessage, getChatMessagePreview } from "@/lib/chat-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { Character } from "@/lib/character-types";
@@ -81,12 +81,13 @@ function getLastNonEmptyPreview(sessionId: string): string {
 
 type ChatMessageListProps = {
     onCloseApp: () => void;
+    onOpenHistorySearch?: () => void;
     activeSession: ChatSession | null;
     onSelectSession: (session: ChatSession | null) => void;
     onSelectMascot: () => void;
 };
 
-export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, onSelectMascot }: ChatMessageListProps) {
+export function ChatMessageList({ onCloseApp, onOpenHistorySearch, activeSession, onSelectSession, onSelectMascot }: ChatMessageListProps) {
     const [sessions, setSessions] = useState<ChatSession[]>([]);
     const [listFilter, setListFilter] = useState("");
     const [listTab, setListTab] = useState<"all" | "private" | "group">("all");
@@ -260,8 +261,8 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
             >
                 <div className="px-5 pt-5 pb-3">
                     <div className="flex items-center justify-between mb-4 mt-2">
-                        <span className="ts-28 font-bold text-[var(--c-text-title)]">Chats</span>
-                    </div>
+                         <span className="ts-28 font-bold text-[var(--c-text-title)]">Chats</span>
+                     </div>
                     <div className="chat-search-bar">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--c-icon)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                         <input
@@ -270,6 +271,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                             value={listFilter}
                             onChange={(e) => setListFilter(e.target.value)}
                         />
+                        <button type="button" onClick={onOpenHistorySearch} className="shrink-0 inline-flex h-8 w-8 items-center justify-center rounded-full text-[var(--c-icon)] transition-colors hover:bg-[var(--c-input)] hover:text-[var(--c-text-title)] active:scale-95" aria-label="筛选聊天记录" title="筛选聊天记录"><SlidersHorizontal size={17} strokeWidth={1.7} /></button>
                     </div>
                 </div>
                 <div className="chat-list-tabs" style={{ paddingLeft: 20, paddingRight: 20 }}>

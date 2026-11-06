@@ -3,6 +3,7 @@ import { loadBindingConfig, loadImageGenerationSettings, resolveBinding, DEFAULT
 import { applyImageGenerationBinding } from "./image-generation-binding";
 import JSZip from "jszip";
 import { getChatImageFromIndexedDB } from "./chat-asset-storage";
+import { loadCharacters } from "./character-storage";
 import { storeMediaBlob } from "./media-cache-storage";
 import { throwIfAborted } from "./abort-utils";
 import {
@@ -22,6 +23,9 @@ export type ImageGenerationResult = {
   mimeType: string;
   prompt: string;
   usedReferenceImage: boolean;
+  /** Actual identity-reference images passed to the provider after loading/collage/limits. */
+  referenceImageCount?: number;
+  referenceImageLabels?: string[];
   revisedPrompt?: string;
 };
 
@@ -93,6 +97,54 @@ function loadDataUrlImage(dataUrl: string): Promise<HTMLImageElement> {
     image.onerror = () => reject(new Error("参考图解码失败"));
     image.src = dataUrl;
   });
+}
+
+type ReferenceSource = { label: string; dataUrl: string; crop?: { x: number; y: number; size: number } };
+
+/**
+ * 兼容“只接受一张参考图”的 OpenAI 兼容服务：把本次出镜人物拼成一张带编号的
+ * 身份参考图。多图仍优先；拼图只在用户显式选择时启用。
+ */
+async function buildReferenceCollage(sources: ReferenceSource[]): Promise<{ dataUrl: string; legend: string } | null> {
+  if (typeof document === "undefined" || sources.length < 2) return null;
+  const cell = 512;
+  const labelHeight = 46;
+  const cols = Math.ceil(Math.sqrt(sources.length));
+  const rows = Math.ceil(sources.length / cols);
+  const canvas = document.createElement("canvas");
+  canvas.width = cols * cell;
+  canvas.height = rows * (cell + labelHeight);
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.fillStyle = "#111111";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  const legend: string[] = [];
+  for (let index = 0; index < sources.length; index++) {
+    const source = sources[index];
+    const image = await loadDataUrlImage(source.dataUrl).catch(() => null);
+    if (!image) continue;
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    const x = col * cell;
+    const y = row * (cell + labelHeight);
+    const width = image.naturalWidth || image.width;
+    const height = image.naturalHeight || image.height;
+    const crop = source.crop;
+    const sourceSize = crop ? Math.max(1, Math.round(Math.min(width, height) * Math.max(0.18, Math.min(1, crop.size)))) : Math.min(width, height);
+    const sourceX = crop ? Math.round(Math.max(0, Math.min(width - sourceSize, crop.x * width))) : Math.max(0, Math.floor((width - sourceSize) / 2));
+    const sourceY = crop ? Math.round(Math.max(0, Math.min(height - sourceSize, crop.y * height))) : Math.max(0, Math.floor((height - sourceSize) / 2));
+    context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, x, y, cell, cell);
+    context.fillStyle = "rgba(0,0,0,.72)";
+    context.fillRect(x, y + cell, cell, labelHeight);
+    context.fillStyle = "#ffffff";
+    context.font = "28px sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(`${index + 1}. ${source.label}`, x + cell / 2, y + cell + labelHeight / 2);
+    legend.push(`${index + 1}=${source.label}`);
+  }
+  if (!legend.length) return null;
+  return { dataUrl: canvas.toDataURL("image/png"), legend: legend.join("、") };
 }
 
 async function normalizeReferenceImageForEdit(
@@ -339,28 +391,35 @@ export const IMAGE_GEN_PROXY_URL = (process.env.NEXT_PUBLIC_IMAGE_GEN_PROXY_URL 
 async function generateImageDirect(params: {
   settings: ImageGenerationSettings;
   prompt: string;
-  referenceImageDataUrl: string | null;
+  referenceImageDataUrls: string[];
   signal?: AbortSignal;
   /** 走通用代理:请求发往代理地址,真实上游放进 x-upstream-base-url 头 */
   proxyBaseUrl?: string;
 }): Promise<ImageGenerationApiResponse> {
-  const { settings, prompt, referenceImageDataUrl, signal, proxyBaseUrl } = params;
+  const { settings, prompt, referenceImageDataUrls, signal, proxyBaseUrl } = params;
   throwIfAborted(signal);
-  const hasReference = Boolean(referenceImageDataUrl);
+  const hasReference = referenceImageDataUrls.length > 0;
   const url = buildImageUrl(proxyBaseUrl || settings.baseUrl, hasReference ? "edits" : "generations");
   const headers: Record<string, string> = { Authorization: `Bearer ${settings.apiKey}` };
   if (proxyBaseUrl) headers["x-upstream-base-url"] = normalizeBaseUrl(settings.baseUrl);
   let body: BodyInit;
 
   if (hasReference) {
-    const converted = dataUrlToBlob(referenceImageDataUrl || "");
-    if (!converted) throw new Error("参考图格式无效");
+    const convertedReferences = referenceImageDataUrls.map(dataUrl => dataUrlToBlob(dataUrl));
+    const invalidIndex = convertedReferences.findIndex(reference => !reference);
+    if (invalidIndex >= 0) throw new Error(`第 ${invalidIndex + 1} 张参考图格式无效`);
     const form = new FormData();
     form.set("model", settings.model);
     form.set("prompt", prompt);
     if (settings.size && settings.size !== "auto") form.set("size", settings.size);
     if (settings.quality && settings.quality !== "auto") form.set("quality", settings.quality);
-    form.append("image", converted.blob, `reference.${imageExtension(converted.mimeType)}`);
+    convertedReferences.forEach((converted, index) => {
+      if (!converted) return;
+      // OpenAI Images edits accepts repeated image[] inputs. Keep the legacy single-image
+      // field for providers that only understand the older OpenAI-compatible shape.
+      const fieldName = convertedReferences.length > 1 ? "image[]" : "image";
+      form.append(fieldName, converted.blob, `reference-${index + 1}.${imageExtension(converted.mimeType)}`);
+    });
     body = form;
   } else {
     headers["Content-Type"] = "application/json";
@@ -407,7 +466,7 @@ const directCorsFailedBaseUrls = new Set<string>();
 async function generateImageViaServerOrProxy(params: {
   settings: ImageGenerationSettings;
   prompt: string;
-  referenceImageDataUrl: string | null;
+  referenceImageDataUrls: string[];
   signal?: AbortSignal;
 }): Promise<ImageGenerationApiResponse> {
   if (IMAGE_GEN_PROXY_URL) {
@@ -440,10 +499,10 @@ async function generateImageViaServerOrProxy(params: {
 async function generateImageViaServer(params: {
   settings: ImageGenerationSettings;
   prompt: string;
-  referenceImageDataUrl: string | null;
+  referenceImageDataUrls: string[];
   signal?: AbortSignal;
 }): Promise<ImageGenerationApiResponse> {
-  const { settings, prompt, referenceImageDataUrl, signal } = params;
+  const { settings, prompt, referenceImageDataUrls, signal } = params;
   throwIfAborted(signal);
   // 防"无限卡住":函数被平台中途击杀时流可能既不关闭也不报错。
   // 总超时 180s + 断流检测(心跳每 3s 一个字节,超过 25s 没有任何字节视为断流)。
@@ -465,7 +524,7 @@ async function generateImageViaServer(params: {
         prompt,
         size: settings.size,
         quality: settings.quality,
-        referenceImageDataUrl: referenceImageDataUrl || undefined,
+        referenceImageDataUrls: referenceImageDataUrls.length ? referenceImageDataUrls : undefined,
       }),
     });
     throwIfAborted(signal);
@@ -740,12 +799,26 @@ export async function fetchNovelAiModels(apiKey: string): Promise<string[]> {
   }
 }
 
-export async function generateImageFromConfiguredApi(params: {
+function descriptionExplicitlyIncludesPlayer(description: string): boolean {
+  return /(?:玩家本人|玩家入镜|玩家出镜|用户本人|用户形象|用户入镜|用户出镜|我的形象|我的照片|我入镜|我出镜|我在画面|我也在画面|本人入镜|本人出镜|主人本人|主人入镜|主人出镜|主人的形象|我和.{0,24}(?:一起|合照|合影|同框|在画面)|和我.{0,24}(?:一起|合照|合影|同框)|与我.{0,24}(?:一起|合照|合影|同框)|跟我.{0,24}(?:一起|合照|合影|同框)|你和.{0,24}(?:一起|合照|合影|同框|入镜|出镜)|和你.{0,24}(?:一起|合照|合影|同框|入镜|出镜)|与主人.{0,24}(?:一起|合照|合影|同框|入镜|出镜)|和主人.{0,24}(?:一起|合照|合影|同框|入镜|出镜)|我们(?:一起|合照|合影|同框|出镜|入镜)|with me|me in (?:the|this) (?:image|picture)|my appearance|I am (?:in|pictured in)|the user(?: appears| is in the image)?|player character)/i.test(description);
+}
+
+const DEFAULT_IDENTITY_FACE_CROP = { x: 0.27, y: 0.12, size: 0.46 };
+
+async function generateImageFromConfiguredApiInternal(params: {
   description: string;
   characterId?: string;
+  /** 画面中实际出镜的角色 ID；多角色图片会逐个附加身份参考，而不是拼成固定合照。 */
+  characterIds?: string[];
+  /** 本次场景的明确出镜人员 ID；用户本人使用保留 ID "__user__"。 */
+  participantIds?: string[];
+  /** 兼容旧调用方；新调用方应使用 participantIds。 */
+  includeUserAppearance?: boolean;
   /** 内容所属 APP；用于按“角色 > APP > 全局”解析生图方案。 */
   appId?: string;
   useReferenceImage?: boolean;
+  /** Optional supplemental scene reference, retained for older callers. */
+  referenceImageDataUrl?: string;
   settings?: ImageGenerationSettings;
   signal?: AbortSignal;
 }): Promise<ImageGenerationResult | null> {
@@ -762,7 +835,41 @@ export async function generateImageFromConfiguredApi(params: {
   const description = params.description.trim();
   if (!description) return null;
 
-  // NovelAI 模式
+  const allCharacters = loadCharacters();
+  const characterById = new Map(allCharacters.map(character => [character.id, character]));
+  const matchedIds = allCharacters
+    .filter(character => character.id !== params.characterId && Boolean(character.name?.trim()) && description.includes(character.name.trim()))
+    .map(character => character.id);
+  const inferredCharacterIds = Array.from(new Set([
+    ...(params.characterId ? [params.characterId] : []),
+    ...(params.characterIds ?? []),
+    ...matchedIds,
+  ])).filter(characterId => characterById.has(characterId)).slice(0, 16);
+  // 所有生图调用最终都归一化为一份明确的出镜名单；调用方名单优先，旧调用方才回退到描述识别。
+  const resolvedParticipantIds = params.participantIds
+    ? Array.from(new Set(params.participantIds)).filter(id => id === "__user__" || characterById.has(id))
+    : [...inferredCharacterIds, ...((params.includeUserAppearance ?? descriptionExplicitlyIncludesPlayer(description)) ? ["__user__"] : [])];
+  const involvedCharacterIds = resolvedParticipantIds.filter(id => id !== "__user__" && characterById.has(id)).slice(0, 16);
+  const includeUserAppearance = resolvedParticipantIds.includes("__user__");
+
+  const characterIdentityPrompt = involvedCharacterIds.map(characterId => {
+    const character = characterById.get(characterId);
+    const characterReference = settings.characterReferences?.[characterId];
+    const featurePrompt = characterReference?.featurePrompt?.trim();
+    if (!character || !featurePrompt || (settings.provider === "novelai" && characterReference?.novelAiFeaturePromptEnabled === false)) return "";
+    return `${character.name}的稳定身份特征（不固定临时服装和姿态）：${featurePrompt}`;
+  }).filter(Boolean);
+  const userReference = settings.characterReferences?.["__user__"];
+  const userAppearancePrompt = includeUserAppearance && userReference?.featurePrompt?.trim()
+    ? `玩家本人稳定外观（只用于识别本人；服装、姿势、表情和场景以本次提示词为准）：${userReference.featurePrompt.trim()}`
+    : "";
+  const identityPolicy = (involvedCharacterIds.length || includeUserAppearance)
+    ? "身份参考规则：只保持每个人可识别的身份特征，例如面部、五官、发色、发型及明显识别标记。不要照搬参考图的服装、姿势、表情、站位、镜头、构图、背景或光线；这些内容必须服从本次场景描述，可以每次变化。"
+    : "";
+  const identityPrompt = [identityPolicy, ...characterIdentityPrompt, userAppearancePrompt].filter(Boolean).join("\n");
+
+  // NovelAI 当前生成接口不接收多张身份参考图。仍传入每位出镜角色的文字身份锚点，
+  // 不把多张脸图混成一张参考图，避免模型将多位角色的身份融合。
   if (settings.provider === "novelai") {
     const naiApiKey = settings.novelai?.apiKey?.trim();
     if (!naiApiKey) return null;
@@ -774,13 +881,7 @@ export async function generateImageFromConfiguredApi(params: {
 
     const positiveParts: string[] = [];
     if (activePreset.positivePrompt?.trim()) positiveParts.push(activePreset.positivePrompt.trim());
-    const novelAiCharacterReference = params.characterId
-      ? settings.characterReferences?.[params.characterId]
-      : undefined;
-    const characterFeaturePrompt = novelAiCharacterReference?.novelAiFeaturePromptEnabled !== false
-      ? novelAiCharacterReference?.featurePrompt?.trim()
-      : "";
-    if (characterFeaturePrompt) positiveParts.push(characterFeaturePrompt);
+    if (identityPrompt) positiveParts.push(identityPrompt);
     if (description) positiveParts.push(description);
     const fullPrompt = positiveParts.join(", ");
 
@@ -802,40 +903,100 @@ export async function generateImageFromConfiguredApi(params: {
       mimeType,
       prompt: fullPrompt,
       usedReferenceImage: false,
+      referenceImageCount: 0,
+      referenceImageLabels: [],
       revisedPrompt: data.revisedPrompt,
     };
   }
 
-  // OpenAI 兼容模式：使用当前激活预设（旧配置由存储层迁移后仍保持兼容）
+  // OpenAI 兼容模式：按真实出镜人物分别读取脸部裁切图，让接口知道每张图对应哪位角色。
   const openaiPreset = settings.openaiPresets?.find(preset => preset.id === settings.activeOpenAiPresetId)
     || settings.openaiPresets?.[0];
   const openaiSettings = openaiPreset ? { ...settings, ...openaiPreset } : settings;
   if (!openaiSettings.apiKey.trim() || !openaiSettings.baseUrl.trim() || !openaiSettings.model.trim()) return null;
 
-  const reference = params.characterId ? settings.characterReferences?.[params.characterId] : undefined;
-  // 「非自拍不使用参考图」开关已从生图设置页删除：参考图启用后始终参与生成
-  const shouldUseReference = Boolean(
-    params.useReferenceImage
-    && reference?.assetId
-    && reference.enabled !== false,
-  );
-  const rawReferenceImageDataUrl = shouldUseReference && reference?.assetId
-    ? await getChatImageFromIndexedDB(reference.assetId)
-    : null;
-  throwIfAborted(params.signal);
-  const referenceImageDataUrl = rawReferenceImageDataUrl
-    ? await normalizeReferenceImageForEdit(rawReferenceImageDataUrl, reference?.faceCrop)
-    : null;
-  throwIfAborted(params.signal);
-  const characterPrompt = reference?.featurePrompt?.trim() || "";
+  let referenceSources: ReferenceSource[] = [];
+  const suppliedReferenceImageDataUrl = params.referenceImageDataUrl?.trim() || null;
+  if (suppliedReferenceImageDataUrl) {
+    referenceSources.push({ label: "补充场景参考", dataUrl: suppliedReferenceImageDataUrl });
+  }
+
+  const appendCharacterReference = async (characterId: string) => {
+    const reference = settings.characterReferences?.[characterId];
+    if (!reference?.assetId) return;
+    const dataUrl = await getChatImageFromIndexedDB(reference.assetId);
+    if (dataUrl) {
+      const character = characterById.get(characterId);
+      referenceSources.push({
+        label: character?.name || "角色",
+        dataUrl,
+        crop: reference.faceCrop || DEFAULT_IDENTITY_FACE_CROP,
+      });
+    }
+  };
+
+  {
+    // Identity references are automatic by default; only an explicit per-image opt-out disables them.
+    // Primary character is first. This ensures the current chat speaker's identity remains the anchor.
+    // "current" is a single-speaker shortcut only for one-person images.
+    // Explicit multi-character scenes must retain every participant's identity reference.
+    const referenceCharacterIds = settings.referenceImageMode === "current" && involvedCharacterIds.length <= 1
+      ? involvedCharacterIds.slice(0, 1)
+      : involvedCharacterIds;
+    for (const characterId of referenceCharacterIds) {
+      await appendCharacterReference(characterId);
+      throwIfAborted(params.signal);
+    }
+
+  }
+
+  // 用户本人使用与普通角色相同的身份参考结构，只有明确列入本次出镜名单时才加入。
+  if (includeUserAppearance) {
+    const user = settings.characterReferences?.["__user__"];
+    if (user?.assetId) {
+      const dataUrl = await getChatImageFromIndexedDB(user.assetId);
+      if (dataUrl) referenceSources.splice(suppliedReferenceImageDataUrl ? 1 : 0, 0, {
+        label: "用户本人", dataUrl, crop: user.faceCrop || DEFAULT_IDENTITY_FACE_CROP,
+      });
+    }
+  }
+
+  let collageLegend = "";
+  if (settings.referenceImageMode === "collage" && referenceSources.length > 1) {
+    const collage = await buildReferenceCollage(referenceSources);
+    if (collage) {
+      collageLegend = collage.legend;
+      referenceSources = [{ label: `多人身份参考拼图（${collage.legend}）`, dataUrl: collage.dataUrl }];
+    }
+  }
+
+  const limitedSources = referenceSources.slice(0, 16);
+  const referenceImageDataUrls: string[] = [];
+  const referenceLabels: string[] = [];
+  for (const source of limitedSources) {
+    throwIfAborted(params.signal);
+    const normalized = await normalizeReferenceImageForEdit(source.dataUrl, source.crop);
+    referenceImageDataUrls.push(normalized);
+    referenceLabels.push(source.label);
+  }
+
+  const referenceMapPrompt = referenceLabels.length
+    ? [
+        "【身份参考图对应关系】",
+        ...(collageLegend
+          ? [`参考图1是多人身份参考拼图，编号对应：${collageLegend}。只按编号参考对应人物的脸，不要互换、复制或融合不同角色的身份。`]
+          : referenceLabels.map((label, index) => `参考图${index + 1}对应：${label}。只参考该人物的身份特征，不代表固定服装或固定构图。`)),
+        "每位出镜人物都必须对应自己的参考图，不要互换、复制或融合不同角色的脸。"
+      ].join("\n")
+    : "";
   const prompt = mergePrompt(
-    characterPrompt ? `${description}\n\n【角色固定外观】${characterPrompt}` : description,
+    mergePrompt(description, [identityPrompt, referenceMapPrompt].filter(Boolean).join("\n")),
     openaiSettings.extraPrompt,
   );
 
   const data = openaiSettings.requestMode === "direct"
-    ? await generateImageDirect({ settings: openaiSettings, prompt, referenceImageDataUrl, signal: params.signal })
-    : await generateImageViaServerOrProxy({ settings: openaiSettings, prompt, referenceImageDataUrl, signal: params.signal });
+    ? await generateImageDirect({ settings: openaiSettings, prompt, referenceImageDataUrls, signal: params.signal })
+    : await generateImageViaServerOrProxy({ settings: openaiSettings, prompt, referenceImageDataUrls, signal: params.signal });
 
   throwIfAborted(params.signal);
   const mimeType = data.mimeType || "image/png";
@@ -849,9 +1010,107 @@ export async function generateImageFromConfiguredApi(params: {
     blob,
     mimeType,
     prompt,
-    usedReferenceImage: Boolean(referenceImageDataUrl),
+    usedReferenceImage: referenceImageDataUrls.length > 0,
+    referenceImageCount: referenceImageDataUrls.length,
+    referenceImageLabels: referenceLabels,
     revisedPrompt: data.revisedPrompt,
   };
+}
+
+
+type ImageGenerationCallRecord = {
+  id: string;
+  startedAt: string;
+  durationMs: number;
+  appId?: string;
+  provider: string;
+  model: string;
+  participantIds: string[];
+  participantNames: string[];
+  referenceImageMode: string;
+  usedReferenceImage: boolean;
+  referenceImageCount?: number;
+  referenceImageLabels?: string[];
+  prompt: string;
+  status: "success" | "failed" | "skipped";
+  error?: string;
+};
+
+const IMAGE_GENERATION_CALLS_KEY = "ai_phone_image_generation_calls_v1";
+
+/** Local, bounded diagnostics for image requests. API credentials and request headers are never stored. */
+export function loadImageGenerationCallRecords(): ImageGenerationCallRecord[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const value = JSON.parse(window.localStorage.getItem(IMAGE_GENERATION_CALLS_KEY) || "[]");
+    return Array.isArray(value) ? value.slice(0, 80) as ImageGenerationCallRecord[] : [];
+  } catch {
+    return [];
+  }
+}
+
+export function clearImageGenerationCallRecords(): void {
+  if (typeof window !== "undefined") window.localStorage.removeItem(IMAGE_GENERATION_CALLS_KEY);
+}
+
+function saveImageGenerationCallRecord(record: ImageGenerationCallRecord): void {
+  if (typeof window === "undefined") return;
+  try {
+    const next = [record, ...loadImageGenerationCallRecords()].slice(0, 80);
+    window.localStorage.setItem(IMAGE_GENERATION_CALLS_KEY, JSON.stringify(next));
+    window.dispatchEvent(new Event("image-generation-diagnostics-updated"));
+  } catch (error) {
+    console.warn("[ImageGeneration] diagnostics write failed", error);
+  }
+}
+
+export async function generateImageFromConfiguredApi(params: Parameters<typeof generateImageFromConfiguredApiInternal>[0]): Promise<ImageGenerationResult | null> {
+  const started = Date.now();
+  const startedAt = new Date(started).toISOString();
+  const settings = params.settings ?? loadImageGenerationSettings();
+  const characters = loadCharacters();
+  const ids = Array.from(new Set([
+    ...(params.participantIds ?? []),
+    ...(params.characterIds ?? []),
+    ...(params.characterId ? [params.characterId] : []),
+  ]));
+  const participantIds = ids.slice(0, 16);
+  const participantNames = participantIds.map(id => id === "__user__" ? "用户本人" : characters.find(item => item.id === id)?.name || id);
+  const baseRecord: Omit<ImageGenerationCallRecord, "durationMs" | "status" | "prompt" | "usedReferenceImage"> = {
+    id: "image-call-" + started.toString(36) + "-" + Math.random().toString(36).slice(2, 8),
+    startedAt,
+    appId: params.appId,
+    provider: settings.provider || "unknown",
+    model: settings.provider === "novelai"
+      ? settings.novelai?.presets?.find(item => item.id === settings.novelai?.activePresetId)?.model || settings.novelai?.presets?.[0]?.model || "unknown"
+      : settings.openaiPresets?.find(item => item.id === settings.activeOpenAiPresetId)?.model || settings.openaiPresets?.[0]?.model || settings.model || "unknown",
+    participantIds,
+    participantNames,
+    referenceImageMode: settings.referenceImageMode || "automatic",
+  };
+  try {
+    const result = await generateImageFromConfiguredApiInternal(params);
+    saveImageGenerationCallRecord({
+      ...baseRecord,
+      durationMs: Date.now() - started,
+      status: result ? "success" : "skipped",
+      prompt: result?.prompt?.slice(0, 6000) || params.description.slice(0, 6000),
+      usedReferenceImage: result?.usedReferenceImage === true,
+      referenceImageCount: result?.referenceImageCount,
+      referenceImageLabels: result?.referenceImageLabels,
+    });
+    return result;
+  } catch (error) {
+    saveImageGenerationCallRecord({
+      ...baseRecord,
+      durationMs: Date.now() - started,
+      status: "failed",
+      prompt: params.description.slice(0, 6000),
+      usedReferenceImage: Boolean(params.referenceImageDataUrl || params.useReferenceImage),
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+    });
+    throw error;
+  }
 }
 
 export function generatedImageFilename(description: string, mimeType = "image/png"): string {

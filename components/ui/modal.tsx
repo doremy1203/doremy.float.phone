@@ -4,6 +4,19 @@ import type { ReactNode } from "react";
 import { useState, useEffect } from "react";
 import { type LucideIcon, X, Check } from "lucide-react";
 
+function usePhoneSwipeBackClose(onClose: () => void) {
+  useEffect(() => {
+    const handleSwipeBack = (event: Event) => {
+      if (event.defaultPrevented) return;
+      event.preventDefault();
+      onClose();
+    };
+    // Capture lets a topmost modal intercept the gesture before the underlying page.
+    document.addEventListener("phone-swipe-back", handleSwipeBack, true);
+    return () => document.removeEventListener("phone-swipe-back", handleSwipeBack, true);
+  }, [onClose]);
+}
+
 /* ── Confirm Dialog (center) ── */
 export type ConfirmDialogProps = {
   title: string;
@@ -30,6 +43,7 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  usePhoneSwipeBackClose(onCancel);
   return (
     <div className={`modal-overlay ${overlayClassName ?? ""}`} data-ui="modal" onClick={onCancel}>
       <div className={`modal-dialog ${dialogClassName ?? ""}`} data-ui="modal-dialog" onClick={(e) => e.stopPropagation()}>
@@ -65,6 +79,7 @@ export function ContentDialog({
   onCancel,
   children,
 }: ContentDialogProps) {
+  usePhoneSwipeBackClose(onCancel);
   return (
     <div className="modal-overlay" data-ui="modal" onClick={onCancel}>
       <div className="modal-dialog" data-ui="modal-dialog" onClick={(e) => e.stopPropagation()}>
@@ -97,6 +112,7 @@ export function BottomSheet({
   onDone,
   children,
 }: BottomSheetProps) {
+  usePhoneSwipeBackClose(onClose);
   // modal-overlay 默认垂直居中（那是给 modal-dialog 用的）；底部抽屉必须叠加
   // modal-overlay-bottom 贴到底，否则 .modal-sheet 那套「只有上圆角 + 向上滑入」
   // 的样式会浮在屏幕中间、下沿方角悬空，看着就像坏了。
@@ -136,6 +152,7 @@ export function TextExpandModal({
   className?: string;
   onClose: () => void;
 }) {
+  usePhoneSwipeBackClose(onClose);
   const [draft, setDraft] = useState(value);
 
   useEffect(() => { setDraft(value); }, [value]);

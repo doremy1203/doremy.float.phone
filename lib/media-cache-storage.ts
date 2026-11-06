@@ -1,4 +1,5 @@
 import Dexie from "dexie";
+import { loadPhotoWallState } from "./photo-wall-storage";
 
 // ── Database ─────────────────────────────────────
 
@@ -8,6 +9,8 @@ interface MediaCacheEntry {
     mimeType: string;
     mediaCategory: "audio" | "image" | "video" | "file";
     createdAt: number;
+    /** Persistent references held by features; generic media cleanup must not remove these. */
+    retainedBy?: string[];
 }
 
 class MediaCacheDatabase extends Dexie {
@@ -112,10 +115,46 @@ export async function loadMediaBlob(ref: string): Promise<{ blob: Blob; mimeType
     return { blob: entry.blob, mimeType: entry.mimeType, category: entry.mediaCategory };
 }
 
+/** Keep a media ref alive while a persistent feature references it. */
+export async function retainMediaRef(ref: string | undefined, owner: string): Promise<void> {
+    if (!ref || !ref.startsWith(MEDIA_STORE_PROTOCOL) || !owner.trim()) return;
+    const table = getDb().entries;
+    const id = ref.slice(MEDIA_STORE_PROTOCOL.length);
+    const entry = await table.get(id);
+    if (!entry) throw new Error("媒体文件不存在，无法建立引用保护");
+    await table.update(id, { retainedBy: Array.from(new Set([...(entry.retainedBy ?? []), owner.trim()])) });
+}
+
+/** Release one feature's reference. Deletion remains an explicit separate operation. */
+export async function releaseMediaRef(ref: string | undefined, owner: string): Promise<void> {
+    if (!ref || !ref.startsWith(MEDIA_STORE_PROTOCOL) || !owner.trim()) return;
+    const table = getDb().entries;
+    const id = ref.slice(MEDIA_STORE_PROTOCOL.length);
+    const entry = await table.get(id);
+    if (!entry) return;
+    await table.update(id, { retainedBy: (entry.retainedBy ?? []).filter(value => value !== owner.trim()) });
+}
+
+export async function isMediaRefRetained(ref: string | undefined): Promise<boolean> {
+    if (!ref || !ref.startsWith(MEDIA_STORE_PROTOCOL)) return false;
+    const entry = await getDb().entries.get(ref.slice(MEDIA_STORE_PROTOCOL.length));
+    return Boolean(entry?.retainedBy?.length);
+}
+
 export async function deleteMediaRef(ref: string | undefined): Promise<void> {
     if (!ref || !ref.startsWith(MEDIA_STORE_PROTOCOL)) return;
+    const table = getDb().entries;
     const id = ref.slice(MEDIA_STORE_PROTOCOL.length);
-    await getDb().entries.delete(id);
+    const entry = await table.get(id);
+    // Old photo-wall backgrounds predate retainedBy, so check the persistent source of truth too.
+    // This keeps a background safe even if the photo-wall screen has not been opened since upgrade.
+    let referencedByPhotoWall = false;
+    try {
+        const state = loadPhotoWallState();
+        referencedByPhotoWall = state.wallBackgroundRef === ref || state.photos.some(photo => photo.mediaRef === ref);
+    } catch { /* If a damaged storage record cannot be read, still honor explicit retention metadata. */ }
+    if (entry?.retainedBy?.length || referencedByPhotoWall) return;
+    await table.delete(id);
 }
 
 export async function loadMediaObjectUrl(ref: string): Promise<string | null> {
@@ -133,6 +172,8 @@ export type MediaCacheSummary = {
     bytes: number;
     category: MediaCacheEntry["mediaCategory"];
     createdAt: number;
+    /** Explicit owners of durable feature references, e.g. photo-wall-background. */
+    retainedBy: string[];
 };
 
 /** 逐条流式读取 id/大小/类别——blob.size 只读元数据，不会把媒体内容载入内存。 */
@@ -144,6 +185,7 @@ export async function listMediaCacheSummaries(): Promise<MediaCacheSummary[]> {
             bytes: entry.blob?.size ?? 0,
             category: entry.mediaCategory,
             createdAt: entry.createdAt,
+            retainedBy: entry.retainedBy ?? [],
         });
     });
     return out;

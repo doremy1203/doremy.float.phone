@@ -1,5 +1,7 @@
 "use client";
 
+import { isCompatibilityFeatureEnabled } from "../device-compatibility";
+
 /**
  * 小组件 ↔ 安卓壳的桥。
  *
@@ -15,19 +17,26 @@
  * 所有方法在非壳环境安全降级为 no-op / false。
  */
 
-import { loadWidgetConfig } from "./storage";
+import { loadWidgetConfig, loadWidgetData, loadWidgetProfileData, loadWidgetProfiles } from "./storage";
+import { injectWidgetCss, renderWidgetHtml } from "./template";
+import { loadCharacters } from "../character-storage";
 
 type PhoneWidgetBridge = {
   /** 是否支持小组件（老 APK 没有） */
   isSupported?: () => boolean;
   /** 提交渲染数据：HTML + 尺寸。原生据此重画并刷新桌面 */
   update?: (html: string, widthDp: number, heightDp: number, scale: number) => boolean;
+  updateProfile?: (profileId: string, html: string, widthDp: number, heightDp: number, scale: number) => boolean;
+  deleteProfile?: (profileId: string) => boolean;
+  /** 保存 profile 列表供系统添加小组件时选择 */
+  setProfiles?: (json: string) => boolean;
   /** 让原生立刻重画一次（用上次缓存的 HTML） */
   refresh?: () => boolean;
   /** 是否已添加小组件到桌面（未添加时引导用户去加） */
   isPlaced?: () => boolean;
   /** 跳到系统的「添加小组件」界面 */
   requestPin?: () => boolean;
+  requestPinProfile?: (profileId: string) => boolean;
   /**
    * 小组件渲染诊断（**新壳才有**，旧壳没有这个方法）。
    *
@@ -53,7 +62,7 @@ export type WidgetDiagnostics = {
 };
 
 function getBridge(): PhoneWidgetBridge | null {
-  if (typeof window === "undefined") return null;
+  if (typeof window === "undefined" || !isCompatibilityFeatureEnabled("widgets")) return null;
   const api = (window as unknown as { PhoneWidget?: PhoneWidgetBridge }).PhoneWidget;
   return api ?? null;
 }
@@ -73,6 +82,23 @@ export function hasWidgetBridge(): boolean {
  *
  * @returns 是否成功送达（非壳环境、老壳都返回 false）
  */
+export function pushWidgetProfileHtml(
+  profileId: string,
+  html: string,
+  size: { widthDp: number; heightDp: number; scale: number },
+): boolean {
+  const bridge = getBridge();
+  if (!profileId.trim() || !bridge?.updateProfile) return false;
+  try { return bridge.updateProfile(profileId, html, size.widthDp, size.heightDp, size.scale) === true; }
+  catch { return false; }
+}
+
+export function deleteWidgetProfileNative(profileId: string): boolean {
+  const bridge = getBridge();
+  if (!profileId.trim() || !bridge?.deleteProfile) return false;
+  try { return bridge.deleteProfile(profileId) === true; } catch { return false; }
+}
+
 export function pushWidgetHtml(
   html: string,
   size: { widthDp: number; heightDp: number; scale: number },
@@ -106,6 +132,13 @@ export function isWidgetPlaced(): boolean {
   } catch {
     return false;
   }
+}
+
+/** Request adding a home-screen instance tied to an independent widget profile. */
+export function requestPinWidgetProfile(profileId: string): boolean {
+  const bridge = getBridge();
+  if (!profileId.trim() || !bridge?.requestPinProfile) return false;
+  try { return bridge.requestPinProfile(profileId) === true; } catch { return false; }
 }
 
 /** 拉起系统的「添加小组件」引导。 */
@@ -144,14 +177,28 @@ export function readWidgetDiagnostics(): WidgetDiagnostics | null {
  *
  * @param html 已经渲染好的 HTML（调用方用 renderWidgetHtml 生成）
  */
+export function syncWidgetProfilesToNative(): void {
+  const characters = loadCharacters();
+  const profiles = loadWidgetProfiles();
+  const bridge = getBridge();
+  try {
+    bridge?.setProfiles?.(JSON.stringify(profiles.map(profile => ({ id: profile.id, name: profile.name }))));
+  } catch { /* 老壳没有这个方法 */ }
+  for (const profile of profiles) {
+    const character = characters.find(item => item.id === profile.characterId);
+    const profileData = loadWidgetProfileData(profile.id);
+    const data = (profileData?.characterId === profile.characterId ? profileData : null) ?? loadWidgetData(profile.characterId) ?? {
+      characterId: profile.characterId, text: "还没有新的留言", status: "", avatar: character?.avatar ?? "",
+      updatedAt: new Date().toISOString(), source: "manual" as const,
+    };
+    const html = injectWidgetCss(renderWidgetHtml(profile.template, data, character?.name ?? "角色", "你"), profile.customCss);
+    pushWidgetProfileHtml(profile.id, html, { widthDp: profile.widthDp, heightDp: profile.heightDp, scale: profile.scale });
+  }
+}
+
 export function syncWidgetToNative(html: string): boolean {
   const config = loadWidgetConfig();
-  if (!config.enabled) return false;
-  // 不再要求「有内容」才推送：html 已经是渲染好的成品（没内容时调用方给的是
-  // 占位模板）。卡在这里会让小组件退回显示应用图标，而不是模板本身。
-  return pushWidgetHtml(html, {
-    widthDp: config.widthDp,
-    heightDp: config.heightDp,
-    scale: config.scale,
-  });
+  const defaultOk = config.enabled ? pushWidgetHtml(html, { widthDp: config.widthDp, heightDp: config.heightDp, scale: config.scale }) : false;
+  syncWidgetProfilesToNative();
+  return defaultOk;
 }

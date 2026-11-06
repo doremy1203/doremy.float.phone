@@ -185,11 +185,6 @@ export function dbPutMessage(msg: ChatMessage): void {
     chatDb.messages.put(msg).catch(err => console.warn("[ChatDB] put message failed:", err));
 }
 
-/** Awaited single-message persistence for critical flows such as notification-reply ACK. */
-export async function dbPutMessageAndWait(msg: ChatMessage): Promise<void> {
-    await chatDb.messages.put(msg);
-}
-
 export function dbPutMessages(msgs: ChatMessage[]): void {
     chatDb.messages.bulkPut(msgs).catch(err => console.warn("[ChatDB] bulkPut messages failed:", err));
 }

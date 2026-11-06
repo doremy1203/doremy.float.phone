@@ -16,10 +16,11 @@ import {
     updateMessageMediaData,
     createResponseBatchId,
     getLatestCharacterStateValues,
+    resolveSessionCharacterId,
 } from "./chat-storage";
-import type { ChatMessage, StateValue } from "./chat-storage";
+import type { ChatChannel, ChatMessage, StateValue } from "./chat-storage";
 import { generateChatCompletion, flattenCompletionResult } from "./chat-engine";
-import { armFollowUpBailout, armIdleReconnectBailout, cancelBailoutKey, cancelBailoutPrefix, cancelFollowUpBailout, startBailoutHeartbeat } from "./push-bailout-client";
+import { armFollowUpBailout, armIdleReconnectBailout, cancelBailoutKey, cancelBailoutPrefix, cancelFollowUpBailout, isCharacterCoPresentInLifeScene, startBailoutHeartbeat } from "./push-bailout-client";
 import { hasAccountPushSubscription, isWithinPushQuietHours } from "./push-client";
 import {
     IDLE_RECONNECT_MAX_CONSECUTIVE,
@@ -30,11 +31,14 @@ import {
     type IdleReconnectRule,
 } from "./idle-reconnect-storage";
 import { loadFollowUpConfig } from "./settings-storage";
+import { beginTurn, type TurnHandle } from "./turn-coordinator";
 import { parseAIResponse } from "./rich-message-parser";
 import type { ParsedMessagePart } from "./rich-message-parser";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "./chat-status-region";
 import { isKnownStickerLabel } from "./sticker-data";
 import { loadCharacters } from "./character-storage";
+import { loadVirtualLifeState, saveVirtualLifeState } from "./life/life-storage";
+import { getActorClock, getCurrentActorSchedule, resolveActorLifeNow, settleActorTimelineToNow } from "./life/life-runtime";
 import { bgDelay, bgSetInterval, bgSetTimeout } from "./bg-timer";
 import { dispatchChatMessageNotice } from "./chat-notification-events";
 import { settleShoppingPaymentRequest } from "./shopping-payment-request";
@@ -57,6 +61,10 @@ import {
     type MenstrualPeriodCareEvent,
 } from "./menstrual-storage";
 
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
 // ── Constants ──────────────────────────────────────────────
 const MAX_FOLLOW_UPS = 10;
 const POLL_INTERVAL_MS = 3000; // check every 3 s
@@ -64,13 +72,33 @@ const PERIOD_CARE_POLL_INTERVAL_MS = 60_000;
 const BACKGROUND_MESSAGE_STAGGER_MS = 800;
 const SCHEDULED_OUTBOX_GRACE_MS = 8000;
 
+
+// 睡眠状态统一拦截本地后台主动消息。只检查已有生活状态，不新建角色状态/记忆。
+function isLifeCharacterSleeping(sessionId: string): boolean {
+    if (typeof window === "undefined") return false;
+    const session = loadChatSessions().find(item => item.id === sessionId);
+    if (!session || session.isGroup) return false;
+    const characterId = resolveSessionCharacterId(session);
+    const character = characterId ? loadCharacters().find(item => item.id === characterId) : undefined;
+    if (!character) return false;
+    const loaded = loadVirtualLifeState();
+    if (!loaded.settings.enabled || !loaded.settings.allowCharactersToStaySilent) return false;
+    const settled = settleActorTimelineToNow(loaded, "character", character.id);
+    const life = settled === loaded ? loaded : saveVirtualLifeState(settled);
+    const clock = getActorClock(life, "character", character.id);
+    const now = resolveActorLifeNow(clock);
+    const schedule = getCurrentActorSchedule(life, "character", character.id, now);
+    const presence = life.actorStates.find(actor => actor.ownerType === "character" && actor.ownerId === character.id);
+    return /睡眠|睡觉|入睡|午休/.test((presence?.activity || "") + " " + (schedule?.title || ""));
+}
+
 function resolveFollowUpSenderName(sessionId: string): string {
     const sess = loadChatSessions().find(s => s.id === sessionId);
     if (!sess) return "角色";
     if (sess.isGroup) return sess.groupName?.trim() || "群聊";
     const alias = sess.alias?.trim();
     if (alias) return alias;
-    return loadCharacters().find(character => character.id === sess.contactId)?.name?.trim() || "角色";
+    return loadCharacters().find(character => character.id === resolveSessionCharacterId(sess))?.name?.trim() || "角色";
 }
 
 function resolveTimedWakeElapsedMinutes(sched: TimedWakeSchedule, history: ChatMessage[], atMs: number): number {
@@ -94,6 +122,9 @@ const backgroundReplyFiringSet = new Set<string>();
 // 聊天室挂载时查询它：中途进入也能立刻显示「正在输入」，补上事件错过的缝
 const backgroundGeneratingSessions = new Set<string>();
 const cancelledBackgroundSessions = new Set<string>();
+// Background completions have their own request lifecycle. Keep the controller so a
+// newer user turn can abort the actual provider request, not merely mark its result stale.
+const backgroundAbortControllers = new Map<string, AbortController>();
 
 /** 该会话是否正有后台回复在生成（聊天室中途挂载时用来恢复输入中状态）。 */
 export function isBackgroundReplyGenerating(sessionId: string): boolean {
@@ -101,8 +132,10 @@ export function isBackgroundReplyGenerating(sessionId: string): boolean {
 }
 
 export function cancelBackgroundGeneration(sessionId: string): void {
-    if (!backgroundGeneratingSessions.has(sessionId) && !firingSet.has(sessionId)) return;
+    const controller = backgroundAbortControllers.get(sessionId);
+    if (!backgroundGeneratingSessions.has(sessionId) && !firingSet.has(sessionId) && !controller) return;
     cancelledBackgroundSessions.add(sessionId);
+    controller?.abort();
     if (firingSet.has(sessionId)) cancelledWhileFiring.add(sessionId);
     cancelFollowUpBailout(sessionId);
 }
@@ -169,6 +202,11 @@ export function stopFollowUpService() {
 /** Schedule a follow-up for a session (called by ChatRoom after AI replies).
  *  Purely anxiety-driven: no anxiety field or below threshold → no follow-up. */
 export function scheduleFollowUp(sessionId: string, count: number, stateValues?: StateValue[]) {
+    if (isLifeCharacterSleeping(sessionId)) {
+        clearFollowUpSchedule(sessionId);
+        cancelFollowUpBailout(sessionId);
+        return;
+    }
     const config = loadFollowUpConfig();
 
     if (!stateValues || stateValues.length === 0) {
@@ -206,13 +244,16 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
 
 export async function requestBackgroundChatReply(
     sessionId: string,
-    options?: { ephemeralSystemNote?: string },
+    options?: { ephemeralSystemNote?: string; channel?: ChatChannel; appId?: string; appTags?: string[] },
 ): Promise<{ ok: boolean; skipped?: string }> {
     if (backgroundReplyFiringSet.has(sessionId)) return { ok: false, skipped: "already_running" };
     const session = loadChatSessions().find(s => s.id === sessionId);
     if (!session) return { ok: false, skipped: "missing_session" };
+    if (isLifeCharacterSleeping(sessionId)) return { ok: false, skipped: "character_sleeping" };
 
     backgroundReplyFiringSet.add(sessionId);
+    const backgroundController = new AbortController();
+    backgroundAbortControllers.set(sessionId, backgroundController);
     try {
         const latestMessages = loadChatMessages(session.id);
         backgroundGeneratingSessions.add(session.id);
@@ -221,32 +262,41 @@ export async function requestBackgroundChatReply(
             session,
             latestMessages,
             {
-                appTags: session.isGroup ? undefined : ["chat", "text"],
+                appId: options?.appId,
+                appTags: options?.appTags ?? (session.isGroup ? undefined : ["chat", "text"]),
+                signal: backgroundController.signal,
                 // 定时查岗等事件可带一句「该怎么回应」，只作用于这一轮
                 ephemeralSystemNote: options?.ephemeralSystemNote,
             },
         );
-        if (isBackgroundGenerationCancelled(session.id)) return { ok: false, skipped: "cancelled" };
+        if (backgroundController.signal.aborted || isBackgroundGenerationCancelled(session.id)) return { ok: false, skipped: "cancelled" };
         const { hasVisible, stateValues } = await saveBackgroundCompletionRounds(
             rounds,
             session.id,
             0,
             undefined,
             latestMessages,
+            { channel: options?.channel },
         );
         if (hasVisible) scheduleFollowUp(session.id, 0, stateValues);
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
         return { ok: true };
-    } catch (error: any) {
+    } catch (error: unknown) {
+        // Aborting because a newer user turn arrived is normal control flow, not an error
+        // to append to the chat (which itself would be an out-of-context late write).
+        if (backgroundController.signal.aborted || isBackgroundGenerationCancelled(sessionId)) {
+            return { ok: false, skipped: "cancelled" };
+        }
         console.error("[BackgroundReply] Error:", error);
         pushChatMessage({
             sessionId,
             role: "system",
-            content: `⚠️ 后台回复失败: ${error?.message || String(error)}`,
+            content: `⚠️ 后台回复失败: ${errorMessage(error)}`,
         });
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId } }));
         return { ok: false };
     } finally {
+        if (backgroundAbortControllers.get(sessionId) === backgroundController) backgroundAbortControllers.delete(sessionId);
         backgroundGeneratingSessions.delete(sessionId);
         cancelledBackgroundSessions.delete(sessionId);
         backgroundReplyFiringSet.delete(sessionId);
@@ -325,7 +375,7 @@ async function saveBackgroundCompletionRounds(
     currentCount: number,
     followUpIndex: number | undefined,
     contextMessages: ChatMessage[],
-    options?: { senderCharacterId?: string; senderName?: string; silent?: boolean },
+    options?: { senderCharacterId?: string; senderName?: string; silent?: boolean; channel?: ChatChannel },
 ): Promise<{ hasVisible: boolean; newCount: number; stateValues: StateValue[] }> {
     let hasVisible = false;
     let newCount = currentCount;
@@ -357,6 +407,40 @@ async function saveBackgroundCompletionRounds(
     return { hasVisible, newCount, stateValues };
 }
 
+// ── 查岗轮询 ──────────────────────────────────────────────
+//
+// 挂在这里而不是另起一套定时器：本服务的 pollSchedules 每 3 秒跑一次，
+// 桌面壳已经把它启动了，查岗只是搭个便车。
+//
+// 两个节流：
+//  · 60 秒才检查一次（查岗间隔是分钟级，3 秒一次纯属浪费）；
+//  · 「上一轮还没跑完」时直接跳过——runCheckIn 会一直等用户在浮层上做决定
+//    （最长 90 秒），不锁的话下一轮又弹一个浮层，两个叠一起根本没法处理。
+const CHECK_IN_POLL_INTERVAL_MS = 60_000;
+let lastCheckInPollAt = 0;
+let checkInPolling = false;
+
+function pollCheckIn(now: number) {
+    if (now - lastCheckInPollAt < CHECK_IN_POLL_INTERVAL_MS) return;
+    lastCheckInPollAt = now;
+    if (checkInPolling) return;
+    checkInPolling = true;
+    // 动态 import：查岗引擎反过来要用本模块的 requestBackgroundChatReply，
+    // 静态 import 会形成循环依赖，运行时解析才是安全的。
+    void import("./screenshot/checkin-engine")
+        .then(async module => {
+            const { hasAnyCheckInEnabled, prepareCheckInService } = await import("./screenshot");
+            if (!hasAnyCheckInEnabled()) return;
+            // App 重启后常驻服务会没掉，而配置里还开着——这时补一次预热。
+            // 只有 App 在前台时才能合法启动前台服务，后台时会失败并等下一轮，
+            // 这是系统限制，不是可以绕过的 bug。
+            prepareCheckInService();
+            await module.pollDueCheckIns();
+        })
+        .catch(() => undefined)
+        .finally(() => { checkInPolling = false; });
+}
+
 function pollSchedules() {
     try {
         const schedules = loadAllFollowUpSchedules();
@@ -374,6 +458,7 @@ function pollSchedules() {
         pollTimedWakeSchedules(now);
         pollMenstrualPeriodCare(now);
         pollIdleReconnect(now);
+        pollCheckIn(now);
     } catch (e) {
         console.error("[FollowUp] pollSchedules error:", e);
     }
@@ -403,12 +488,13 @@ function pollMenstrualPeriodCare(now: number) {
 
     const selectedIds = new Set(config.periodCareCharacterIds);
     const sessions = loadChatSessions()
-        .filter(session => !session.isGroup && selectedIds.has(session.contactId))
+        .filter(session => !session.isGroup && Boolean(resolveSessionCharacterId(session)) && selectedIds.has(resolveSessionCharacterId(session)!))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const latestSessionByCharacter = new Map<string, (typeof sessions)[number]>();
     for (const session of sessions) {
-        if (!latestSessionByCharacter.has(session.contactId)) {
-            latestSessionByCharacter.set(session.contactId, session);
+        const characterId = resolveSessionCharacterId(session);
+        if (characterId && !latestSessionByCharacter.has(characterId)) {
+            latestSessionByCharacter.set(characterId, session);
         }
     }
 
@@ -436,10 +522,15 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
     firingSet.add(sched.sessionId);
     clearFollowUpSchedule(sched.sessionId); // clear before firing
 
+    let turn: TurnHandle | null = null;
     try {
         const sessions = loadChatSessions();
         const session = sessions.find(s => s.id === sched.sessionId);
         if (!session) return;
+        const characterId = resolveSessionCharacterId(session);
+        if (!characterId || isCharacterCoPresentInLifeScene(characterId)) return;
+        turn = beginTurn({ kind: "followup", characterId, sessionId: session.id });
+        if (!turn) return;
 
         const latestMessages = loadChatMessages(session.id);
 
@@ -496,14 +587,14 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
             rounds = await generateBackgroundCompletionRounds(
                 session,
                 messagesWithHint,
-                { followUpCount: count, followUpDelay: sched.delaySec ?? 60, appTags: ["chat", "text", "followup"] },
+                { followUpCount: count, followUpDelay: sched.delaySec ?? 60, appTags: ["chat", "text", "followup"], signal: turn.signal },
             );
         } finally {
             stopBailoutHeartbeat();
         }
 
         // User sent a message while we were waiting for the API — discard result
-        if (cancelledWhileFiring.has(sched.sessionId) || isBackgroundGenerationCancelled(sched.sessionId)) {
+        if (cancelledWhileFiring.has(sched.sessionId) || isBackgroundGenerationCancelled(sched.sessionId) || turn.signal.aborted || !turn.isCurrent()) {
             console.log(`[FollowUp] Cancelled during API call, discarding result for session=${sched.sessionId}`);
             cancelledWhileFiring.delete(sched.sessionId);
             return;
@@ -523,15 +614,20 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
         // Notify any mounted UI
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
 
-    } catch (error: any) {
+    } catch (error: unknown) {
+        if (turn?.signal.aborted) {
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: sched.sessionId } }));
+            return;
+        }
         console.error(`[FollowUp] Error:`, error);
         pushChatMessage({
             sessionId: sched.sessionId,
             role: "system",
-            content: `⚠️ 追发失败: ${error?.message || String(error)}`,
+            content: `⚠️ 追发失败: ${errorMessage(error)}`,
         });
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: sched.sessionId } }));
     } finally {
+        turn?.end();
         backgroundGeneratingSessions.delete(sched.sessionId);
         cancelledBackgroundSessions.delete(sched.sessionId);
         firingSet.delete(sched.sessionId);
@@ -630,9 +726,20 @@ async function awaitServerGenerated(
 
 async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
     idleReconnectFiringSet.add(rule.id);
+    let turn: TurnHandle | null = null;
     try {
         const session = loadChatSessions().find(s => s.id === rule.sessionId);
-        if (!session || session.isGroup || session.contactId !== rule.characterId) return;
+        if (!session || session.isGroup || resolveSessionCharacterId(session) !== rule.characterId) return;
+        if (isLifeCharacterSleeping(session.id)) {
+            void cancelBailoutPrefix(`idle:${rule.id}:`);
+            return;
+        }
+        if (isCharacterCoPresentInLifeScene(rule.characterId)) {
+            void cancelBailoutPrefix(`idle:${rule.id}:`);
+            return;
+        }
+        turn = beginTurn({ kind: "idle_reconnect", characterId: rule.characterId, sessionId: session.id });
+        if (!turn) return;
 
         // 先让服务端跑，别和它抢：它已经生成并推送过这一轮就不必再本地跑第二遍，
         // 否则通知栏（服务端那次输出）和聊天里（本地这次输出）会是两套不同的内容。
@@ -642,6 +749,7 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
             return;
         }
+        if (turn.signal.aborted || !turn.isCurrent()) return;
 
         // 服务端没交付（无订阅 / 没跑成 / 宽限期到了），本地接手这次生成。
         // 先撤销服务端同规则排队任务；生成成功后才记连发次数。
@@ -659,13 +767,23 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             {
                 appTags: ["chat", "text", "idle_wake"],
                 timedWakeElapsedMinutes: elapsedMinutes,
+                signal: turn.signal,
             },
         );
 
-        if (isBackgroundGenerationCancelled(session.id)) {
+        if (isBackgroundGenerationCancelled(session.id) || turn.signal.aborted || !turn.isCurrent()) {
             const intervalMs = Math.max(1, rule.intervalMinutes) * 60_000;
             const suppressed = suppressIdleReconnectUntil(rule.id, Date.now() + intervalMs);
             if (suppressed) void armIdleReconnectBailout(suppressed);
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
+            return;
+        }
+
+        // A proactive generation can take tens of seconds. Re-check the source
+        // conversation immediately before committing it: if the user has returned
+        // while the model was thinking, discard the stale unsolicited message.
+        const newestUserMessage = [...loadChatMessages(session.id)].reverse().find(message => message.role === "user");
+        if (!newestUserMessage || Date.parse(newestUserMessage.createdAt) > lastUserAt || isWithinPushQuietHours(Date.now())) {
             window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
             return;
         }
@@ -685,9 +803,14 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
         const refreshed = loadIdleReconnectRules().find(item => item.id === rule.id);
         if (refreshed) void armIdleReconnectBailout(refreshed);
     } catch (error: unknown) {
+        if (turn?.signal.aborted) {
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: rule.sessionId } }));
+            return;
+        }
         console.error("[IdleReconnect] Error:", error);
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: rule.sessionId } }));
     } finally {
+        turn?.end();
         backgroundGeneratingSessions.delete(rule.sessionId);
         cancelledBackgroundSessions.delete(rule.sessionId);
         idleReconnectFiringSet.delete(rule.id);
@@ -700,10 +823,21 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
     // 本地接手触发：撤销服务端兜底预约（生成中被杀由发送保险单接管）
     cancelBailoutKey(`timedwake:${sched.id}`);
 
+    let turn: TurnHandle | null = null;
     try {
         const sessions = loadChatSessions();
         const session = sessions.find(s => s.id === sched.sessionId);
-        if (!session || session.contactId !== sched.characterId) return;
+        if (!session || resolveSessionCharacterId(session) !== sched.characterId) return;
+        if (isLifeCharacterSleeping(session.id)) {
+            void cancelBailoutKey(`timedwake:${sched.id}`);
+            return;
+        }
+        if (isCharacterCoPresentInLifeScene(sched.characterId)) {
+            void cancelBailoutKey(`timedwake:${sched.id}`);
+            return;
+        }
+        turn = beginTurn({ kind: "timed_wake", characterId: sched.characterId, sessionId: session.id });
+        if (!turn) return;
 
         const latestMessages = loadChatMessages(session.id);
         const elapsedMinutes = resolveTimedWakeElapsedMinutes(sched, latestMessages, Date.now());
@@ -732,10 +866,11 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
                 appTags: ["chat", "text", wakeTag],
                 timedWakeElapsedMinutes: elapsedMinutes,
                 timedWakeIntent: sched.intent,
+                signal: turn.signal,
             },
         );
 
-        if (isBackgroundGenerationCancelled(session.id)) {
+        if (isBackgroundGenerationCancelled(session.id) || turn.signal.aborted || !turn.isCurrent()) {
             window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
             return;
         }
@@ -754,16 +889,21 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
         }
 
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
-    } catch (error: any) {
+    } catch (error: unknown) {
+        if (turn?.signal.aborted) {
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: sched.sessionId } }));
+            return;
+        }
         console.error("[TimedWake] Error:", error);
         const failureLabel = sched.source === "user" ? "定时主动消息" : "稍后主动联系";
         pushChatMessage({
             sessionId: sched.sessionId,
             role: "system",
-            content: `⚠️ ${failureLabel}失败: ${error?.message || String(error)}`,
+            content: `⚠️ ${failureLabel}失败: ${errorMessage(error)}`,
         });
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: sched.sessionId } }));
     } finally {
+        turn?.end();
         backgroundGeneratingSessions.delete(sched.sessionId);
         cancelledBackgroundSessions.delete(sched.sessionId);
         timedWakeFiringSet.delete(sched.id);
@@ -778,11 +918,15 @@ async function fireMenstrualPeriodCare(input: {
     const firingKey = `${input.characterId}:${input.event.cycleKey}`;
     periodCareFiringSet.add(firingKey);
 
+    let turn: TurnHandle | null = null;
     try {
         const sessions = loadChatSessions();
         const session = sessions.find(s => s.id === input.sessionId);
-        if (!session || session.isGroup || session.contactId !== input.characterId) return;
+        if (!session || session.isGroup || resolveSessionCharacterId(session) !== input.characterId) return;
         if (hasMenstrualPeriodCareTriggered(input.characterId, input.event.cycleKey)) return;
+        if (isCharacterCoPresentInLifeScene(input.characterId)) return;
+        turn = beginTurn({ kind: "period_care", characterId: input.characterId, sessionId: session.id });
+        if (!turn) return;
 
         const latestMessages = loadChatMessages(session.id);
 
@@ -796,10 +940,11 @@ async function fireMenstrualPeriodCare(input: {
             {
                 appTags: ["chat", "text", "period_care"],
                 periodCareContext: input.event.context,
+                signal: turn.signal,
             },
         );
 
-        if (isBackgroundGenerationCancelled(session.id)) {
+        if (isBackgroundGenerationCancelled(session.id) || turn.signal.aborted || !turn.isCurrent()) {
             window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
             return;
         }
@@ -824,15 +969,20 @@ async function fireMenstrualPeriodCare(input: {
         }
 
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
-    } catch (error: any) {
+    } catch (error: unknown) {
+        if (turn?.signal.aborted) {
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: input.sessionId } }));
+            return;
+        }
         console.error("[PeriodCare] Error:", error);
         pushChatMessage({
             sessionId: input.sessionId,
             role: "system",
-            content: `⚠️ 经期关心失败: ${error?.message || String(error)}`,
+            content: `⚠️ 经期关心失败: ${errorMessage(error)}`,
         });
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: input.sessionId } }));
     } finally {
+        turn?.end();
         backgroundGeneratingSessions.delete(input.sessionId);
         cancelledBackgroundSessions.delete(input.sessionId);
         periodCareFiringSet.delete(firingKey);
@@ -969,6 +1119,8 @@ export async function parseAndSaveResponse(
          *  tool_call（标记原文，组装器原样进上下文、气泡隐藏）+ tool_notice
          *  （可见灰条），与小手机内直接调用快捷动作的显示一致 */
         shortcutMarker?: { text: string; insertAt: number; name: string };
+        /** 消息来源（call_end / call / chat 等）；只做追溯，不参与通话折叠。 */
+        channel?: ChatChannel;
     },
 ): Promise<{ hasVisible: boolean; newCount: number; stateValues: StateValue[] }> {
     const responseBatchId = options?.responseBatchId || createResponseBatchId();
@@ -977,7 +1129,7 @@ export async function parseAndSaveResponse(
     void contextMessages;
     const sessions = loadChatSessions();
     const sess = sessions.find(s => s.id === sessionId);
-    const previousState = sess && !sess.isGroup ? getLatestCharacterStateValues(sess.contactId) : [];
+    const previousState = sess && !sess.isGroup ? getLatestCharacterStateValues(resolveSessionCharacterId(sess) || "") : [];
 
     const { parts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(rawText, previousState);
 
@@ -1016,7 +1168,7 @@ export async function parseAndSaveResponse(
         if (p.mediaType === "video_call") { triggerCall = "video"; continue; }
         // 「丢弃角色输出的无效表情包」开关（主动消息路径）
         if (p.mediaType === "sticker" && sess?.discardInvalidStickers === true) {
-            const senderIds = sess.isGroup ? (sess.participantIds ?? []) : [sess.contactId];
+            const senderIds = sess.isGroup ? (sess.participantIds ?? []) : (resolveSessionCharacterId(sess) ? [resolveSessionCharacterId(sess)!] : []);
             if (!isKnownStickerLabel(p.mediaData?.label || "", senderIds)) continue;
         }
         if (p.mediaType === "accept_red_packet" || p.mediaType === "decline_red_packet"
@@ -1042,6 +1194,7 @@ export async function parseAndSaveResponse(
     if (triggerCall) {
         const callLabel = triggerCall === "voice" ? "语音通话" : "视频通话";
         pushChatMessage({
+            channel: options?.channel,
             sessionId,
             role: "system",
             content: `[我发起了${callLabel}]`,
@@ -1054,6 +1207,7 @@ export async function parseAndSaveResponse(
     if (filteredParts.length === 0) {
         if (statusPanel || innerMonologue || reasoningText) {
             pushChatMessage({
+                channel: options?.channel,
                 sessionId,
                 role: "assistant",
                 content: "",
@@ -1072,6 +1226,7 @@ export async function parseAndSaveResponse(
         if (shortcutMarker) {
             const baseMs = options?.createdAt ? Date.parse(options.createdAt) : NaN;
             pushChatMessage({
+                channel: options?.channel,
                 sessionId,
                 role: "assistant",
                 content: shortcutMarker.text,
@@ -1082,6 +1237,7 @@ export async function parseAndSaveResponse(
                 senderName: options?.senderName,
             });
             pushChatMessage({
+                channel: options?.channel,
                 sessionId,
                 role: "system",
                 content: `发出快捷动作「${shortcutMarker.name}」`,
@@ -1114,6 +1270,7 @@ export async function parseAndSaveResponse(
     const saveShortcutMarkerPair = () => {
         if (!shortcutMarker) return;
         savedMessages.push(pushChatMessage({
+            channel: options?.channel,
             sessionId,
             role: "assistant",
             content: shortcutMarker.text,
@@ -1124,6 +1281,7 @@ export async function parseAndSaveResponse(
             senderName: options?.senderName,
         }));
         savedMessages.push(pushChatMessage({
+            channel: options?.channel,
             sessionId,
             role: "system",
             content: `发出快捷动作「${shortcutMarker.name}」`,
@@ -1136,6 +1294,7 @@ export async function parseAndSaveResponse(
         const generatedPart = buildGeneratedFollowUpImageMessage(filteredParts[i]);
         const createdAt = nextCreatedAt();
         const saved = pushChatMessage({
+            channel: options?.channel,
             sessionId,
             role: "assistant",
             content: generatedPart.content,
@@ -1157,7 +1316,7 @@ export async function parseAndSaveResponse(
         });
         if (isPendingChatGeneratedImageMessage(saved)) {
             imageReplacementTasks.push(
-                generateAndApplyChatGeneratedImage(saved, sess?.contactId)
+                generateAndApplyChatGeneratedImage(saved, sess ? (resolveSessionCharacterId(sess) || undefined) : undefined)
                     .catch(error => {
                         console.warn("[FollowUp] Image generation failed:", error);
                         return null;
@@ -1182,7 +1341,7 @@ export async function parseAndSaveResponse(
             ? (options?.senderCharacterId
                 ? loadCharacters().find(c => c.id === options.senderCharacterId)?.avatar || null
                 : null)
-            : (sess ? loadCharacters().find(c => c.id === sess.contactId)?.avatar || null : null);
+            : (sess ? loadCharacters().find(c => c.id === resolveSessionCharacterId(sess))?.avatar || null : null);
         const bodyPrefix = isGroup && options?.senderName ? `${options.senderName}: ` : "";
         const partBody = (part: ParsedMessagePart) => bodyPrefix + ((part.content || "").trim()
             || (part.mediaType === "image" && part.mediaData?.label ? `发了一张照片: ${part.mediaData.label}` : "发来一条消息"));

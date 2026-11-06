@@ -165,38 +165,27 @@ async function trimRecords(records: ScreenshotRecord[], keep: number): Promise<S
   const kept = records.slice(0, Math.max(1, keep));
   const evicted = records.slice(kept.length);
   for (const item of evicted) {
-    await deleteScreenshotMediaIfUnreferenced(item.ref);
+    await deleteMediaRef(item.ref);
   }
   return kept;
+}
+
+/** 移除一条截屏记录，并清理对应媒体文件。 */
+export async function removeScreenshotRecord(id: string): Promise<void> {
+  const records = loadScreenshotRecords();
+  const target = records.find(record => record.id === id);
+  if (!target) return;
+  await deleteMediaRef(target.ref);
+  saveScreenshotRecords(records.filter(record => record.id !== id));
 }
 
 /** 清空全部截屏记录与对应图片。 */
 export async function clearAllScreenshots(): Promise<void> {
   const records = loadScreenshotRecords();
   for (const item of records) {
-    await deleteScreenshotMediaIfUnreferenced(item.ref);
+    await deleteMediaRef(item.ref);
   }
   saveScreenshotRecords([]);
-}
-
-/** 删除单条截屏记录，并同步删除媒体库里的原图。 */
-export async function deleteScreenshotRecord(id: string): Promise<void> {
-  const records = loadScreenshotRecords();
-  const target = records.find(item => item.id === id);
-  if (!target) return;
-  // 截屏图可能也已作为聊天消息发送。只有聊天记录不再引用时才删原图，
-  // 否则只移除最近截屏索引，不能让历史聊天图片变成空白。
-  await deleteScreenshotMediaIfUnreferenced(target.ref);
-  saveScreenshotRecords(records.filter(item => item.id !== id));
-}
-
-/** 媒体引用可能同时被最近截屏列表和聊天消息使用，删除前先保护聊天引用。 */
-async function deleteScreenshotMediaIfUnreferenced(ref: string): Promise<void> {
-  const { chatDb } = await import("../chat-db");
-  const referencedByChat = await chatDb.messages
-    .filter(message => message.mediaUrl === ref)
-    .first();
-  if (!referencedByChat) await deleteMediaRef(ref);
 }
 
 /**

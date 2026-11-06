@@ -31,7 +31,7 @@ export function DIYWidgetEditor({ template, onSave, onClose }: DIYWidgetEditorPr
 
   useEffect(() => {
     if (template) {
-       setMode(template.mode === "code" as any ? "code" : "image");
+       setMode(template.mode === "code" ? "code" : "image");
        setSize(template.size);
        setName(template.name);
        if (template.mode === "image") {

@@ -1,12 +1,111 @@
-# 项目来源、致谢与二次开发说明
+# Float Phone｜AI 虚拟互动手机
 
-## 一、项目来源与继承关系
+Float Phone 是一个以 Next.js、React、TypeScript 构建的手机式 AI 互动应用，并包含独立的 Android WebView Shell。仓库在聊天与角色互动框架上扩展了生活系统、照片墙、一起看、媒体档案室、现实桥和多种设备侧能力。
+
+> **重要：代码存在不等于服务已部署，也不等于功能已在所有设备验证。** 本项目的实际能力取决于网页部署、用户配置的模型服务、个人云服务、APK 版本、系统权限和设备环境。本文只陈述能够从当前仓库代码与配置定位的信息；无法由代码证明的运行状态会明确标为需自行验证。
+
+## 文档目录
+
+- [完整文档导航与维护约定](./docs/README.md)
+
+## 从这里开始
+
+| 你的目标 | 从这里开始 |
+|---|---|
+| 第一次体验或本地运行 | [本地开发](#本地开发) |
+| 自己部署网页 | [部署边界](#部署边界) 与 `.env.example` |
+| 构建 Android APK | [Android Shell 指南](./android-shell/README.md) |
+| Fork 后构建自己的 APK | [Fork 与 APK 指南](./DEVICE_SETUP_GUIDE.md) |
+| 排查 Android 白屏、闪退或桥接问题 | [Android 诊断](./android-shell/DIAGNOSTICS.md) |
+| 了解隐私、数据发送和权限 | [隐私与权限说明](./docs/隐私与权限说明.md) |
+| 了解生活系统云端日程 | [云端生活日程说明](./docs/cloud-life-scheduler.md) |
+| 部署个人推送/生活日程云 | [个人云 SQL 与部署说明](./docs/personal-push-supabase.sql)（仅部署到专用个人 Supabase 项目） |
+| 了解本仓库相对指定代码基线的差异 | [代码差异台账](./docs/fork-changes-overview.md) |
+| 角色 ID 规范 | [角色 ID 契约](./docs/character-id-contract.md) |
+
+## 功能概览与边界
+
+| 模块 | 当前代码入口 | 使用与验证边界 |
+|---|---|---|
+| 聊天与角色 | `components/chat/*`、`lib/chat-engine.ts`、提示词与记忆相关 `lib/*` | 需要在应用中配置可用模型；生成质量和上下文效果受模型、提示词、用户数据影响 |
+| 生活系统 | `components/life/life-engine-app.tsx`、`lib/life/*`、`supabase/functions/life-scheduler/index.ts` | 包含七日日程、场景、邀约、共同经历、观察和诊断等代码；云端日程评估需要个人 Supabase 部署。主动消息生成当前由多个代码开关固定关闭，不应视为后台主动消息已启用 |
+| 照片墙 | `components/photo-wall-app.tsx`、`components/photo-wall/*`、`lib/photo-wall-*.ts` | 包含画布、素材、贴纸/涂鸦、模板和导出逻辑；存储、性能、手势与导出效果需在目标浏览器/WebView 验证 |
+| 一起看 | `components/watch-together-app.tsx`、`lib/watch-resolver.ts`、`app/api/watch-resolver/*` | 包含链接处理、播放入口、观看记录、讨论和视频理解相关代码；第三方平台受登录态、风控、地区、DRM 和接口变化限制，不保证所有链接可解析 |
+| 视频处理工具 | `tools/video-resolver`、`tools/video-transcriber`、`tools/cloudflare-video-transcriber` | 属于可选工具/服务，不等于网页部署后自动具备本地解析或转写能力 |
+| 媒体档案室 | `components/archive-room-app.tsx` | 管理媒体缓存和引用；清理前需确认引用关系。缓存不等于备份 |
+| 现实桥与设备联动 | `components/reality-bridge-app.tsx`、`lib/reality-bridge/*`、Android 原生桥 | 具体动作受平台 API、权限、设备能力和外部服务限制；桥接接口存在不代表每项动作已实机验收 |
+| Android Shell | `android-shell/app/src/main` | WebView 壳及原生通知、回复、通话、小组件、截屏、设备感知/动作等入口；需安装对应 APK 并按设备逐项验收 |
+
+### 生活系统：必须了解的当前限制
+
+当前源码中，`components/life/life-engine-app.tsx` 与 `lib/life/life-proactive-scheduler.ts` 的 `LIFE_PROACTIVE_MESSAGES_ENABLED` 为 `false`，`lib/life/life-schedule-cloud.ts` 同步的 `proactiveEnabled` 也为 `false`。因此当前不能宣传角色会在后台自动生成并主动发送生活消息。
+
+云端 `life-scheduler` 是日程快照评估/运行态更新链路，不等同于主动消息生成与通知投递。需要个人 Supabase Schema、Edge Function、Cron、密钥及网络条件配合；网页部署不会自动更新用户自己的 Supabase 项目。详见[云端生活日程说明](./docs/cloud-life-scheduler.md)。
+
+## 本地开发
+
+仓库使用 Next.js 15、React 19、TypeScript 和 npm。开发与 CI 统一使用 Node.js 22；建议本地也使用 Node.js 22 LTS，并通过 `npm ci` 安装锁文件依赖。
+
+```bash
+git clone https://github.com/doremy1203/doremy.float.phone.git
+cd doremy.float.phone
+npm install
+cp .env.example .env.local
+npm run dev
+```
+
+开发服务器启动后，以终端输出的地址为准。部分功能需要模型服务或云端配置；未配置时对应能力可能不可用。不要把真实 API Key、Supabase service role key、签名密钥或其他凭据提交到仓库。
+
+### 常用脚本（以 package.json 为准）
+
+| 命令 | 用途 |
+|---|---|
+| `npm run dev` | 启动本地开发服务器 |
+| `npm run build` | 生成微信助手/个人推送构建产物并执行 Next.js 构建 |
+| `npm run start` | 启动生产模式本地服务器 |
+| `npm run lint` | 执行 ESLint |
+| `npm run test:life` | 运行生活系统相关脚本测试集合 |
+| `npm run test:photo-wall` | 运行照片墙相关脚本测试 |
+| `npm run test:character-id` | 运行角色 ID 集成测试 |
+| `npm run test:widget-output` | 运行桌面小组件输出测试 |
+| `npm run check:sdk` | 检查自定义应用 SDK 一致性 |
+| `npm run check:weixin` | 检查微信助手提示词等价性 |
+| `npm run check:push` | 检查个人推送构建产物 |
+
+这些脚本只覆盖各自编写的检查范围。脚本存在不代表最近已执行；测试通过也不代表第三方服务、生产云环境或所有 Android 机型端到端通过。
+
+## 部署边界
+
+项目包含多套独立部署面，不能把一次网页部署当作全栈部署完成。
+
+1. **网页应用**：根目录 `netlify.toml` 配置 `npm run build`、`.next` 发布目录和 Netlify Next.js 插件。
+2. **自部署模式**：`.env.example` 将 `NEXT_PUBLIC_SELF_HOSTED_MODE=true` 作为自部署默认示例。请按自己的部署方式配置变量；`NEXT_PUBLIC_*` 会进入浏览器，绝不能放服务端密钥。
+3. **Supabase**：主云服务、个人推送/备份、生活日程以及独立特调服务存在不同配置边界。执行 SQL、部署 Edge Functions、设置 Cron 和 Secrets 需按具体功能文档操作；网页构建不会自动完成这些步骤。
+4. **Android APK**：`.github/workflows/android-shell.yml` 使用 Java 17、Gradle 8.11.1 构建。未配置完整 release 签名 Secrets 时，工作流只发布可安装的 debug APK；配置签名后才会构建签名 release APK。
+5. **网页与 APK 更新不同步**：纯网页逻辑随站点部署更新；Kotlin、Manifest、原生桥、原生资源或权限声明变化需要重新构建 APK。
+6. **本地数据**：浏览器与 Android WebView 沙箱不互通。清除站点/App 数据或卸载可能造成仅本地保存的数据丢失。迁移前先用应用内备份并验证恢复。
+
+环境变量清单以 [.env.example](./.env.example) 为准；其中有些变量仅供可选集成，不代表默认启用。
+
+## Android 版本信息
+
+当前源码 `android-shell/app/build.gradle` 配置：versionName `1.0.29`、versionCode `28`、minSdk `26`、targetSdk `34`、compileSdk `36`。这是仓库配置值，不代表所有 Android 版本或厂商系统都已通过兼容性测试。
+
+- [Android Shell 构建、安装和推送说明](./android-shell/README.md)
+- [Fork 后构建与设备验收指南](./DEVICE_SETUP_GUIDE.md)
+- [Android 运行诊断与崩溃恢复](./android-shell/DIAGNOSTICS.md)
+
+## 数据与隐私
+
+应用可能在用户主动配置或调用功能时向模型供应商、云端项目、视频解析/转写服务、图床或其他第三方发送相应请求。具体数据类别与 Android 权限边界见[隐私、数据流与权限说明](./docs/隐私与权限说明.md)。该技术说明不是所有部署者均可直接使用的法律隐私政策；公开部署者应补充自己的运营者身份、日志、联系渠道和适用法律要求。
+
+## 项目来源、对照与许可
 
 本仓库基于小笼包老师的原始项目，并承接末末老师的二次开发版本继续迭代。主要围绕 Android 原生能力、全局通话、安卓离线推送、安卓现实桥及数据与交互体验等方向进行扩展和改进。
 
-## 二、上游项目的主要成果
+### 上游项目的主要成果
 
-### 1. 小笼包老师：原始项目与基础框架
+**1. 小笼包老师：原始项目与基础框架**
 
 感谢小笼包老师建立项目的核心框架，为后续开发提供了基础，包括但不限于：
 
@@ -19,7 +118,7 @@
 原始项目地址：
 https://github.com/xiaolongbao0709/ai-virtual-phone
 
-### 2. 末末老师：直接上游版本的持续开发
+**2. 末末老师：直接上游版本的持续开发**
 
 末末老师在原始项目基础上进行了持续的二次开发，进一步丰富了剧情机制、角色互动、记忆管理和数据保护等方面的体验。
 
@@ -37,97 +136,13 @@ https://github.com/xiaolongbao0709/ai-virtual-phone
 直接上游仓库：
 https://github.com/jianchu-in/momo.float.phone
 
-## 三、本仓库的二次开发方向与主要改进
-
-以下内容主要介绍本人在继承上游项目后，持续开发、扩展、适配和维护的方向。
-
-### 1. 全局通话与持续互动
-
-- 将通话状态提升为全局管理，避免切换会话时通话界面随聊天室卸载。
-- 增加可拖动、可缩放的通话小窗，并对接安卓原生浮窗。
-- 增加通话自动搭话、消息排队与补发机制。
-- 改进语音、视频及群聊通话体验。
-- 增加通话消息折叠规则、通话语音留档及相关状态同步。
-- 增加浮窗设置、主题配置、自检和故障诊断能力。
-
-### 2. 安卓原生能力与 APK 适配
-
-- 扩展 Android Shell 与网页端之间的原生通信桥。
-- 增加原生通知、通知点击直达会话及通知回复相关能力。
-- 增加系统级通话浮窗及相应生命周期处理。
-- 增加桌面小组件、设备感知与系统能力联动。
-- 改进状态栏、安全区域、权限处理和设备兼容性。
-- 维护安卓壳的版本号、构建流程及相关适配说明。
-
-### 3. 离线推送与定时消息
-
-- 增加或完善离线推送长连接与原生通知链路。
-- 改进定时任务的保存、撤销、同步及服务端状态处理。
-- 增加推送自检、诊断与断线重连处理。
-- 改进通知内容、角色头像和会话跳转。
-- 处理通话期间主动消息与离线推送之间的冲突，减少重复或不合时宜的提醒。
-
-### 4. 现实桥与设备联动
-
-- 扩展现实桥的设备感知、动作执行与结果反馈机制。
-- 增加快捷动作、任务调度和相关设置能力。
-- 完善设备端与云端之间的状态同步和异常处理。
-- 持续探索让角色不仅能够聊天，也能够在获得授权的情况下与现实设备及用户工作流联动。
-
-### 5. 数据、界面与稳定性改进
-
-- 改进数据备份、恢复和存储相关流程。
-- 优化聊天、通话、缓存与消息同步之间的协作。
-- 持续调整界面样式、主题、桌面小组件及安卓端交互。
-- 记录实际开发中遇到的兼容性问题、修复方案与移植经验，降低后续维护和二次开发的难度。
-
-以上是本项目后续开发的重点方向，并非对所有文件的原创性声明。部分改动是在原有实现上继续完善，具体归属以代码和提交记录为准。
-
-## 四、使用前请注意
-
-### 1. 完整体验需要安装 APK
-
-网页端可以提供基础交互，但系统通知、原生浮窗、桌面小组件和部分设备联动依赖 Android 原生壳及系统权限。
-
-如果希望体验完整的安卓原生功能，应使用项目提供的 Android APK 构建与安装方式。仅访问网页不等于拥有完整的原生能力。
-
-Android 壳说明与构建入口：
-https://github.com/doremy1203/doremy.float.phone/blob/main/android-shell/README.md
-
-### 2. APK 签名必须妥善保存
-
-如果计划长期使用自己的构建版本，应提前配置并保管自己的 APK 签名密钥。
-
-后续更新包必须使用与已安装版本兼容的签名。签名不一致时，通常无法直接覆盖安装，可能需要先卸载旧版本；卸载可能导致仅保存在本地的数据丢失。
-
-请勿将签名密钥、密码等敏感文件提交到公开仓库。
-
-### 3. 数据库和云函数需要单独更新
-
-本项目涉及数据库 Schema、SQL、Edge Functions 或其他云端逻辑更改，需要根据对应的部署说明执行相关更新。否则可能出现网页或 APK 已经更新，但云端仍使用旧结构、旧函数的情况。
-
-本项目的云部署流程已针对覆盖更新进行优化，可以通过重新输入 Token 进行更新部署。更新前应确认个人云与相关数据已经妥善备份。
-
-### 4. 安卓设备兼容性存在差异
-
-不同品牌和系统版本对悬浮窗、通知、后台运行、闹钟、桌面小组件等能力的权限与限制不同。即使安装成功，也不代表所有原生功能都能在每台设备上完全一致地工作。
-
-本项目的主要参考设备为荣耀 500 Pro。其他设备可能需要额外的权限配置、系统设置或针对性适配。
-
-### 5. Android SDK 版本说明
-
-当前配置为：
-
-- `minSdk 26`：最低支持 Android 8.0。
-- `targetSdk 34`：应用声明的目标 Android API 级别。
-- `compileSdk 36`：编译时使用的 Android API 级别。
-
-`compileSdk 36` 并不意味着设备必须运行 Android 16；最低系统要求由 `minSdk` 决定。实际可用功能仍受设备系统和权限策略影响。
-
-## 五、致谢
+### 致谢与二次开发许可
 
 再次感谢小笼包老师提供原始项目基础，感谢末末老师在直接上游版本中的持续开发与维护。
 
 本仓库只是在两位老师的成果上，做了一些维护、补充和适配。开源项目的贡献关系有时比较复杂，如果本说明中存在来源标注不清或归属错误，欢迎指出，我会及时更正。
 
 也希望大家在尊重原有成果的前提下，继续探索和开发。
+
+
+项目许可证见 [LICENSE](./LICENSE)，第三方声明见 [NOTICE](./NOTICE)。本仓库许可证不自动替代第三方依赖、素材或服务各自的许可条款。

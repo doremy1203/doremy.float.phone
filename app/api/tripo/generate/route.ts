@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
       }
 
       // 单图 → image_to_model，多图 → multiview_to_model
-      let taskBody: any;
+      let taskBody: Record<string, unknown>;
       if (imageTokens.length === 1) {
         taskBody = {
           type: "image_to_model",
@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
     if (!prompt) return NextResponse.json({ error: "缺少 prompt" }, { status: 400 });
     if (!apiKey) return NextResponse.json({ error: "缺少 API Key" }, { status: 400 });
 
-    const taskBody: any = { type: "text_to_model", prompt };
+    const taskBody: Record<string, unknown> = { type: "text_to_model", prompt };
     if (faceLimit > 0) taskBody.face_limit = faceLimit;
 
     const taskRes = await tripoFetch(`${BASE}/task`, {
@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: taskData.message ? `创建任务失败：${taskData.message}` : "创建任务失败", detail: taskData }, { status: 502 });
     }
     return NextResponse.json({ taskId: taskData.data.task_id });
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+  } catch (error: unknown) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }

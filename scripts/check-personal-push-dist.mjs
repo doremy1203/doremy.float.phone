@@ -8,6 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pairs = [
   ["supabase/functions/ai-phone-push/index.ts", "public/ai-phone-push/gateway.mjs"],
   ["supabase/functions/push-generate/index.ts", "public/ai-phone-push/push-generate.mjs"],
+  ["supabase/functions/life-scheduler/index.ts", "public/ai-phone-push/life-scheduler.mjs"],
   ["supabase/functions/push-shortcut-result/index.ts", "public/ai-phone-push/push-shortcut-result.mjs"],
   ["supabase/functions/push-bridge/index.ts", "public/ai-phone-push/push-bridge.mjs"],
   ["supabase/functions/screen-chat/index.ts", "public/ai-phone-push/screen-chat.mjs"],
@@ -34,4 +35,20 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
+const personalSchema = readFileSync(resolve(root, "docs/personal-push-supabase.sql"), "utf8");
+const siteSchema = readFileSync(resolve(root, "docs/push-supabase.sql"), "utf8");
+for (const [name, schema] of [["personal", personalSchema], ["site", siteSchema]]) {
+  if (!schema.includes("alter table public.push_jobs add column if not exists trigger_key text;")) {
+    failures.push(`${name} push schema does not migrate legacy push_jobs.trigger_key`);
+  }
+  if (!schema.includes("set trigger_key = 'legacy:' || id") || !schema.includes("where trigger_key is null or btrim(trigger_key) = '';")) {
+    failures.push(`${name} push schema does not backfill existing jobs before enforcing NOT NULL`);
+  }
+  if (!schema.includes("notify pgrst, 'reload schema';")) {
+    failures.push(`${name} push schema does not request a PostgREST schema-cache refresh`);
+  }
+  if (!schema.includes("alter table public.push_jobs alter column trigger_key set not null;")) {
+    failures.push(`${name} push schema does not enforce trigger_key after backfill`);
+  }
+}
 console.log("[personal-push-dist] 源文件、公开部署包与通用站点配置一致。");

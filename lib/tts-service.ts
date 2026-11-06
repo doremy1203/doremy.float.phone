@@ -186,6 +186,8 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
 // audio session back to the microphone. A shared <audio> element is kept as a
 // fallback for browsers without AudioContext.
 
+type AudioContextWindow = typeof globalThis & { webkitAudioContext?: typeof AudioContext };
+
 let _audioCtx: AudioContext | null = null;
 let _sharedAudio: HTMLAudioElement | null = null;
 let _audioUnlocked = false;
@@ -234,7 +236,8 @@ export function setCallAudioSessionActive(active: boolean): void {
 
 function getAudioContext(): AudioContext | null {
     if (typeof window === "undefined") return null;
-    const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
+    const audioWindow = window as unknown as AudioContextWindow;
+    const Ctor = audioWindow.AudioContext || audioWindow.webkitAudioContext;
     if (!Ctor) return null;
     if (!_audioCtx) {
         // 不要钉 sampleRate:部分 iOS 版本上非硬件采样率的 ctx 会"时钟照走、

@@ -25,6 +25,7 @@ type ImageGenerationRequest = {
   size?: string;
   quality?: string;
   referenceImageDataUrl?: string;
+  referenceImageDataUrls?: string[];
   // NovelAI 专属参数
   negativePrompt?: string;
   steps?: number;
@@ -301,7 +302,12 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
     const baseUrl = input.baseUrl?.trim();
     const model = input.model?.trim();
     const prompt = input.prompt?.trim();
-    const hasReference = Boolean(input.referenceImageDataUrl?.trim());
+    const referenceImageDataUrls = (Array.isArray(input.referenceImageDataUrls) ? input.referenceImageDataUrls : [])
+      .filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+    if (referenceImageDataUrls.length === 0 && input.referenceImageDataUrl?.trim()) {
+      referenceImageDataUrls.push(input.referenceImageDataUrl.trim());
+    }
+    const hasReference = referenceImageDataUrls.length > 0;
 
     if (!apiKey) return { status: 400, body: { error: "缺少 API Key" } };
     if (!baseUrl) return { status: 400, body: { error: "缺少 Base URL" } };
@@ -313,14 +319,24 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
     let body: BodyInit;
 
     if (hasReference) {
-      const converted = dataUrlToBlob(input.referenceImageDataUrl || "");
-      if (!converted) return { status: 400, body: { error: "参考图格式无效" } };
+      if (referenceImageDataUrls.length > 16) {
+        return { status: 400, body: { error: "最多支持 16 张身份参考图" } };
+      }
+      const convertedReferences = referenceImageDataUrls.map(dataUrl => dataUrlToBlob(dataUrl));
+      const invalidIndex = convertedReferences.findIndex(reference => !reference);
+      if (invalidIndex >= 0) {
+        return { status: 400, body: { error: `第 ${invalidIndex + 1} 张参考图格式无效` } };
+      }
       const form = new FormData();
       form.set("model", model);
       form.set("prompt", prompt);
       if (input.size && input.size !== "auto") form.set("size", input.size);
       if (input.quality && input.quality !== "auto") form.set("quality", input.quality);
-      form.append("image", converted.blob, `reference.${converted.mimeType.split("/")[1] || "png"}`);
+      convertedReferences.forEach((converted, index) => {
+        if (!converted) return;
+        const fieldName = convertedReferences.length > 1 ? "image[]" : "image";
+        form.append(fieldName, converted.blob, `reference-${index + 1}.${converted.mimeType.split("/")[1] || "png"}`);
+      });
       body = form;
     } else {
       headers["Content-Type"] = "application/json";

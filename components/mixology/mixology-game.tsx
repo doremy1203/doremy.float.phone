@@ -136,6 +136,7 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
     const [session, setSession] = useState<MixSession | null>(() => getMixSession(sessionId));
     const [input, setInput] = useState("");
     const [busy, setBusy] = useState(false);
+    const [bgTuneOpen, setBgTuneOpen] = useState(false);
     /**
      * 正在写的那一段。模型每吐一小段就回调一次，一个 token 重渲染一次太浪费，
      * 所以先攒在 ref 里，按帧合批推给界面。
@@ -1027,7 +1028,6 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
     const canReroll = !busy && lastTurn?.role === "assistant" && session.turns.length > 1;
 
     /** 背景观感微调：蒙版提亮（0=原样，100=无蒙版）与封面模糊，按局保存 */
-    const [bgTuneOpen, setBgTuneOpen] = useState(false);
     const bgTune = session.bgTune ?? { mask: 0, blur: 0 };
     const setBgTune = (next: { mask: number; blur: number }) => {
         const updated: MixSession = { ...session, bgTune: next };

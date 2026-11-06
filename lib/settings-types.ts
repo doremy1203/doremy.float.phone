@@ -238,6 +238,8 @@ export type ImageGenerationSettings = {
     size: string;
     quality: string;
     extraPrompt: string;
+    /** 身份参考图发送模式：多图（推荐）/ 拼图（兼容单图服务）/ 仅当前角色。 */
+    referenceImageMode?: "multi" | "collage" | "current";
     openaiPresets?: OpenAiImagePreset[];
     activeOpenAiPresetId?: string;
     // NovelAI 模式配置

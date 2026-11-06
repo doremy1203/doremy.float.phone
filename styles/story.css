@@ -1656,3 +1656,92 @@
           .story-branch-memory { padding:6px 5px; font-size:calc(7.5px*var(--app-text-scale,1)); }
           .story-group-picker { grid-template-columns:1fr; }
         }
+
+
+/* 分线记忆权限：将开关、分线授权和记忆类型分成清晰区块，避免窄屏下所有选项挤成一团。 */
+.story-dialog .story-memory-settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+.story-dialog .story-memory-settings-list .story-settings-toggle-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--c-story-heading, #334155) 10%, transparent);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--c-story-card, #fff) 86%, var(--c-story-heading, #334155) 4%);
+}
+.story-dialog .story-memory-settings-list .story-settings-toggle-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.story-dialog .story-memory-settings-list .story-settings-toggle-row strong {
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 600;
+}
+.story-dialog .story-memory-settings-list .story-settings-toggle-row small {
+  color: var(--c-story-sub, #64748b);
+  font-size: 10px;
+  line-height: 1.55;
+}
+.story-dialog .story-memory-settings-list .story-settings-toggle-row input,
+.story-dialog .story-memory-branch-picker input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--c-story-heading, #475569);
+}
+.story-dialog .story-memory-branch-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 16px;
+  padding: 14px 12px;
+  border: 1px solid color-mix(in srgb, var(--c-story-heading, #334155) 12%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--c-story-card, #fff) 92%, var(--c-story-heading, #334155) 3%);
+}
+.story-dialog .story-memory-branch-picker > strong {
+  margin-top: 4px;
+  color: var(--c-story-heading, #334155);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.story-dialog .story-memory-branch-picker > small {
+  color: var(--c-story-sub, #64748b);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.story-dialog .story-memory-branch-picker > label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--c-story-heading, #334155) 9%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--c-story-card, #fff) 96%, transparent);
+}
+.story-dialog .story-memory-branch-picker > label > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 390px) {
+  .story-dialog { padding: 15px 12px; border-radius: 20px; }
+  .story-dialog .story-memory-settings-list .story-settings-toggle-row { padding: 10px; gap: 8px; }
+  .story-dialog .story-memory-branch-picker { padding: 12px 9px; }
+}

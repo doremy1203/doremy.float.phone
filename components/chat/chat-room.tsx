@@ -1,7 +1,13 @@
 "use client";
 
+import { loadVirtualLifeState, saveVirtualLifeState } from "@/lib/life/life-storage";
+import { getActorClock, getCurrentActorSchedule, resolveActorLifeNow, settleActorTimelineToNow } from "@/lib/life/life-runtime";
+import { setOnlineChatForegroundLease } from "@/lib/life/life-scheduler-coordinator";
+import { syncLifeScheduleSnapshot } from "@/lib/life/life-schedule-cloud";
+
 import { forwardRef, Fragment, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatContacts, loadChatSessions, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, getSystemInstructionDisplayContent, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages, isSessionStreamingEnabled, resolveChatBackgroundImage, resolveChatUserAvatar } from "@/lib/chat-storage";
+import { storeMediaBase64 } from "@/lib/media-cache-storage";
+import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatSessions, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, getSystemInstructionDisplayContent, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages, isSessionStreamingEnabled, resolveChatBackgroundImage, resolveChatUserAvatar, resolveSessionCharacterId } from "@/lib/chat-storage";
 import { cleanStreamText, splitStreamPreviewSegments, stripLiteralTexts, stripXmlTagBlocks } from "@/lib/stream-preview";
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
@@ -49,6 +55,7 @@ import { generateGroupChatCompletion, generateGroupOfflineChatCompletion, parseG
 import { appendChatOfflineTurn, deleteChatOfflineTurn, deleteChatOfflineTurnsFrom, extractThinkingTag, loadChatOfflineTurns, parseOfflineResponse, saveChatOfflineTurns, updateChatOfflineTurn, type ChatOfflineTurn } from "@/lib/chat-offline-storage";
 import { applyDisplayRegex, applyEditRegex } from "@/lib/llm-prompt-assembler";
 import { scheduleFollowUp, cancelFollowUp, cancelBackgroundGeneration, isBackgroundReplyGenerating } from "@/lib/follow-up-service";
+import { beginTurn } from "@/lib/turn-coordinator";
 import { useKeyboardDismissAutoSend } from "@/components/chat/use-keyboard-dismiss-auto-send";
 import { cancelBailoutKey } from "@/lib/push-bailout-client";
 import { PENDING_REPLY_PREFIX } from "@/lib/friend-request-engine";
@@ -118,6 +125,16 @@ function uiRole(msg: ChatMessage): string {
     return msg.role;
 }
 
+function isCharacterCoPresentInLifeScene(characterId: string): boolean {
+    try {
+        const state = loadVirtualLifeState();
+        return state.settings.enabled && state.scenes.some(scene => scene.status === "active"
+            && scene.participants.some(participant => participant.ownerType === "player" && participant.ownerId === "player")
+            && scene.participants.some(participant => participant.ownerType === "character" && participant.ownerId === characterId && participant.activity !== "离开"));
+    } catch {
+        return false;
+    }
+}
 function isChatRoomElementVisible(element: HTMLElement | null): boolean {
     if (!element || !element.isConnected) return false;
     const rect = element.getBoundingClientRect();
@@ -357,6 +374,9 @@ function hasActiveGenerationLock(sessionId: string): boolean {
 }
 
 function createGenerationRun(sessionId: string): ActiveGenerationRun {
+    // A session must not generate an online reply and an offline reply at the same time.
+    // Otherwise a stale offline turn can finish after the user's newest online message.
+    cancelOfflineGenerationRun(sessionId);
     const existing = activeGenerationRuns.get(sessionId);
     existing?.controller.abort();
     const run: ActiveGenerationRun = {
@@ -423,6 +443,8 @@ function throwIfGenerationStopped(guard?: GenerationRunGuard): void {
 }
 
 function createOfflineGenerationRun(sessionId: string): Omit<ActiveGenerationRun, "pendingNativeToolCalls"> {
+    // Offline generation also supersedes any foreground generation for this session.
+    cancelGenerationRun(sessionId);
     const existing = activeOfflineGenerationRuns.get(sessionId);
     existing?.controller.abort();
     const run = {
@@ -512,6 +534,8 @@ type ChatRoomProps = {
     onBack: () => void;
     /** 会话在设置页被删除后回调：由外层卸载本聊天室并回到列表 */
     onDeleted?: () => void;
+    /** Only the visible room may renew foreground leases or poll sleep replies. */
+    isActive?: boolean;
 };
 
 type OfflineActionTarget = {
@@ -715,6 +739,20 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
 }, ref) {
     const [inputText, setInputText] = useState("");
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+    const [plusMenuOrder, setPlusMenuOrder] = useState<string[]>([]);
+    useEffect(() => {
+        try {
+            const saved = window.localStorage.getItem("chat-plus-menu-order-v1");
+            const parsed = saved ? JSON.parse(saved) : [];
+            if (Array.isArray(parsed)) setPlusMenuOrder(parsed.filter((value): value is string => typeof value === "string"));
+        } catch { /* storage may be unavailable */ }
+    }, []);
+    const [draggingPlusItem, setDraggingPlusItem] = useState<string | null>(null);
+    const [dropTargetPlusItem, setDropTargetPlusItem] = useState<string | null>(null);
+    const plusMenuContainerRef = useRef<HTMLDivElement | null>(null);
+    const plusMenuDragTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const plusMenuDragRef = useRef<{ label: string; x: number; y: number; scrollLeft: number; started: boolean; moved: boolean; targetLabel?: string } | null>(null);
+    const suppressPlusClickRef = useRef(false);
 
     // 表情包搜索联想：ESC/失焦置 true 隐藏，输入变化重新开启
     const [suggestClosed, setSuggestClosed] = useState(false);
@@ -752,14 +790,16 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     }), [appendText]);
 
     const handleSubmit = () => {
-        if (inputLocked) return;
-        if (isGenerating) {
+        const trimmed = inputText.trim();
+        // If a reply is still running, an empty send button stops it; typed text
+        // instead supersedes the stale turn and immediately requests a reply to
+        // the newest user message.
+        if (isGenerating && !trimmed) {
             onStopGeneration();
             return;
         }
-        const trimmed = inputText.trim();
-        if (!trimmed) return;
-        if (!onSendText(trimmed)) return;
+        if (inputLocked || !trimmed) return;
+        if (!onSendText(trimmed, { autoReply: isGenerating })) return;
         setInputText("");
         resetTextareaHeight();
         onClosePanels();
@@ -791,6 +831,75 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
             onClick: () => onOpenCustomPlusAction(action),
         })),
     ];
+    const orderedPlusMenuItems = [...plusMenuItems].sort((a, b) => {
+        const ai = plusMenuOrder.indexOf(a.label);
+        const bi = plusMenuOrder.indexOf(b.label);
+        if (ai < 0 && bi < 0) return 0;
+        if (ai < 0) return 1;
+        if (bi < 0) return -1;
+        return ai - bi;
+    });
+    const reorderPlusMenuItem = (sourceLabel: string, targetLabel: string) => {
+        if (!sourceLabel || !targetLabel || sourceLabel === targetLabel) return;
+        const labels = orderedPlusMenuItems.map(item => item.label);
+        const from = labels.indexOf(sourceLabel);
+        const to = labels.indexOf(targetLabel);
+        if (from < 0 || to < 0 || from === to) return;
+        const moved = labels.splice(from, 1)[0];
+        labels.splice(to, 0, moved);
+        setPlusMenuOrder(labels);
+        try { window.localStorage.setItem("chat-plus-menu-order-v1", JSON.stringify(labels)); } catch { /* storage may be unavailable */ }
+    };
+    const handlePlusPointerDown = (event: React.PointerEvent<HTMLButtonElement>, label: string) => {
+        if (event.pointerType === "mouse" && event.button !== 0) return;
+        plusMenuDragRef.current = { label, x: event.clientX, y: event.clientY, scrollLeft: plusMenuContainerRef.current?.scrollLeft ?? 0, started: false, moved: false };
+        try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* optional on older WebViews */ }
+        if (plusMenuDragTimerRef.current) clearTimeout(plusMenuDragTimerRef.current);
+        plusMenuDragTimerRef.current = setTimeout(() => {
+            if (plusMenuDragRef.current) {
+                plusMenuDragRef.current.started = true;
+                setDraggingPlusItem(label);
+            }
+        }, 360);
+    };
+    const handlePlusPointerMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+        const drag = plusMenuDragRef.current;
+        if (!drag) return;
+        const dx = event.clientX - drag.x;
+        const dy = event.clientY - drag.y;
+        if (!drag.started) {
+            if (Math.abs(dx) > 7 || Math.abs(dy) > 12) {
+                drag.moved = true;
+                if (plusMenuDragTimerRef.current) clearTimeout(plusMenuDragTimerRef.current);
+                plusMenuDragTimerRef.current = null;
+                if (Math.abs(dx) > Math.abs(dy) && plusMenuContainerRef.current) plusMenuContainerRef.current.scrollLeft = drag.scrollLeft - dx;
+            }
+            return;
+        }
+        event.preventDefault();
+        const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-plus-tool-label]");
+        const targetLabel = target?.dataset.plusToolLabel;
+        if (targetLabel && targetLabel !== drag.label) {
+            drag.targetLabel = targetLabel;
+            setDropTargetPlusItem(targetLabel);
+        } else {
+            drag.targetLabel = undefined;
+            setDropTargetPlusItem(null);
+        }
+    };
+    const handlePlusPointerUp = () => {
+        if (plusMenuDragTimerRef.current) clearTimeout(plusMenuDragTimerRef.current);
+        plusMenuDragTimerRef.current = null;
+        const drag = plusMenuDragRef.current;
+        if (drag?.started && drag.targetLabel) reorderPlusMenuItem(drag.label, drag.targetLabel);
+        if (drag?.started || drag?.moved) {
+            suppressPlusClickRef.current = true;
+            window.setTimeout(() => { suppressPlusClickRef.current = false; }, 120);
+        }
+        plusMenuDragRef.current = null;
+        setDraggingPlusItem(null);
+        setDropTargetPlusItem(null);
+    };
 
     return (
         <div className="chat-input-bar chat-room-main-pane flex flex-col" data-ui="input">
@@ -939,14 +1048,31 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
             </div>
 
             {showPlusMenu && (
-                <div className="chat-plus-menu">
-                    {plusMenuItems.map((item, i) => (
-                        <div key={`${item.label}-${i}`} onClick={item.onClick} className="chat-plus-menu-item flex flex-col items-center gap-1.5 cursor-pointer" {...(item.active ? { "data-active": "" } : {})}>
-                            <div className="chat-plus-icon-box">
-                                {item.icon}
-                            </div>
-                            <span className="ts-11 text-[var(--c-text)]">{item.label}</span>
-                        </div>
+                <div className="chat-plus-menu" ref={plusMenuContainerRef} aria-label="聊天工具栏">
+                    {orderedPlusMenuItems.map((item, i) => (
+                        <button
+                            key={item.label + "-" + i}
+                            type="button"
+                            data-plus-tool-label={item.label}
+                            onPointerDown={(event) => handlePlusPointerDown(event, item.label)}
+                            onPointerMove={handlePlusPointerMove}
+                            onPointerUp={handlePlusPointerUp}
+                            onPointerCancel={handlePlusPointerUp}
+                            onClick={() => { if (suppressPlusClickRef.current) return; item.onClick(); }}
+                            className={"chat-plus-menu-item flex flex-col items-center gap-1.5 cursor-pointer" + (draggingPlusItem === item.label ? " is-dragging" : "") + (dropTargetPlusItem === item.label ? " is-drop-target" : "")}
+                            {...(item.active ? { "data-active": "" } : {})}
+                            {...(dropTargetPlusItem === item.label ? { "data-drop-index": "第" + (i + 1) + "位" } : {})}
+                            style={dropTargetPlusItem === item.label ? { position: "relative" } : undefined}
+                            aria-label={item.label}
+                        >
+                            {dropTargetPlusItem === item.label && (
+                                <span aria-hidden="true" style={{ position: "absolute", zIndex: 5, top: -7, right: -7, padding: "2px 5px", borderRadius: 999, background: "var(--c-icon-active, #a65d83)", color: "#fff", fontSize: 9, lineHeight: 1.35, whiteSpace: "nowrap", boxShadow: "0 1px 4px rgba(0,0,0,.18)", pointerEvents: "none" }}>
+                                    第{i + 1}位
+                                </span>
+                            )}
+                            <span className="chat-plus-icon-box" aria-hidden="true">{item.icon}</span>
+                            <span className="chat-plus-tool-label ts-11 text-[var(--c-text)]">{item.label}</span>
+                        </button>
                     ))}
                 </div>
             )}
@@ -1042,11 +1168,11 @@ const OfflineTextInputBar = memo(forwardRef<OfflineTextInputHandle, {
     }), [setTextAndResize]);
 
     const handleSubmit = () => {
-        if (isOfflineGenerating) {
-            onSendText(inputTextRef.current);
+        const trimmed = inputTextRef.current.trim();
+        if (isOfflineGenerating && !trimmed) {
+            onStopGeneration();
             return;
         }
-        const trimmed = inputTextRef.current.trim();
         if (!trimmed && !isSpectator) return;
         if (!onSendText(trimmed)) return;
         inputTextRef.current = "";
@@ -1137,16 +1263,64 @@ const OfflineTextInputBar = memo(forwardRef<OfflineTextInputHandle, {
     );
 }));
 
-export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
+export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRoomProps) {
+    // Protect an actively visible direct conversation from a simultaneous cloud
+    // life-scene notification. The life task is deferred, not cancelled; hiding or
+    // leaving this chat releases the lease and lets the schedule continue.
+    const wrapperRef = useRef<HTMLDivElement>(null);
+    const foregroundLeaseRef = useRef(false);
+
+    useEffect(() => {
+        if (session.isGroup) return;
+        const characterId = resolveSessionCharacterId(session);
+        if (!characterId) return;
+        if (!isActive) {
+            foregroundLeaseRef.current = false;
+            setOnlineChatForegroundLease(characterId, session.id, false);
+            return;
+        }
+        const isCurrentRoom = () => isActive && isChatRoomElementVisible(wrapperRef.current);
+        const refresh = () => {
+            const foreground = isCurrentRoom() && document.visibilityState === "visible";
+            setOnlineChatForegroundLease(characterId, session.id, foreground);
+            // Publish both foreground acquisition and release. A hidden app/document
+            // must not leave a stale cloud lease that blocks scheduled Life work.
+            if (foregroundLeaseRef.current !== foreground) {
+                foregroundLeaseRef.current = foreground;
+                void syncLifeScheduleSnapshot();
+            }
+        };
+        const syncCloudLease = () => {
+            if (isCurrentRoom() && document.visibilityState === "visible") void syncLifeScheduleSnapshot();
+        };
+        const onVisibilityChange = () => refresh();
+        refresh();
+        const localLeaseTimer = window.setInterval(refresh, 20_000);
+        // Only the active, actually visible room refreshes the cloud snapshot.
+        const cloudLeaseTimer = window.setInterval(syncCloudLease, 60_000);
+        document.addEventListener("visibilitychange", onVisibilityChange);
+        return () => {
+            window.clearInterval(localLeaseTimer);
+            window.clearInterval(cloudLeaseTimer);
+            document.removeEventListener("visibilitychange", onVisibilityChange);
+            foregroundLeaseRef.current = false;
+            setOnlineChatForegroundLease(characterId, session.id, false);
+            syncCloudLease();
+            if (document.visibilityState === "visible" && !isCurrentRoom()) void syncLifeScheduleSnapshot();
+        };
+    }, [session.id, session.contactId, session.isGroup, isActive]);
+
     const [liveCSS, setLiveCSS] = useState(session.customCSS || "");
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [transientMessages, setTransientMessages] = useState<ChatMessage[]>([]);
     const [stickerReady, setStickerReady] = useState(false);
     const [character, setCharacter] = useState<Character | null>(() => {
         const chars = loadCharacters();
-        return chars.find(c => c.id === session.contactId) || null;
+        const resolvedId = resolveSessionCharacterId(session);
+        return resolvedId ? chars.find(c => c.id === resolvedId) || null : null;
     });
     const [isGenerating, setIsGenerating] = useState(false);
+    const [sleepNotice, setSleepNotice] = useState<{ pending: number; threshold: number } | null>(null);
     const [offlineMode, setOfflineMode] = useState(false);
     const [theaterMode, setTheaterMode] = useState(() => kvGet(CHAT_THEATER_MODE_PREFIX + session.id) === "1");
     const [offlineTurns, setOfflineTurns] = useState<ChatOfflineTurn[]>([]);
@@ -1277,7 +1451,6 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     const [bgImageResolved, setBgImageResolved] = useState<string | null>(null);
     const [bgLoading, setBgLoading] = useState(!!effectiveBackgroundImage);
 
-    const wrapperRef = useRef<HTMLDivElement>(null);
 
     // 全屏特效：命中触发词的新消息播放表情雨/礼花（微信同款）
     const [activeScreenEffect, setActiveScreenEffect] = useState<ActiveScreenEffect | null>(null);
@@ -1658,7 +1831,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
     const activeRegexes = useMemo<RegexConfig[]>(() => {
         const bindings = loadBindingConfig();
-        const activeSlot = resolveBinding(bindings, session.isGroup ? undefined : session.contactId, session.isGroup ? "group_chat" : "chat");
+        const activeSlot = resolveBinding(bindings, session.isGroup ? undefined : (resolveSessionCharacterId(session) || undefined), session.isGroup ? "group_chat" : "chat");
         const allRegexes = loadRegexes();
         return (activeSlot.regexIds || [])
             .map(id => allRegexes.find(regex => regex.id === id))
@@ -1670,7 +1843,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     // 会先在预览气泡里闪现（cleanStreamText 自身不猜配置型标签名，由这里统一传入）。
     const streamPreviewTagConfig = useMemo(() => {
         const bindings = loadBindingConfig();
-        const slot = resolveBinding(bindings, session.isGroup ? undefined : session.contactId, session.isGroup ? "group_chat" : "chat");
+        const slot = resolveBinding(bindings, session.isGroup ? undefined : (resolveSessionCharacterId(session) || undefined), session.isGroup ? "group_chat" : "chat");
         const preset = loadPresets().find(item => item.id === slot.presetId) || null;
         const withThoughtCompat = (tag: string): string[] => (tag === "thinking" ? ["thinking", "thought", "think"] : [tag]);
         return {
@@ -1736,7 +1909,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         if (session.discardInvalidStickers !== true) return parts;
         const characterIds = senderCharacterId
             ? [senderCharacterId]
-            : (session.isGroup ? (session.participantIds ?? []) : [session.contactId]);
+            : (session.isGroup ? (session.participantIds ?? []) : (resolveSessionCharacterId(session) ? [resolveSessionCharacterId(session)!] : []));
         return parts.filter(part => part.mediaType !== "sticker"
             || isKnownStickerLabel(part.mediaData?.label || "", characterIds));
     }, [session.discardInvalidStickers, session.isGroup, session.participantIds, session.contactId]);
@@ -1797,9 +1970,10 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
     useEffect(() => {
         const refreshAvatars = () => {
-            const latestCharacter = loadCharacters().find(item => item.id === session.contactId) || null;
+            const characterId = resolveSessionCharacterId(session);
+            const latestCharacter = characterId ? loadCharacters().find(item => item.id === characterId) || null : null;
             setCharacter(latestCharacter);
-            setUserIdentity(resolveUserIdentity(session.contactId, "chat"));
+            setUserIdentity(resolveUserIdentity(characterId || undefined, "chat"));
         };
         window.addEventListener(CHARACTERS_UPDATED_EVENT, refreshAvatars);
         window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, refreshAvatars);
@@ -1815,7 +1989,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     );
 
     useEffect(() => {
-        setUserIdentity(resolveUserIdentity(session.contactId, "chat"));
+        setUserIdentity(resolveUserIdentity(resolveSessionCharacterId(session) || undefined, "chat"));
         setTransientMessages([]);
         setOfflineMode(kvGet(CHAT_OFFLINE_MODE_PREFIX + session.id) === "1");
         setOfflineVisibleCount(OFFLINE_INITIAL_LOAD);
@@ -1839,7 +2013,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setHasMore(nextHasMore);
         const charIds = session.isGroup && session.participantIds
             ? session.participantIds
-            : [session.contactId];
+            : (resolveSessionCharacterId(session) ? [resolveSessionCharacterId(session)!] : []);
         Promise.all(charIds.map(id => prewarmStickerCache(id))).then(() => {
             setStickerReady(true);
             needsInitialScrollRef.current = true;
@@ -2116,7 +2290,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     img.addEventListener("error", onDone, { once: true });
                 }
             }
-        } else if (displayMessages.length > prevMsgCountRef.current && el) {
+        } else if (displayMessages.length > prevMsgCountRef.current && el && isNearBottomRef.current) {
+            // 新消息只在用户原本就在底部附近时跟随；查看历史消息时不强行抢走滚动位置。
             el.scrollTop = el.scrollHeight;
         }
         prevMsgCountRef.current = displayMessages.length;
@@ -2185,7 +2360,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 startCall({
                     sessionId: session.id,
                     // 群聊通话没有单一角色，交由 CallLayer 按会话成员渲染
-                    characterId: session.isGroup ? "" : session.contactId,
+                    characterId: session.isGroup ? "" : (resolveSessionCharacterId(session) || ""),
                     kind: detail.type === "video" ? "video" : "voice",
                     initiator: "character",
                     ...(typeof detail.characterName === "string" ? { initiatorName: detail.characterName } : {}),
@@ -2239,7 +2414,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 orderId: targetMsg.mediaData?.shoppingOrderId,
                 requestId: targetMsg.mediaData?.paymentRequestId,
                 accepted: true,
-                payerCharacterId: session.contactId,
+                payerCharacterId: resolveSessionCharacterId(session) || "",
                 payerCharacterName: charN,
             });
         } else if (actionType === "decline_payment_request") {
@@ -2250,7 +2425,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 orderId: targetMsg.mediaData?.shoppingOrderId,
                 requestId: targetMsg.mediaData?.paymentRequestId,
                 accepted: false,
-                payerCharacterId: session.contactId,
+                payerCharacterId: resolveSessionCharacterId(session) || "",
                 payerCharacterName: charN,
             });
         } else {
@@ -2265,7 +2440,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             status: newStatus,
             ...(targetMediaType === "payment_request" ? {
                 paymentResolvedAt: new Date().toISOString(),
-                paymentPayerId: session.contactId,
+                paymentPayerId: resolveSessionCharacterId(session) || "",
                 paymentPayerName: charN,
             } : {}),
         };
@@ -2524,8 +2699,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 if (part.mediaType === "voice_call" || part.mediaType === "video_call") {
                     if (session.isSpectator) continue; // 围观群不能把用户卷进群通话
                     const callType = part.mediaType === "voice_call" ? "voice" : "video";
-                    // 通话界面已提升到 DesktopShell 的全局 CallLayer；无论聊天室是否可见，
-                    // 都统一交给全局事件入口，避免使用已移除的聊天室本地通话状态。
+                    // 统一通过全局通话触发事件打开通话界面，避免依赖当前聊天组件的局部弹窗状态。
                     window.dispatchEvent(new CustomEvent("ai-call-trigger", {
                         detail: { sessionId: session.id, type: callType, characterName: r.characterName },
                     }));
@@ -2843,7 +3017,15 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         guard?: GenerationRunGuard,
     ): Promise<ChatMessage | null> => {
         if (!isPendingChatGeneratedImageMessage(message)) return Promise.resolve(null);
-        return generateAndApplyChatGeneratedImage(message, characterId || session.contactId, { signal: guard?.signal })
+        const imageDescription = message.mediaData?.label?.trim() || "";
+        const groupPhotoPattern = /合照|合影|全员|大家|所有人|群像|我们|所有成员|group\s*(?:photo|portrait)|everyone|all of us|the whole group/i;
+        const groupCharacterIds = session.isGroup && groupPhotoPattern.test(imageDescription)
+            ? session.participantIds
+            : undefined;
+        return generateAndApplyChatGeneratedImage(message, characterId || resolveSessionCharacterId(session) || "", {
+            signal: guard?.signal,
+            characterIds: groupCharacterIds,
+        })
             .catch(error => {
                 if (!isAbortLikeError(error)) {
                     console.warn("[ImageGeneration] Failed to generate chat image:", error);
@@ -2907,7 +3089,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         const rawResponseText = options?.rawResponseText ?? aiResponseText;
         const previousState = session.isGroup
             ? getLatestStateValues(session.id)
-            : getLatestCharacterStateValues(session.contactId);
+            : getLatestCharacterStateValues(resolveSessionCharacterId(session) || "");
 
         const { parts: rawParts, stateValues, freshStateValues, statusPanel, innerMonologue, characterRemarkForUser } = parseAIResponse(aiResponseText, previousState);
         if (!session.isGroup && characterRemarkForUser) {
@@ -2960,7 +3142,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     mediaData: {
                         ...p.mediaData,
                         meetingInviteStatus: "pending",
-                        meetingInviteCharacterId: session.contactId,
+                        meetingInviteCharacterId: resolveSessionCharacterId(session) || "",
                         meetingInviteCharacterName: charN,
                     },
                 });
@@ -3055,7 +3237,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             messageDrafts.push({
                 draft,
                 afterPublish: isPendingChatGeneratedImageMessage(draft)
-                    ? (message) => scheduleGeneratedImageReplacement(message, session.contactId, options)
+                    ? (message) => scheduleGeneratedImageReplacement(message, resolveSessionCharacterId(session) || "", options)
                     : afterPublishEffects[idx],
             });
         }
@@ -3140,7 +3322,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         if (!triggerCall) return;
         startCall({
             sessionId: session.id,
-            characterId: session.isGroup ? "" : session.contactId,
+            characterId: session.isGroup ? "" : (resolveSessionCharacterId(session) || ""),
             kind: triggerCall,
             initiator: "character",
         });
@@ -3253,7 +3435,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         const request: MemoryWriteRequest = {
             capabilityId: "memory_write",
             sessionId: session.id,
-            characterId: session.contactId,
+            characterId: msg.senderCharacterId || resolveSessionCharacterId(session) || "",
             content: msg.mediaData?.memoryContent || msg.content,
             importance: msg.mediaData?.memoryImportance ?? 0.8,
             ...(msg.mediaData?.memoryReason ? { reason: msg.mediaData.memoryReason } : {}),
@@ -3346,6 +3528,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             clearGenerationLock(session.id);
         }
 
+        const latestForSleepGate = loadChatMessages(session.id);
+        const lastForSleepGate = latestForSleepGate[latestForSleepGate.length - 1];
+        if (lastForSleepGate?.role === "user" && shouldSuppressLifeSleepReply(lastForSleepGate.content)) { setPendingGenerate(false); return; }
         const generationRun = createGenerationRun(session.id);
         const generationRunId = generationRun.runId;
         const isCurrentGeneration = () => isGenerationRunActive(session.id, generationRunId);
@@ -3439,12 +3624,12 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 handleCallTrigger(result.triggerCall);
                 shouldRunDeclineReply = Boolean(result.hasDecline);
             }
-        } catch (error: any) {
+        } catch (error: unknown) {
             if (!isCurrentGeneration() || isAbortLikeError(error)) return;
             const errorMsg = pushChatMessage({
                 sessionId: session.id,
                 role: "system",
-                content: `⚠️ ${errorPrefix}: ${error?.message || String(error)}`,
+                content: `⚠️ ${errorPrefix}: ${error instanceof Error ? error.message : String(error)}`,
             });
             setMessages(prev => [...prev, errorMsg]);
         } finally {
@@ -3624,7 +3809,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         const launchContext = {
             source: "chat_plus_action",
             sessionId: session.id,
-            characterId: session.contactId,
+            characterId: resolveSessionCharacterId(session) || "",
             characterName: character?.name,
             isGroup: Boolean(session.isGroup),
             groupName: session.groupName,
@@ -3684,7 +3869,66 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         return sent;
     };
 
+    const shouldSuppressLifeSleepReply = (userText?: string, notify = true): boolean => {
+        if (session.isGroup || !character) return false;
+        const loadedLife = loadVirtualLifeState();
+        const settledLife = settleActorTimelineToNow(loadedLife, "character", character.id);
+        const life = settledLife === loadedLife ? loadedLife : saveVirtualLifeState(settledLife);
+        if (!life.settings.enabled || !life.settings.allowCharactersToStaySilent) { kvRemove("life-sleep-pending-reply:" + session.id); return false; }
+        const latestUserText = (userText || loadChatMessages(session.id).filter(message => message.role === "user").slice(-1)[0]?.content || "").trim();
+        if (!latestUserText) return false;
+        const clock = getActorClock(life, "character", character.id);
+        const now = resolveActorLifeNow(clock);
+        const schedule = getCurrentActorSchedule(life, "character", character.id, now);
+        const presence = life.actorStates.find(actor => actor.ownerType === "character" && actor.ownerId === character.id);
+        const sleeping = /睡眠|睡觉|入睡|午休/.test((presence?.activity || "") + " " + (schedule?.title || ""));
+        const pendingKey = "life-sleep-pending-reply:" + session.id;
+        if (!sleeping) { kvRemove(pendingKey); kvRemove("life-sleep-wake-threshold:" + session.id + ":offline"); kvRemove("life-sleep-wake-threshold:" + session.id + ":online"); setSleepNotice(null); return false; }
+
+        // 睡着时不因单条消息或随机数醒来：统计最近一次角色回复之后积累的用户消息。
+        // 每个角色固定一个 5–10 条的唤醒阈值，避免同一条消息反复检查时结果变化。
+        const history = loadChatMessages(session.id);
+        let unansweredUserMessages = 0;
+        for (let i = history.length - 1; i >= 0; i--) {
+            const message = history[i];
+            if (message.role === "assistant") break;
+            if (message.role === "user" && message.content?.trim()) unansweredUserMessages++;
+        }
+        // 每个睡眠周期随机 5-10 条唤醒阈值；同一周期稳定，醒来/起床后清掉。
+        // 线下比线上更容易被吵醒：线下 1–3 条，线上 5–10 条。阈值按模式分开存，
+        // 避免在线下设了 1、切回线上后仍然一条就醒。
+        const thresholdKey = "life-sleep-wake-threshold:" + session.id + ":" + (offlineMode ? "offline" : "online");
+        const minThreshold = offlineMode ? 1 : 5;
+        const maxThreshold = offlineMode ? 3 : 10;
+        let wakeThreshold = Number(kvGet(thresholdKey) || 0);
+        if (!Number.isFinite(wakeThreshold) || wakeThreshold < minThreshold || wakeThreshold > maxThreshold) {
+            wakeThreshold = minThreshold + Math.floor(Math.random() * (maxThreshold - minThreshold + 1));
+            kvSet(thresholdKey, String(wakeThreshold));
+        }
+        const urgent = /救命|紧急|出事了|危险|受伤|快来|急救/.test(latestUserText);
+        const staysAsleep = !urgent && unansweredUserMessages < wakeThreshold;
+        if (staysAsleep) {
+            kvSet(pendingKey, "true");
+            setSleepNotice({ pending: unansweredUserMessages, threshold: wakeThreshold });
+            if (notify && unansweredUserMessages === 1) {
+                showChatToast(character.name + "正在睡觉，暂时没有醒来。继续发消息或使用自动续写可以叫醒 TA。", 3500);
+            }
+        } else {
+            kvRemove(pendingKey);
+            kvRemove(thresholdKey);
+            setSleepNotice(null);
+        }
+        return staysAsleep;
+    };
+
     const triggerAIResponse = async () => {
+        // 手动点击生成/自动续写时，如果最后一条是角色消息，视为明确唤醒指令。
+        // 普通发送消息仍由 shouldSuppressLifeSleepReply 按 5–10 条未回复消息累计判断。
+        const newestBeforeGenerate = loadChatMessages(session.id);
+        const lastBeforeGenerate = newestBeforeGenerate[newestBeforeGenerate.length - 1];
+        if (!session.isGroup && character && lastBeforeGenerate?.role === "assistant") {
+            kvRemove("life-sleep-pending-reply:" + session.id);
+        }
         if (isGeneratingRef.current) {
             if (activeGenerationRuns.has(session.id)) return;
             // 上一轮被外部取消/顶替后收尾提前返回过，标记已是陈旧状态：复位后继续本次请求
@@ -3692,9 +3936,17 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             setIsGenerating(false);
             clearGenerationLock(session.id);
         }
+        const turn = beginTurn({
+            kind: "user_reply",
+            characterId: character?.id ?? resolveSessionCharacterId(session) ?? "",
+            sessionId: session.id,
+        });
+        if (!turn) return;
         const generationRun = createGenerationRun(session.id);
         const generationRunId = generationRun.runId;
         const isCurrentGeneration = () => isGenerationRunActive(session.id, generationRunId);
+        const onTurnAbort = () => { if (isCurrentGeneration()) cancelGenerationRun(session.id); };
+        turn.signal.addEventListener("abort", onTurnAbort, { once: true });
         const generationGuard: GenerationRunGuard = { signal: generationRun.controller.signal, isActive: isCurrentGeneration };
         let shouldRunDeclineReply = false;
         isGeneratingRef.current = true;
@@ -3971,7 +4223,12 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 if (!isCurrentGeneration()) return;
 
                 if (lastSendResult) {
-                    scheduleFollowUp(session.id, 0, lastSendResult.stateValues);
+                    const lifeCharacterId = resolveSessionCharacterId(session);
+                    if (lifeCharacterId && isCharacterCoPresentInLifeScene(lifeCharacterId)) {
+                        cancelFollowUp(session.id);
+                    } else {
+                        scheduleFollowUp(session.id, 0, lastSendResult.stateValues);
+                    }
                     const isHidden = !mountedRef.current || !isChatRoomElementVisible(wrapperRef.current);
                     if (isHidden && lastSendResult.triggerCall) {
                         window.dispatchEvent(new CustomEvent("ai-call-trigger", {
@@ -3983,15 +4240,17 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     shouldRunDeclineReply = Boolean(lastSendResult.hasDecline);
                 }
             }
-        } catch (error: any) {
+        } catch (error: unknown) {
             if (!isCurrentGeneration() || isAbortLikeError(error)) return;
             const errorMsg = pushChatMessage({
                 sessionId: session.id,
                 role: "system",
-                content: `⚠️ 发送失败: ${error?.message || String(error)}`
+                content: `⚠️ 发送失败: ${error instanceof Error ? error.message : String(error)}`
             });
             setMessages(prev => [...prev, errorMsg]);
         } finally {
+            turn.end();
+            turn.signal.removeEventListener("abort", onTurnAbort);
             if (finishGenerationRun(session.id, generationRunId)) {
                 isGeneratingRef.current = false;
                 setIsGenerating(false);
@@ -4004,7 +4263,16 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 // 「最后一条是用户消息」的 pendingGenerate 兜底条件，必须单独处理
                 if (pendingReplyRequestRef.current) {
                     pendingReplyRequestRef.current = false;
-                    void triggerAIResponse();
+                    const latestMsgs = loadChatMessages(session.id);
+                    const latestUser = [...latestMsgs].reverse().find(message => message.role === "user");
+                    const latestSystem = [...latestMsgs].reverse().find(message => message.role === "system");
+                    const userSupersededSystemEvent = !!latestUser && !!latestSystem
+                        && new Date(latestUser.createdAt).getTime() > new Date(latestSystem.createdAt).getTime();
+                    if (!userSupersededSystemEvent) {
+                        void triggerAIResponse();
+                    }
+                    // If the user spoke after the queued system event, the newest user turn
+                    // wins; do not launch a stale second generation that can answer off-topic.
                 } else {
                     // If user sent more messages while AI was generating, show the generate button again
                     const latestMsgs = loadChatMessages(session.id);
@@ -4047,7 +4315,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             const requestCharacterId = typeof detail?.characterId === "string" ? detail.characterId : "";
             const matches = requestSessionId
                 ? requestSessionId === session.id
-                : Boolean(requestCharacterId && !session.isGroup && requestCharacterId === session.contactId);
+                : Boolean(requestCharacterId && !session.isGroup && requestCharacterId === resolveSessionCharacterId(session));
             if (!matches) return;
 
             if (detail) detail.handled = true;
@@ -4070,6 +4338,28 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     }, [session.contactId, session.id, session.isGroup, syncMessagesFromStorage, triggerAIResponse]);
 
     // 围观群/被禁言时用户不能发言
+    useEffect(() => {
+        if (!isActive || session.isGroup || !character) return;
+        const key = "life-sleep-pending-reply:" + session.id;
+        const checkPendingSleepReply = () => {
+            if (kvGet(key) !== "true" || isGeneratingRef.current) return;
+            const latest = loadChatMessages(session.id);
+            const lastUser = [...latest].reverse().find(message => message.role === "user");
+            if (!lastUser) { kvRemove(key); return; }
+            if (shouldSuppressLifeSleepReply(lastUser.content, false)) return;
+            kvRemove(key);
+            showChatToast(character.name + "醒来后看到了你之前的消息，正在回应。", 3500);
+            void triggerAIResponse();
+        };
+        checkPendingSleepReply();
+        const timer = window.setInterval(checkPendingSleepReply, 30_000);
+        window.addEventListener("focus", checkPendingSleepReply);
+        return () => {
+            window.clearInterval(timer);
+            window.removeEventListener("focus", checkPendingSleepReply);
+        };
+    }, [session.id, session.isGroup, offlineMode, character?.id, isActive]);
+
     const ensureGroupSpeakPermission = (): boolean => {
         if (!session.isGroup) return true;
         if (session.isSpectator) {
@@ -4086,12 +4376,28 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
     const handleSendText = (text: string, options?: { autoReply?: boolean }): boolean => {
         if (!ensureGroupSpeakPermission()) return false;
-        if (isGenerating) {
-            showChatToast("请先等待对方回复");
-            return false;
-        }
         const trimmed = text.trim();
         if (!trimmed) return false;
+
+        // A newer user turn wins over unfinished foreground, offline, or background
+        // replies. The follow-up service owns a separate task registry, so cancelling
+        // only the visible stream leaves an old unsolicited reply able to commit later.
+        const supersedingInFlightTurn = isGeneratingRef.current || activeGenerationRuns.has(session.id);
+        cancelBackgroundGeneration(session.id);
+        cancelOfflineGenerationRun(session.id);
+        if (supersedingInFlightTurn) {
+            cancelGenerationRun(session.id);
+            pendingReplyRequestRef.current = false;
+            isGeneratingRef.current = false;
+            setIsGenerating(false);
+            clearGenerationLock(session.id);
+            streamAccumRef.current = "";
+            setStreamPreview(null);
+            if (streamParseFrameRef.current) {
+                cancelAnimationFrame(streamParseFrameRef.current);
+                streamParseFrameRef.current = 0;
+            }
+        }
 
         // Cancel any pending follow-up for this session
         cancelFollowUp(session.id);
@@ -4106,6 +4412,10 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setQuotingMessage(null);
 
         const commitSendText = (currentText: string) => {
+            // A new user message supersedes stale requests raised by older life/system events.
+            pendingReplyRequestRef.current = false;
+            // A newly committed user turn invalidates any server-side fallback for the older turn.
+            void cancelBailoutKey("reply:" + session.id);
             // 掷骰子：整条消息就是骰子图标时，发骰子气泡（内容仅图标），
             // 点数由系统旁白公布——避免结果挂在 user 消息上被角色模仿格式
             const diceOnly = !isQuoting && isDiceOnlyMessage(currentText);
@@ -4120,6 +4430,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             });
 
             setMessages(prev => [...prev, newMsg]);
+            if (!diceOnly && shouldSuppressLifeSleepReply(currentText)) { setPendingGenerate(false); return; }
             if (diceOnly) {
                 const diceAside = pushChatMessage({
                     sessionId: session.id,
@@ -4171,7 +4482,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
         try {
             await hydrateStoryStorage();
-            const characterId = invite.mediaData?.meetingInviteCharacterId || session.contactId;
+            const characterId = invite.mediaData?.meetingInviteCharacterId || resolveSessionCharacterId(session) || "";
             const characterName = invite.mediaData?.meetingInviteCharacterName || character?.name || "角色";
             const mainSession = loadStorySessionsForOwner("single", characterId)
                 .find((item) => (item.branchId || "main") === "main")
@@ -4346,11 +4657,19 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     };
 
     const handleOfflineSend = (inputText: string): boolean => {
-        if (isOfflineGenerating) {
-            showChatToast("线下回复生成中");
-            return false;
-        }
         const currentText = inputText.trim();
+        if (isOfflineGenerating) {
+            if (!currentText) return false;
+            // Replace the unfinished offline turn with the newest typed message.
+            // Offline turns are committed only after completion, so aborting here
+            // prevents stale output from being appended ahead of the new request.
+            cancelOfflineGenerationRun(session.id);
+            setPendingOfflineUserText("");
+            offlineGenerationInputRef.current = "";
+            setIsOfflineGenerating(false);
+            offlineStreamAccumRef.current = "";
+            setOfflineStreamPreview(null);
+        }
         if (!currentText && !(session.isGroup && session.isSpectator)) return false;
 
         cancelFollowUp(session.id);
@@ -4411,10 +4730,10 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     thinkingTag: result.thinkingTag,
                 });
                 setOfflineTurns(prev => [...prev, saved]);
-            } catch (error: any) {
+            } catch (error: unknown) {
                 if (!isCurrentOfflineRun() || isAbortLikeError(error)) return;
                 offlineTextInputRef.current?.setText(currentText);
-                showChatToast(`线下生成失败: ${error?.message || String(error)}`, 3000);
+                showChatToast(`线下生成失败: ${error instanceof Error ? error.message : String(error)}`, 3000);
             } finally {
                 if (!finishOfflineGenerationRun(session.id, offlineRunId)) return;
                 setPendingOfflineUserText("");
@@ -4561,10 +4880,10 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 thinkingTag: result.thinkingTag,
             });
             setOfflineTurns([...baseTurns, saved]);
-        } catch (error: any) {
+        } catch (error: unknown) {
             if (!isCurrentOfflineRun() || isAbortLikeError(error)) return;
             offlineTextInputRef.current?.setText(retryInput);
-            showChatToast(`线下重试失败: ${error?.message || String(error)}`, 3000);
+            showChatToast(`线下重试失败: ${error instanceof Error ? error.message : String(error)}`, 3000);
         } finally {
             if (!finishOfflineGenerationRun(session.id, offlineRunId)) return;
             setPendingOfflineUserText("");
@@ -4884,7 +5203,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         const stateCutoff = storedMessages[firstBatchIndex];
         const previousState = session.isGroup
             ? getLatestStateValues(session.id)
-            : getLatestCharacterStateValues(session.contactId, stateCutoff ? { before: stateCutoff } : undefined);
+            : getLatestCharacterStateValues(resolveSessionCharacterId(session) || "", stateCutoff ? { before: stateCutoff } : undefined);
 
         const { parts: rawParts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(editedResponseContent, previousState);
         const parts = stripInvalidStickerParts(rawParts);
@@ -5790,6 +6109,16 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setMessages(nextMessages);
     }, [session.id, stopLoadMoreAnchorTracking]);
 
+    useEffect(() => {
+        const handler = (event: Event) => {
+            const detail = (event as CustomEvent<{ sessionId?: string; messageId?: string }>).detail;
+            if (detail?.sessionId !== session.id || !detail.messageId) return;
+            jumpToStoredMessage(detail.messageId);
+        };
+        window.addEventListener("chat-history-jump-to-message", handler);
+        return () => window.removeEventListener("chat-history-jump-to-message", handler);
+    }, [session.id, jumpToStoredMessage]);
+
     // 通话挂断的收尾：通话屏已提升到全局 CallLayer，聊天室不再是它的父级、
     // 收不到 onEnd 回调。全局层在挂断时广播 chat-call-ended，这里只做界面刷新
     //（通话留痕已由通话屏落库）；「让角色回应一次」由 desktop-shell 统一触发，
@@ -5848,12 +6177,25 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                         )}
                     </span>
                     <span className="page-header-right">
+                        {/* 历史检索入口统一放在聊天信息页，避免聊天室顶栏重复放置。 */}
                         <button className="page-back-btn" type="button" onClick={() => setShowSettings(true)} aria-label="更多">
                             <MoreHorizontal size={22} strokeWidth={1.5} />
                         </button>
                     </span>
                 </div>
             </header>
+            {sleepNotice && !session.isGroup && (
+                <div className="chat-room-main-pane" style={{ display: "flex", alignItems: "center", gap: 8, margin: "0 12px 8px", padding: "8px 12px", borderRadius: 12, background: "rgba(118, 83, 77, 0.10)", border: "1px solid rgba(118, 83, 77, 0.18)", fontSize: 12, color: "var(--c-text, #493c34)" }}>
+                    <span style={{ flex: 1, minWidth: 0 }}>🌙 {character?.name || "TA"} 正在睡觉，已收到你 {sleepNotice.pending} 条消息。再发 {Math.max(0, sleepNotice.threshold - sleepNotice.pending)} 条左右会随机吵醒，也可以直接叫醒 TA。</span>
+                    <button type="button" style={{ flexShrink: 0, border: 0, borderRadius: 999, padding: "6px 10px", background: "var(--c-icon, #76534d)", color: "#fff", fontSize: 12 }} onClick={() => {
+                        kvRemove("life-sleep-pending-reply:" + session.id);
+                        kvRemove("life-sleep-wake-threshold:" + session.id + ":offline");
+                        kvRemove("life-sleep-wake-threshold:" + session.id + ":online");
+                        setSleepNotice(null);
+                        void triggerAIResponse();
+                    }}>叫醒 TA</button>
+                </div>
+            )}
             <ChatPluginSlot
                 name="chat.header"
                 slotProps={{ sessionId: session.id, isGroup: !!session.isGroup }}
@@ -6486,7 +6828,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                                 userName={userIdentity?.name || "你"}
                                                 groupSize={session.isGroup ? (session.participantIds?.length || 0) + (session.isSpectator ? 0 : 1) : undefined}
                                                 onShowDetail={setMediaDetailMsg}
-                                                characterId={msg.senderCharacterId || session.contactId}
+                                                characterId={msg.senderCharacterId || resolveSessionCharacterId(session) || ""}
                                                 onUpdate={(updated) => setMessages(prev => prev.map(m => m.id === updated.id ? updated : m))}
                                                 onSystemMessage={(text) => {
                                                     const sysMsg = pushChatMessage({
@@ -6711,7 +7053,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             <ChatTextInputBar
                 ref={chatTextInputRef}
                 characterName={character?.name || "对方"}
-                characterId={session.contactId}
+                characterId={resolveSessionCharacterId(session) || ""}
 	                stickerCharacterIds={session.isGroup ? session.participantIds : undefined}
 	                isGroup={!!session.isGroup}
 	                isSpectator={!!session.isGroup && !!session.isSpectator}
@@ -6734,11 +7076,11 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 	                onCloseTheaterMode={closeTheaterMode}
 	                onOpenRichModal={(modal) => { setShowPlusMenu(false); setRichModal(modal); }}
                 onOpenCustomPlusAction={handleOpenCustomPlusAction}
-                onStartVideoCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); startCall({ sessionId: session.id, characterId: session.isGroup ? "" : session.contactId, kind: "video", initiator: "user" }); }}
-                onStartVoiceCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); startCall({ sessionId: session.id, characterId: session.isGroup ? "" : session.contactId, kind: "voice", initiator: "user" }); }}
+                onStartVideoCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); startCall({ sessionId: session.id, characterId: session.isGroup ? "" : (resolveSessionCharacterId(session) || ""), kind: "video", initiator: "user" }); }}
+                onStartVoiceCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); startCall({ sessionId: session.id, characterId: session.isGroup ? "" : (resolveSessionCharacterId(session) || ""), kind: "voice", initiator: "user" }); }}
                 onSendText={handleSendText}
                 onStopGeneration={clearStuckGeneration}
-                onTriggerAIResponse={triggerAIResponse}
+                onTriggerAIResponse={() => { kvRemove("life-sleep-pending-reply:" + session.id); void triggerAIResponse(); }}
                 onSendSticker={(name, url) => { setShowStickerPanel(false); sendRichMessage("sticker", { label: name, stickerUrl: url }); }}
             />
             ))}
@@ -6867,7 +7209,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             {/* Rich Media Input Modals */}
             {richModal === "voice_msg" && (
                 <VoiceRecordModal
-                    characterId={session.contactId}
+                    characterId={resolveSessionCharacterId(session) || ""}
                     onSend={(text, audioDataUrl) => {
                         setRichModal(null);
                         sendRichMessage("audio", { label: text }, "", audioDataUrl);
@@ -6883,7 +7225,35 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             )}
             {richModal === "photo" && (
                 <PhotoInputModal
-                    onSend={(desc, imageDataUrl) => { setRichModal(null); sendRichMessage("image", { label: desc }, "", imageDataUrl); }}
+                    onSend={async (desc, imageDataUrls, mergeForDisplay) => {
+                        setRichModal(null);
+                        try {
+                            const refs = await Promise.all(imageDataUrls.map(async (dataUrl) => {
+                                const comma = dataUrl.indexOf(",");
+                                const mime = dataUrl.slice(5, dataUrl.indexOf(";")) || "image/jpeg";
+                                return (await storeMediaBase64(dataUrl.slice(comma + 1), mime)).ref;
+                            }));
+                            if (refs.length) {
+                                if (mergeForDisplay && refs.length > 1) {
+                                    // 合并模式：单条消息保存整组引用，由气泡以横向轮播展示。
+                                    // mediaUrl 持有主图，其余引用只保存后续图片；历史数据仍兼容 imageRefs 含主图的完整数组。
+                                    const sent = sendRichMessage("image", { ...(desc ? { label: desc } : {}), imageRefs: refs.slice(1), imageRefsExcludePrimary: true, imageCollection: true }, "", refs[0]);
+                                    if (sent) showChatToast(`已合并发送 ${refs.length} 张图片，可左右滑动查看`);
+                                } else {
+                                    // 普通模式：每张图各自成为一条消息，顺序与选择顺序一致。
+                                    let sentCount = 0;
+                                    refs.forEach((ref, index) => {
+                                        if (sendRichMessage("image", { ...(desc ? { label: desc } : {}), ...(index === 0 ? {} : { imageIndex: index + 1 }) }, "", ref)) sentCount += 1;
+                                    });
+                                    if (sentCount) showChatToast(`已发送 ${sentCount} 张图片`);
+                                }
+                            } else {
+                                showChatToast("没有图片成功保存，请重新选择后再发送");
+                            }
+                        } catch (error) {
+                            showChatToast("图片保存失败：" + (error instanceof Error ? error.message : "请重试"));
+                        }
+                    }}
                     onClose={() => setRichModal(null)}
                 />
             )}
@@ -7199,7 +7569,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             )}
 
             {/* Chat toast notification (overlay, does not affect layout) */}
-            {chatToast && (
+            {chatToast && typeof document !== "undefined" && createPortal(
                 <div className="chat-toast-overlay">
                     <div className="wp-toast chat-toast-floating">
                         {chatToast === "加载音乐中..." ? (
@@ -7209,7 +7579,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                             </span>
                         ) : chatToast}
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
 
             {/* 通话界面已提升到 desktop-shell 的 CallLayer 常驻渲染：

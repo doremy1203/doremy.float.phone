@@ -5,7 +5,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { loadCharacters } from "@/lib/character-storage";
 import { CLOUD_BACKUP_BUCKET, normalizeBackupUrl } from "@/lib/cloud-backup/config";
 import { pollRealityBridgeNow, REALITY_BRIDGE_FEED_UPDATED_EVENT } from "@/components/reality-bridge-scheduler";
-import { testRunRule } from "@/lib/reality-bridge/engine";
+import { previewBridgeRuleText, testRunRule } from "@/lib/reality-bridge/engine";
 import {
   bridgeConnection,
   clearBridgeFeed,
@@ -30,6 +30,8 @@ import {
   type ScreenChatSettings,
 } from "@/lib/reality-bridge/storage";
 import type { BridgeRule } from "@/lib/reality-bridge/types";
+import { buildChatPromptMessages, sendLLMRequest } from "@/lib/chat-engine";
+import { loadChatMessages, loadChatSessions } from "@/lib/chat-storage";
 import { createShortcutCommand, loadRecentShortcutCommands, type ShortcutCommand } from "@/lib/shortcut-command-client";
 import { enableOfflinePush, isShellEnvironment, sendShellTestPush } from "@/lib/push-client";
 import { describeBridgePlatform } from "@/lib/shell-detect";
@@ -335,6 +337,177 @@ const RULE_SCENE_TEMPLATES: RuleSceneTemplate[] = [
     }),
   },
   {
+    id: "scene_charging_start",
+    title: "插上充电时告诉我",
+    desc: "检测到开始充电时触发；角色可结合当下情境自然回应。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "开始充电时互动",
+      matchType: "充电开始",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 60,
+    }),
+  },
+  {
+    id: "scene_charging_end",
+    title: "充电结束时告诉我",
+    desc: "检测到停止充电时触发，适合提醒或轻松互动。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "充电结束时互动",
+      matchType: "充电结束",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 60,
+    }),
+  },
+  {
+    id: "scene_network_wifi",
+    title: "连上 Wi-Fi 时告诉我",
+    desc: "网络状态切换到 Wi-Fi 时触发；只在设备实际检测到变化时发生。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "连接 Wi-Fi 时互动",
+      matchType: "连接到 WiFi",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 60,
+    }),
+  },
+  {
+    id: "scene_network_change",
+    title: "切换到移动网络时告诉我",
+    desc: "网络切换到移动网络时触发；避免把网络变化直接当作精确位置。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "切换到移动网络时互动",
+      matchType: "网络切换到移动网络",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 60,
+    }),
+  },
+
+
+
+  {
+    id: "scene_app_usage",
+    title: "某个应用累计用太久时提醒我",
+    desc: "按当天累计使用时长触发；可在规则里填写应用名过滤词，并在感知设置中调整阈值。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "应用累计使用提醒",
+      matchType: "应用用太久",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 60,
+    }),
+  },
+  {
+    id: "scene_battery_change",
+    title: "电量明显变化时告诉我",
+    desc: "电量变化达到感知设置的步进阈值时触发。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "电量变化时互动",
+      matchType: "电量变化",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 60,
+    }),
+  },
+  {
+    id: "scene_late_night",
+    title: "深夜还醒着时关心我",
+    desc: "到达感知设置的深夜时段时触发；按天去重。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "深夜关心",
+      matchType: "深夜还醒着",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 720,
+    }),
+  },
+  {
+    id: "scene_first_open",
+    title: "每天第一次打开时打招呼",
+    desc: "当天首次打开小手机时触发；不需要 Android 原生权限。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "每日首次见面",
+      matchType: "今天第一次打开",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 720,
+    }),
+  },
+  {
+    id: "scene_no_talk",
+    title: "很久没聊天时主动找我",
+    desc: "超过感知设置中的沉默时长后触发；一天最多一次。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "久未聊天主动联系",
+      matchType: "很久没聊天",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 720,
+    }),
+  },
+  {
+    id: "scene_sit_still",
+    title: "久坐不动时提醒我",
+    desc: "需要步数/活动识别权限，并且检测到持续使用手机；阈值在感知设置中调整。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "久坐提醒",
+      matchType: "久坐不动",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 120,
+    }),
+  },
+  {
+    id: "scene_location_change",
+    title: "位置变化时让角色知道",
+    desc: "需要定位权限；只在检测到足够明显的位置变化时触发，地名可能不准确。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "位置变化互动",
+      matchType: "到达新位置",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 180,
+    }),
+  },
+  {
+    id: "scene_wake_up",
+    title: "检测到睡醒时问候我",
+    desc: "需要 Health Connect 睡眠数据及授权；只能依据可读到的睡眠记录触发。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "睡醒问候",
+      matchType: "睡醒了",
+      actions: { chat: { characterId, role: "system", requestReply: true } },
+      cooldownMinutes: 360,
+    }),
+  },
+  {
     id: "scene_morning",
     title: "每天早上说句早安",
     desc: "到点角色自己开口，不用你先说话。时间可以改。",
@@ -376,6 +549,23 @@ const RULE_SCENE_TEMPLATES: RuleSceneTemplate[] = [
       actions: { deviceAction: { action: "brightness", args: { level: 25 } } },
     }),
   },
+  {
+    id: "scene_dark_flashlight",
+    title: "环境很暗时自动开手电筒",
+    desc: "照度低于约 15 lux 时直接打开手电筒。需要开启设备操作总开关并允许手电筒动作；启用后会显示 Android 常驻监测通知。强制停止或关机时不会运行。",
+    tag: "操作手机",
+    needsAndroid: true,
+    build: () => ({
+      ...newRule(),
+      name: "环境很暗时打开手电筒",
+      matchType: "环境光线",
+      payloadFilter: "很暗",
+      cooldownMinutes: 10,
+      process: { mode: "template", template: "检测到环境很暗，尝试帮你打开手电筒。", prompt: "" },
+      actions: { deviceAction: { action: "torch", args: { on: true } } },
+    }),
+  },
+
 ];
 
 const WIZ_STEP_NAMES = ["接通管道", "创建快捷指令", "选择信号", "加工内容", "决定动作", "测试与保存"] as const;
@@ -425,8 +615,87 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
   const [tab, setTab] = useState<TabId>("main");
   const [settings, setSettings] = useState(() => loadBridgeSettings());
   const [rules, setRules] = useState<BridgeRule[]>(() => loadBridgeRules());
+  const [deviceActionConfigRevision, setDeviceActionConfigRevision] = useState(0);
+  useEffect(() => {
+    const onDeviceActionsChanged = () => setDeviceActionConfigRevision(value => value + 1);
+    window.addEventListener("device-action-config-changed", onDeviceActionsChanged);
+    return () => window.removeEventListener("device-action-config-changed", onDeviceActionsChanged);
+  }, []);
+  // 安卓壳内把同一份规则同步给原生本机引擎。该链路只写本地 SharedPreferences，
+  // 不上传事件；网页关闭后，已同步的系统电源规则仍可独立匹配。
+  useEffect(() => {
+    if (typeof window === "undefined" || !isShellEnvironment()) return;
+    const shell = (window as Window & {
+      AndroidShell?: { configureNativeRealityBridge?: (json: string) => boolean };
+    }).AndroidShell;
+    if (!shell?.configureNativeRealityBridge) return;
+    const deviceActionConfig = loadDeviceActionConfig();
+    const nativeRules = rules
+      .filter(rule => !rule.schedule)
+      .map(rule => {
+        const chosenAction = rule.actions.deviceAction;
+        // Native rules that run with the WebView closed intentionally sync only torch:
+        // other actions often need foreground UI, permissions, or user confirmation.
+        const canSyncAction = !!chosenAction && chosenAction.action === "torch" && deviceActionConfig.enabled === true && deviceActionConfig.actions[chosenAction.action as keyof typeof deviceActionConfig.actions] === true;
+        return {
+          id: rule.id,
+          name: rule.name,
+          matchType: rule.matchType,
+          payloadFilter: rule.payloadFilter || "",
+          enabled: rule.enabled === true,
+          cooldownMinutes: rule.cooldownMinutes || 0,
+          process: {
+            mode: rule.process?.mode || "raw",
+            template: rule.process?.mode === "template" ? rule.process?.template || "" : "",
+          },
+          offlineReplies: (rule.offlineReplies || []).filter(line => line.trim()).slice(0, 80),
+          characterName: loadCharacters().find(character => character.id === rule.actions.chat?.characterId)?.name || "",
+          ...(canSyncAction ? { deviceAction: { action: chosenAction!.action, args: chosenAction!.args ?? {} } } : {}),
+        };
+      });
+    const watchesAmbientLight = rules.some(rule => rule.enabled === true && !rule.schedule && rule.matchType === "环境光线" && rule.actions.deviceAction?.action === "torch" && String(rule.actions.deviceAction.args?.on).toLowerCase() === "true" && deviceActionConfig.enabled === true && deviceActionConfig.actions.torch === true);
+
+    try {
+      shell.configureNativeRealityBridge(JSON.stringify({
+        enabled: settings.enabled !== false,
+        deviceActionsEnabled: deviceActionConfig.enabled === true,
+        allowedDeviceActions: TOGGLEABLE_ACTIONS.filter(action => deviceActionConfig.actions[action] === true),
+        watchAmbientLight: watchesAmbientLight,
+        rules: nativeRules,
+      }));
+    } catch {
+      // 原生桥暂不可用时保留网页规则，不让设置页崩溃。
+    }
+  }, [settings.enabled, rules, deviceActionConfigRevision]);
+
+  const [nativeLog, setNativeLog] = useState<Array<{ eventId?: string; type?: string; payload?: string; rule?: string; result?: string; at?: number }>>([]);
+  const [nativeLogAvailable, setNativeLogAvailable] = useState(false);
+  const refreshNativeLog = useCallback(() => {
+    if (typeof window === "undefined" || !isShellEnvironment()) {
+      setNativeLogAvailable(false);
+      setNativeLog([]);
+      return;
+    }
+    const shell = (window as Window & { AndroidShell?: { getNativeRealityBridgeLog?: () => string } }).AndroidShell;
+    if (!shell?.getNativeRealityBridgeLog) {
+      setNativeLogAvailable(false);
+      setNativeLog([]);
+      return;
+    }
+    try {
+      const parsed: unknown = JSON.parse(shell.getNativeRealityBridgeLog());
+      setNativeLog(Array.isArray(parsed) ? parsed.filter(item => item && typeof item === "object") as Array<{ eventId?: string; type?: string; payload?: string; rule?: string; result?: string; at?: number }> : []);
+      setNativeLogAvailable(true);
+    } catch {
+      setNativeLogAvailable(false);
+      setNativeLog([]);
+    }
+  }, []);
+
   const [feed, setFeed] = useState(() => loadBridgeFeed());
   const [editing, setEditing] = useState<BridgeRule | null>(null);
+  const [offlineReplyGenerating, setOfflineReplyGenerating] = useState(false);
+
   const [dataItems, setDataItems] = useState<BridgeDataItem[]>(() => loadBridgeDataItems());
   const [editingItem, setEditingItem] = useState<BridgeDataItem | null>(null);
   const [shortcutActions, setShortcutActions] = useState<BridgeShortcutAction[]>(() => loadBridgeShortcutActions());
@@ -439,6 +708,8 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
   const [ruleTest, setRuleTest] = useState<{ type: string; payload: string }>({ type: "", payload: "" });
   const [ruleTestBusy, setRuleTestBusy] = useState(false);
   const [ruleTestResult, setRuleTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewResult, setPreviewResult] = useState("");
 
   // 换一个动作/重新打开向导时清掉上次的测试结果
   useEffect(() => { setTestResult(null); }, [editingShortcut?.id]);
@@ -500,7 +771,10 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
   const deviceActionOnCount = TOGGLEABLE_ACTIONS.filter(id => deviceActionCfg.actions[id] === true).length;
   const [screenChat, setScreenChat] = useState<ScreenChatSettings>(() => loadScreenChatSettings());
   const [editingScreenChat, setEditingScreenChat] = useState<ScreenChatSettings | null>(null);
-  const [histSec, setHistSec] = useState<"feed" | "commands">("feed");
+  const [histSec, setHistSec] = useState<"feed" | "commands" | "native">("feed");
+  useEffect(() => {
+    if (tab === "history" && histSec === "native") refreshNativeLog();
+  }, [tab, histSec, refreshNativeLog]);
   const [confirmClear, setConfirmClear] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [wizStep, setWizStep] = useState(1);
@@ -669,6 +943,61 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
       setSyncing(false);
     }
   }, [syncing, onNotice]);
+
+  const generateOfflineReplies = useCallback(async () => {
+    const characterId = editing?.actions.chat?.characterId;
+    if (!editing || !characterId) {
+      onNotice?.("先在「要做什么」里选择一个角色，再生成离线回复。");
+      return;
+    }
+    const character = characters.find(item => item.id === characterId);
+    const session = loadChatSessions().find(item => item.contactId === characterId && !item.isGroup);
+    if (!character || !session) {
+      onNotice?.("找不到这个角色的聊天会话，请先打开一次该角色的聊天室。");
+      return;
+    }
+    setOfflineReplyGenerating(true);
+    try {
+      const history = loadChatMessages(session.id, 30);
+      const instruction = [
+        `规则名称：${editing.name || "现实桥联动"}`,
+        `触发信号：${editing.matchType || "任意信号"}`,
+        `事件正文：{payload}（这是运行时会替换的占位符）`,
+        "请据此生成离线回复库。",
+      ].join("\n");
+      const syntheticMessage = {
+        id: `offline-library-${Date.now()}`,
+        sessionId: session.id,
+        role: "user" as const,
+        content: instruction,
+        status: "sent" as const,
+        createdAt: new Date().toISOString(),
+      };
+      const built = await buildChatPromptMessages(session, [...history, syntheticMessage], {
+        appId: "reality_bridge",
+        appTags: ["reality_bridge", "offline_library"],
+      });
+      const generated = await sendLLMRequest(
+        built.config,
+        built.preset,
+        built.llmMessages,
+        built.regexes,
+        { characterName: character.name },
+        { appId: "reality_bridge", appTags: ["reality_bridge", "offline_library"], skipOutputRegex: true },
+      );
+      const lines = generated.split(/\r?\n/)
+        .map(line => line.replace(/^\s*(?:[-*•]|\d+[.)、])\s*/, "").trim())
+        .filter(line => line.length > 0 && line.length <= 220)
+        .slice(0, 30);
+      if (!lines.length) throw new Error("模型没有返回可用的逐行回复，请重试。");
+      setEditing(previous => previous ? { ...previous, offlineReplies: lines } : previous);
+      onNotice?.(`已按 ${character.name} 的角色上下文生成 ${lines.length} 条离线回复，可继续手动修改后保存。`);
+    } catch (error) {
+      onNotice?.(error instanceof Error ? `生成失败：${error.message}` : "生成离线回复失败，请检查模型配置和网络。");
+    } finally {
+      setOfflineReplyGenerating(false);
+    }
+  }, [editing, characters, onNotice]);
 
   const saveEditing = useCallback(() => {
     if (!editing) return;
@@ -940,6 +1269,27 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
     setRuleTestResult(null);
   }, [characters]);
 
+
+  /** 一键补齐当前已实现的本机感知规则。新装规则默认关闭，避免首次进入就突然刷消息。 */
+  const installPerceptionRules = useCallback(() => {
+    const characterId = characters[0]?.id ?? "";
+    if (!characterId) {
+      onNotice?.("请先创建至少一个角色，再安装感知规则");
+      return;
+    }
+    const templates = RULE_SCENE_TEMPLATES.filter(template => template.tag === "本机信号");
+    const existingNames = new Set(rules.map(rule => rule.name));
+    const additions = templates
+      .filter(template => !existingNames.has(template.build({ characterId }).name))
+      .map(template => ({ ...template.build({ characterId }), enabled: false }));
+    if (additions.length === 0) {
+      onNotice?.("本机感知规则已经齐全，没有重复添加");
+      return;
+    }
+    persistRules([...rules, ...additions].slice(0, 100));
+    onNotice?.(`已添加 ${additions.length} 条感知规则，默认关闭；请逐条检查角色、关键词、阈值和权限后再开启`);
+  }, [characters, rules, persistRules, onNotice]);
+
   /**
    * 试跑当前编辑中的规则：真的执行一遍「加工 → 动作」。
    *
@@ -983,6 +1333,25 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
       setRuleTestBusy(false);
     }
   }, [editing, ruleTest, ruleTestBusy]);
+
+  const runPreview = useCallback(async () => {
+    if (!editing || previewBusy) return;
+    setPreviewBusy(true);
+    setPreviewResult("");
+    try {
+      const text = await previewBridgeRuleText(editing, {
+        id: "preview-" + Date.now().toString(36),
+        type: ruleTest.type.trim() || editing.matchType.trim() || editing.name.trim() || "试跑数据",
+        payload: ruleTest.payload.trim() || "抖音 今天已累计使用 90 分钟",
+        createdAt: new Date().toISOString(),
+      });
+      setPreviewResult(text);
+    } catch (error) {
+      setPreviewResult("预览失败：" + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setPreviewBusy(false);
+    }
+  }, [editing, ruleTest, previewBusy]);
 
   const wizNext = useCallback(() => {
     if (!editing) return;
@@ -1383,6 +1752,7 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
             <div className="rb-chips">
               <button type="button" className={`rb-chip${histSec === "feed" ? " active" : ""}`} onClick={() => setHistSec("feed")}>最近收到</button>
               <button type="button" className={`rb-chip${histSec === "commands" ? " active" : ""}`} onClick={() => setHistSec("commands")}>最近快捷指令</button>
+              <button type="button" className={`rb-chip${histSec === "native" ? " active" : ""}`} onClick={() => setHistSec("native")}>本机执行记录</button>
             </div>
           </div>
         ) : null}
@@ -1454,7 +1824,7 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
                     </div>
                   ))}
                 </>
-              ) : (
+              ) : histSec === "commands" ? (
                 recentCommands.length === 0 ? (
                   <div className="rb-empty">
                     <b>还没有调用记录</b>
@@ -1478,6 +1848,23 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
                     </div>
                   ))
                 )
+              ) : (
+                <>
+                  <div className="rb-inline-actions" style={{ justifyContent: "flex-end", marginBottom: 10 }}>
+                    <button type="button" className="rb-btn ghost" onClick={refreshNativeLog}>{RB_ICON_REFRESH} 刷新本机记录</button>
+                  </div>
+                  {!nativeLogAvailable ? (
+                    <div className="rb-empty"><b>本机记录仅在 Android APK 中提供</b><p>网页版本没有原生系统事件执行器。请在 APK 内打开此页查看本机保存的记录。</p></div>
+                  ) : nativeLog.length === 0 ? (
+                    <div className="rb-empty"><b>还没有本机执行记录</b><p>记录保存在这台 Android 设备本地。可先测试充电开始/结束或电量偏低等系统信号；通知权限关闭时也会记录失败原因。</p></div>
+                  ) : nativeLog.slice().sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, 50).map((entry, index) => (
+                    <div className="rb-card rb-feed-item" key={`${entry.eventId || "native"}-${entry.at || index}-${index}`}>
+                      <div className="rb-feed-head"><span className="rb-type">{entry.type || "本机事件"}</span><span className="rb-time">{entry.at ? fmtTime(new Date(entry.at).toISOString()) : ""}</span></div>
+                      <p className="rb-payload">{(entry.payload || "").slice(0, 180)}</p>
+                      <p className="rb-meta">匹配规则：{entry.rule || "无"} · {entry.result || "无结果信息"}</p>
+                    </div>
+                  ))}
+                </>
               )}
             </section>
           ) : null}
@@ -1995,7 +2382,10 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
                     >{tpl.title}</button>
                   ))}
                 </div>
-                <p className="rb-hint">也可以不理它，直接在下面自己配。</p>
+                <button type="button" className="rb-btn" style={{ marginTop: 8 }} onClick={installPerceptionRules}>
+                  一键补齐全部本机感知规则（默认关闭）
+                </button>
+                <p className="rb-hint">批量添加只创建规则，不会自动开启；你可以逐条修改角色、关键词、冷却和动作，再用卡片开关启用。也可以不理模板，直接在下面自己配。</p>
                 {/* 「操作手机」类模板会真的改手机状态，前提是设备操作总开关已经打开。
                     这里必须是**可点**的跳转：只写一句「去设置里打开」用户翻不到，
                     这正是这个页面最早的教训（见 settingsJump 的注释）。 */}
@@ -2233,7 +2623,7 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
             </div>
             ) : null}
 
-            {(flatRuleEditor || wizStep === 4) ? (
+            {(flatRuleEditor || wizStep === 4 || wizStep === 5) ? (
             <div className="rb-wiz-page">
             <p className="rb-wiz-tip">收到的原始内容（比如整条短信）交给角色前，可以先加工一下：</p>
             <div className="rb-seg">
@@ -2254,16 +2644,34 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
             ) : null}
             {editing.process.mode === "ai" ? (
               <label>告诉 AI 怎么处理
-                <textarea value={editing.process.prompt ?? ""} rows={2} placeholder="例：把这条银行短信浓缩成「花了多少钱、在哪花的」一句话"
+                <textarea value={editing.process.prompt ?? ""} rows={2} placeholder="例：结合角色设定，把这条信号变成自然的关心话"
                   onChange={event => setEditing({ ...editing, process: { ...editing.process, prompt: event.target.value } })} />
               </label>
             ) : null}
+            <div className="rb-field-group">
+            <label>可选的离线回复文案（每行一条，断网时从中选用）
+              <textarea
+                value={(editing.offlineReplies || []).join("\n")}
+                rows={4}
+                placeholder={"例：\n又在刷手机啦？眼睛休息一下。\n我看到你电量不多了，记得充电。\n忙完记得回来找我。"}
+                onChange={event => setEditing({
+                  ...editing,
+                  offlineReplies: event.target.value.split("\n").map(line => line.trim()).filter(Boolean).slice(0, 80),
+                })}
+              />
+            </label>
+            <small className="rb-hint">这只是断网时备用的话术，不负责执行设备动作。纯设备动作规则可以留空；需要角色回复时，联网后可按角色卡、预设、世界书与近期聊天语境预生成，再保存在本机规则配置里，断网时不临时调用模型。</small>
+            <button type="button" className="rb-btn ghost" disabled={offlineReplyGenerating || !editing.actions.chat?.characterId} onClick={() => void generateOfflineReplies()}>
+              {offlineReplyGenerating ? "正在让角色准备回复…" : (editing.offlineReplies?.length ? "重新生成并替换回复库" : "让角色 AI 预写离线回复")}
+            </button>
+            </div>
             </div>
             ) : null}
 
             {(flatRuleEditor || wizStep === 5) ? (
             <div className="rb-wiz-page">
             <p className="rb-wiz-tip">要做什么（可多选，会按顺序执行）</p>
+            <p className="rb-help">这里不只有角色说话：每个动作都是独立可选的。只勾选“直接操作手机”就能做设备动作，不必勾选“告诉一个角色”；“调用一个工具”会执行你已经启用的工具。</p>
 
             <div className="rb-action">
               <label className="rb-check">
@@ -2469,6 +2877,7 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
                   })} />
                 直接操作手机（不需要 iPhone）
               </label>
+              <p className="rb-help">纯设备动作可以单独运行。小手机界面关闭后，当前原生后台直连只支持“环境光线 → 手电筒”；亮度、音量、勿扰、打开应用等其它动作需要小手机运行中触发或用户确认。</p>
               {editing.actions.deviceAction ? (
                 <div className="rb-action-body">
                   <select value={editing.actions.deviceAction.action}
@@ -2537,6 +2946,7 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
                   })} />
                 调用一个工具
               </label>
+              <p className="rb-help">这里执行已在工具箱启用的内置能力、REST/组合工具、MCP 或自定义 APP 工具。规则在小手机运行时调用工具执行器；界面完全关闭后，目前不会在原生后台任意执行工具，只有单独支持的手电筒规则例外。</p>
               {editing.actions.tool ? (
                 <div className="rb-action-body">
                   {availableTools.length === 0 ? (
@@ -2666,6 +3076,14 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
                   <button type="button" className="rb-btn ghost" disabled={ruleTestBusy} onClick={() => void runRuleTest()}>
                     {ruleTestBusy ? "正在试跑…" : "试跑一次"}
                   </button>
+                  <button type="button" className="rb-btn ghost" disabled={previewBusy} onClick={() => void runPreview()}>
+                    {previewBusy ? "正在生成预览…" : "只预览角色会说的话（不执行动作）"}
+                  </button>
+                  {previewResult && (
+                    <div className="rb-hint" style={{ marginTop: 8, padding: 10, borderRadius: 10, background: "rgba(0,0,0,.04)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                      <b>加工预览：</b>{previewResult}
+                    </div>
+                  )}
                   {ruleTestResult && (
                     <p className="rb-hint" style={{ color: ruleTestResult.ok ? "var(--c-success, #16a34a)" : "var(--c-danger, #dc2626)", wordBreak: "break-word", whiteSpace: "pre-wrap" }} role="status">
                       {ruleTestResult.text}

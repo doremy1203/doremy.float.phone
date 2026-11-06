@@ -65,6 +65,7 @@ function blockedProxyUrlReason(rawUrl: string): string | null {
 export async function POST(req: NextRequest) {
     let requestUrlForDebug = "";
     let fetchUrlForDebug = "";
+    let proxyTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
         const { url, method, headers, body, timeoutMs } = await req.json();
         requestUrlForDebug = typeof url === "string" ? url : "";
@@ -115,7 +116,8 @@ export async function POST(req: NextRequest) {
             ? Math.max(1000, Math.min(requestedTimeoutMs, 120_000))
             : 120_000;
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), proxyTimeoutMs);
+        // Keep the timeout active through response-body/SSE consumption, not just until headers arrive.
+        proxyTimeout = setTimeout(() => controller.abort(), proxyTimeoutMs);
         const dispatcher = getProxyDispatcher();
 
         const res = await (dispatcher
@@ -128,8 +130,6 @@ export async function POST(req: NextRequest) {
             }) as unknown as Response
             : fetch(fetchUrl, { ...fetchOptions, signal: controller.signal })
         );
-        clearTimeout(timeout);
-
         // Forward response headers we care about
         const responseHeaders: Record<string, string> = {};
         const sessionId = res.headers.get("mcp-session-id");
@@ -179,6 +179,9 @@ export async function POST(req: NextRequest) {
                     method: "POST",
                     headers: postHeaders,
                     body: typeof body === "string" ? body : JSON.stringify(body),
+                    // Share the request deadline with the SSE handshake. Otherwise the
+                    // message POST can hang even though the outer proxy has a timeout.
+                    signal: controller.signal,
                 });
 
                 if (!postRes.ok && postRes.status !== 202) {
@@ -246,6 +249,8 @@ export async function POST(req: NextRequest) {
         const payload = buildProxyErrorPayload(err, fetchUrlForDebug || requestUrlForDebug);
         const status = payload.error.includes("超时") ? 504 : 502;
         return NextResponse.json(payload, { status });
+    } finally {
+        if (proxyTimeout) clearTimeout(proxyTimeout);
     }
 }
 

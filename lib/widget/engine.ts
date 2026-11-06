@@ -12,9 +12,10 @@
  * 该由用户明确开启。
  */
 
-import { simpleLLMCall } from "../api-helpers";
 import { loadCharacters } from "../character-storage";
-import { loadApiConfigs, resolveAuxiliaryApiConfig, resolveUserIdentity } from "../settings-storage";
+import { type ChatMessage, type ChatSession } from "../chat-storage";
+import { buildChatPromptMessages, sendLLMRequest } from "../chat-engine";
+import { resolveUserIdentity } from "../settings-storage";
 import { appendCustomAppTimelineEntry } from "../custom-app-storage";
 import { loadWidgetAutoLastRun, loadWidgetConfig, loadWidgetData, markWidgetAutoRun, saveWidgetData } from "./storage";
 
@@ -25,10 +26,8 @@ import { loadWidgetAutoLastRun, loadWidgetConfig, loadWidgetData, markWidgetAuto
  */
 const WIDGET_SOURCE = { id: "phone_widget", name: "桌面小组件" };
 import { canGenerateAvatar, generateWidgetAvatar } from "./avatar";
+import { parseWidgetLineOutput } from "./output";
 import type { WidgetData } from "./types";
-
-/** 自动生成的一句话最大长度：桌面上放不下长文。 */
-const AUTO_TEXT_LIMIT = 60;
 
 /**
  * 让角色生成一句适合放在桌面上的话。
@@ -37,45 +36,58 @@ const AUTO_TEXT_LIMIT = 60;
  * 长了显示不下，也太「表演」。要的是一句像随手写下的状态。
  */
 async function generateLine(
-  characterName: string,
+  character: ReturnType<typeof loadCharacters>[number],
   userName: string,
   previous: WidgetData | null,
 ): Promise<{ text: string; status: string } | null> {
-  const config = resolveAuxiliaryApiConfig("memorySummaryApiConfigId") ?? loadApiConfigs()[0];
-  if (!config) return null;
+  // Widget 现在走统一预设管线：角色卡、世界书、记忆和提示词都从该 APP 的绑定/预设读取，
+  // 提示词本身不再硬编码在代码里（预设条目 tags: ["phone_widget","status"]）。
+  const session: ChatSession = {
+    id: `phone-widget-${character.id}`,
+    contactId: character.id,
+    unreadCount: 0,
+    updatedAt: new Date().toISOString(),
+    isPinned: false,
+    isGroup: false,
+  };
+  const trigger = previous?.text
+    ? `请留下一句今天的桌面状态。不要重复上次留在桌面上的话：「${previous.text}」，换一个自然的角度。`
+    : "请留下一句今天的桌面状态。";
+  const userMessage: ChatMessage = {
+    id: `widget-${Date.now()}`,
+    sessionId: session.id,
+    role: "user",
+    content: trigger,
+    status: "sent",
+    createdAt: new Date().toISOString(),
+  };
 
-  const avoid = previous?.text ? `\n（不要重复你上次写的那句：「${previous.text}」）` : "";
-  const result = await simpleLLMCall(config, [
-    {
-      role: "system",
-      content: [
-        `你是「${characterName}」，正在${userName}手机桌面的一块小地方留一句话。`,
-        "这句话会被 TA 在桌面上直接看到，是你不经意留下的状态。",
-        "要求：",
-        `1. 正文一句话，不超过 ${AUTO_TEXT_LIMIT} 字，口语、具体、有生活感；`,
-        "2. 不要像在发消息，不要称呼对方，不要问句——就是要像随手记下的一句；",
-        "3. 不要用引号包住整句，不要写「我说：」这类前缀。",
-        "只输出严格 JSON，不要任何额外文字：{\"text\":\"...\",\"status\":\"...\"}",
-        "status 是一个 2-5 字的当前状态，如「在想你」「刚睡醒」「有点困」。",
-      ].join("\n"),
-    },
-    { role: "user", content: `现在给 TA 留一句。${avoid}` },
-  ], { temperature: 0.9 });
-
-  const raw = (result.content ?? "").trim();
-  if (!raw) return null;
-  // 模型可能包了 ```json 围栏，剥掉再解析
-  const cleaned = raw.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  let built: Awaited<ReturnType<typeof buildChatPromptMessages>>;
   try {
-    const parsed = JSON.parse(cleaned) as { text?: unknown; status?: unknown };
-    const text = String(parsed.text ?? "").trim().replace(/^["「]|["」]$/g, "").slice(0, AUTO_TEXT_LIMIT);
-    if (!text) return null;
-    return { text, status: String(parsed.status ?? "").trim().slice(0, 12) };
+    built = await buildChatPromptMessages(session, [userMessage], {
+      appId: "phone_widget",
+      appTags: ["phone_widget", "status"],
+      // This is a one-shot JSON content generator, not a chat turn. Tool calls
+      // cannot be executed here and must never be emitted into the widget.
+      toolsAllowed: false,
+      forceEnableTools: false,
+    });
   } catch {
-    // 解析失败：把整段当成正文兜底（总比什么都不留好），但限长
-    const text = cleaned.replace(/\s+/g, " ").slice(0, AUTO_TEXT_LIMIT);
-    return text ? { text, status: "" } : null;
+    return null;
   }
+
+  const raw = (await sendLLMRequest(
+    built.config,
+    built.preset,
+    built.llmMessages,
+    built.regexes,
+    { characterName: character.name, userName },
+    { appId: "phone_widget", appTags: ["phone_widget", "status"] },
+  )).trim();
+  if (!raw) return null;
+  // Strict JSON only. Malformed output is discarded rather than displayed as
+  // a message; this prevents leaked prompts and unexecuted tool directives.
+  return parseWidgetLineOutput(raw);
 }
 
 /**
@@ -97,7 +109,7 @@ export async function runWidgetAutoGenerate(): Promise<boolean> {
 
   const userName = resolveUserIdentity(config.characterId)?.name || "用户";
   try {
-    const line = await generateLine(character.name, userName, loadWidgetData());
+    const line = await generateLine(character, userName, loadWidgetData());
     if (!line) return false;
     // 先记号，再写数据：生成可能要十几秒，期间不能被重复触发
     markWidgetAutoRun();

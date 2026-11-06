@@ -1,3 +1,5 @@
+> **历史移植资料，不是当前部署操作手册。** 本文记录的是从旧项目/上游移植 Supabase「更新已有项目」链路时的分析。文中来源仓库名、文件清单、接口细节和部署步骤均属于当时快照；当前功能以本仓库 `components/settings/cloud-services-setup.tsx`、`app/api/supabase-admin/route.ts`、`app/api/push/deploy-personal/route.ts`、`lib/personal-push-cloud.ts` 及现行 SQL 为准。执行任何步骤前必须重新核对当前代码和目标 Supabase 项目，不能照搬旧项目名称或旧文件清单。
+
 # Supabase「更新部署」链路移植指南
 
 > 来源：`Zyxxx1203/momo.float.phone`（`main`）相对官方上游的实际改动

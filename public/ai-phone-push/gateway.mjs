@@ -564,7 +564,11 @@ Deno.serve(async (request: Request) => {
         service: "ai-phone-personal-push",
         version: 2,
         schemaVersion,
-        capabilities: schemaVersion >= 3 ? ["screen-chat-continuous"] : [],
+        capabilities: [
+          ...(schemaVersion >= 3 ? ["screen-chat-continuous"] : []),
+          ...(schemaVersion >= 4 ? ["life-schedule-cloud"] : []),
+          ...(schemaVersion >= 5 ? ["life-execution-trace"] : []),
+        ],
       });
     }
 
@@ -717,6 +721,35 @@ Deno.serve(async (request: Request) => {
         ));
         return json({ ok: true });
       }
+    }
+
+    if (action === "life-reset" && request.method === "POST") {
+      const userFilter = `user_id=eq.${OWNER_ID}`;
+      const lifeKeyFilter = `&trigger_key=like.${encodeURIComponent("life-scene:%")}`;
+      const updateHeaders = { Prefer: "return=representation" };
+      // Remove the authoritative snapshot first so future scheduler ticks cannot re-arm life jobs.
+      await readJson(await rest(`push_bridge_snapshots?${userFilter}&rule_id=eq.life-schedule`, {
+        method: "DELETE", headers: updateHeaders,
+      }));
+      // Cancel running jobs before deleting pending jobs: an executing worker checks
+      // this status before generating, writing to outbox, and scheduling its next turn.
+      await readJson(await rest(`push_jobs?${userFilter}${lifeKeyFilter}&status=eq.running`, {
+        method: "PATCH", headers: updateHeaders,
+        body: JSON.stringify({ status: "cancelled", result_note: "life system reset by user", updated_at: new Date().toISOString() }),
+      }));
+      await readJson(await rest(`push_jobs?${userFilter}${lifeKeyFilter}&status=not.eq.cancelled`, {
+        method: "DELETE", headers: updateHeaders,
+      }));
+      await readJson(await rest(`push_outbox?${userFilter}${lifeKeyFilter}`, {
+        method: "DELETE", headers: updateHeaders,
+      }));
+      await readJson(await rest(`life_schedule_runtime?${userFilter}`, {
+        method: "DELETE", headers: updateHeaders,
+      }));
+      await readJson(await rest(`life_schedule_diagnostics?${userFilter}`, {
+        method: "DELETE", headers: updateHeaders,
+      }));
+      return json({ ok: true });
     }
 
     if (action === "outbox") {
@@ -933,6 +966,70 @@ $CRON$)`);
         saved += 1;
       }
       return json({ ok: true, saved, deleted: deleteIds.length });
+    }
+
+    if (action === "life-schedule-snapshot" && request.method === "POST") {
+      // 独立个人云专用生活快照入口。不能复用 bridge-sync，否则仅同步日程时会把
+      // 已有现实桥规则/云配置覆盖为空数组。
+      const body = await request.json().catch(() => ({})) as {
+        snapshots?: Array<{ ruleId?: unknown; payload?: unknown }>;
+        deleteRuleIds?: unknown;
+      };
+      const config = await loadConfig();
+      if (!config.payload_key) throw new Error("生活日程快照加密密钥未初始化。");
+      const deleteIds = Array.isArray(body.deleteRuleIds)
+        ? body.deleteRuleIds.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length < 100).slice(0, 30)
+        : [];
+      for (const ruleId of deleteIds) {
+        await readJson(await rest(
+          `push_bridge_snapshots?user_id=eq.${OWNER_ID}&rule_id=eq.${encodeURIComponent(ruleId)}`,
+          { method: "DELETE", headers: { Prefer: "return=representation" } },
+        ));
+      }
+      const snapshots = Array.isArray(body.snapshots) ? body.snapshots.slice(0, 5) : [];
+      let saved = 0;
+      for (const snapshot of snapshots) {
+        const ruleId = cleanText(snapshot?.ruleId, 100);
+        if (!ruleId || !snapshot?.payload || typeof snapshot.payload !== "object") continue;
+        const plainJson = JSON.stringify(snapshot.payload);
+        if (plainJson.length > MAX_PAYLOAD_BYTES) return json({ ok: false, error: "生活日程快照超过 900KB。" }, 413);
+        await readJson(await rest(
+          `push_bridge_snapshots?user_id=eq.${OWNER_ID}&rule_id=eq.${encodeURIComponent(ruleId)}`,
+          { method: "DELETE", headers: { Prefer: "return=representation" } },
+        ));
+        await readJson(await rest("push_bridge_snapshots", {
+          method: "POST",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify([{
+            user_id: OWNER_ID, rule_id: ruleId,
+            payload: await encryptPayload(plainJson, config.payload_key),
+            updated_at: new Date().toISOString(),
+          }]),
+        }));
+        saved += 1;
+      }
+      return json({ ok: true, saved, deleted: deleteIds.length });
+    }
+
+    if (action === "life-schedule-diagnostics" && request.method === "GET") {
+      const diagnostics = await readJson<Array<{
+        id: string; severity: string; code: string; detail: string;
+        repair_hint: string; updated_at: string; resolved_at: string | null;
+      }>>(await rest(
+        `life_schedule_diagnostics?user_id=eq.${OWNER_ID}&resolved_at=is.null`
+        + "&select=id,severity,code,detail,repair_hint,updated_at,resolved_at&order=updated_at.desc&limit=20",
+      ));
+      const eventsResponse = await rest(
+        `life_schedule_diagnostic_events?user_id=eq.${OWNER_ID}`
+        + "&select=id,trace_id,stage,severity,code,detail,actor_id,session_id,job_id,created_at&order=created_at.desc&limit=100",
+      ).catch(() => null);
+      const events = eventsResponse?.ok
+        ? await readJson<Array<{
+          id: string; trace_id: string; stage: string; severity: string; code: string; detail: string;
+          actor_id: string | null; session_id: string | null; job_id: string | null; created_at: string;
+        }>>(eventsResponse)
+        : [];
+      return json({ ok: true, diagnostics, events });
     }
 
     if (action === "shortcut-create" && request.method === "POST") {

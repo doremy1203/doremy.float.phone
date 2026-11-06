@@ -72,21 +72,33 @@ object PhoneWidgetRenderer {
     @Volatile private var renderInFlight: Boolean = false
 
     /** 存下这次的 HTML，供系统定时刷新（onUpdate）时重画。 */
-    fun saveHtml(context: Context, html: String) {
+    private fun safeProfileKey(profileId: String): String = profileId.replace(Regex("[^A-Za-z0-9_-]"), "_").take(64).ifBlank { "default" }
+    private fun htmlKey(profileId: String) = if (profileId == "default") KEY_HTML else KEY_HTML + "_" + safeProfileKey(profileId)
+
+    fun saveHtml(context: Context, html: String, profileId: String = "default") {
         runCatching {
-            context.applicationContext
-                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit().putString(KEY_HTML, html).apply()
+            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(htmlKey(profileId), html).apply()
         }
     }
 
-    fun loadHtml(context: Context): String? = runCatching {
-        context.applicationContext
-            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_HTML, null)
+    fun loadHtml(context: Context, profileId: String = "default"): String? = runCatching {
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(htmlKey(profileId), null)
     }.getOrNull()
 
-    fun pngFile(context: Context): File = File(context.applicationContext.filesDir, PNG_NAME)
+    fun pngFile(context: Context, profileId: String = "default"): File {
+        val name = if (profileId == "default") PNG_NAME else "phone_widget_" + safeProfileKey(profileId) + ".png"
+        return File(context.applicationContext.filesDir, name)
+    }
+
+    fun deleteProfile(context: Context, profileId: String) {
+        if (profileId.isBlank() || profileId == "default") return
+        runCatching {
+            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(htmlKey(profileId)).apply()
+            pngFile(context, profileId).delete()
+        }
+    }
 
     /**
      * 小组件的当前状态，给网页设置页的「检查状态」按钮用。
@@ -114,8 +126,12 @@ object PhoneWidgetRenderer {
 
     /** 用当前缓存的 HTML 重画一次（系统定时刷新、或桌面需要重新贴图时）。 */
     fun renderCached(context: Context, widthDp: Int = 300, heightDp: Int = 150, scale: Int = 2) {
-        val html = loadHtml(context) ?: return
-        renderAndPush(context, html, widthDp, heightDp, scale)
+        renderCached(context, "default", widthDp, heightDp, scale)
+    }
+
+    fun renderCached(context: Context, profileId: String, widthDp: Int = 300, heightDp: Int = 150, scale: Int = 2) {
+        val html = loadHtml(context, profileId) ?: return
+        renderAndPush(context, profileId, html, widthDp, heightDp, scale)
     }
 
     /**
@@ -126,11 +142,16 @@ object PhoneWidgetRenderer {
      * 因为渲染要走主线程 + 网络无关的本地 HTML，通常几十毫秒内完成。
      */
     fun renderAndPush(context: Context, html: String, widthDp: Int, heightDp: Int, scale: Int) {
+        renderAndPush(context, "default", html, widthDp, heightDp, scale)
+    }
+
+    fun renderAndPush(context: Context, profileId: String, html: String, widthDp: Int, heightDp: Int, scale: Int) {
         val appContext = context.applicationContext
-        saveHtml(appContext, html)
+        saveHtml(appContext, html, profileId)
+        PhoneWidgetProvider.saveSize(appContext, widthDp, heightDp, scale, profileId)
         Handler(Looper.getMainLooper()).post {
-            renderToFile(appContext, html, widthDp, heightDp, scale) {
-                PhoneWidgetProvider.updateAll(appContext)
+            renderToFile(appContext, profileId, html, widthDp, heightDp, scale) {
+                PhoneWidgetProvider.updateProfile(appContext, profileId)
             }
         }
     }
@@ -142,6 +163,7 @@ object PhoneWidgetRenderer {
      */
     private fun renderToFile(
         context: Context,
+        profileId: String,
         html: String,
         widthDp: Int,
         heightDp: Int,
@@ -209,7 +231,7 @@ object PhoneWidgetRenderer {
                 // 已经收尾过就直接返回：否则会重复写文件，还把重试次数白白耗掉。
                 if (settled) return
                 attempts += 1
-                val result = runCatching { drawToFile(context, view, widthPx, heightPx) }
+                val result = runCatching { drawToFile(context, profileId, view, widthPx, heightPx) }
                 when {
                     // 画出了东西：收工。
                     result.getOrDefault(false) -> finish(true, "")
@@ -248,7 +270,7 @@ object PhoneWidgetRenderer {
      *         **落盘了不等于画对了**：一张空白 PNG 贴到桌面上就是什么都不显示，
      *         与失败无异，调用方该据此重画或报错，而不是当成成功。
      */
-    private fun drawToFile(context: Context, view: WebView, widthPx: Int, heightPx: Int): Boolean {
+    private fun drawToFile(context: Context, profileId: String, view: WebView, widthPx: Int, heightPx: Int): Boolean {
         val bitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         view.measure(
@@ -259,7 +281,7 @@ object PhoneWidgetRenderer {
         view.draw(canvas)
 
         val hasContent = !isBlank(bitmap)
-        FileOutputStream(pngFile(context)).use { out ->
+        FileOutputStream(pngFile(context, profileId)).use { out ->
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
         }
         bitmap.recycle()

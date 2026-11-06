@@ -11,9 +11,11 @@ let backupRunning = false;
 /**
  * Invisible component that drives auto cloud backup. Mounted once at the app
  * root. It checks every few minutes whether a backup is due (per the user's
- * interval) and, when idle, runs an incremental backup in the background. The
- * engine skips when nothing changed and processes module-by-module with awaits,
- * so it stays off the critical path and doesn't freeze the UI.
+ * interval) and, when idle, runs a content-addressed incremental backup.
+ *
+ * Respect the user's excludeMedia setting: the config defaults to excluding
+ * media to avoid repeatedly uploading large image/audio/video payloads. Media
+ * can still be included when the user explicitly opts in.
  */
 export function CloudBackupScheduler() {
   useEffect(() => {
@@ -34,17 +36,18 @@ export function CloudBackupScheduler() {
 
       const state = loadCloudBackupState();
       const dueMs = config.intervalHours * 3600_000;
-      const last = state.lastCreatedAt ? Date.parse(state.lastCreatedAt) : 0;
+      const last = state.lastAttemptAt ? Date.parse(state.lastAttemptAt) : state.lastCreatedAt ? Date.parse(state.lastCreatedAt) : 0;
       if (Number.isFinite(last) && last > 0 && Date.now() - last < dueMs) return;
 
       runWhenIdle(async () => {
         if (cancelled || backupRunning) return;
         backupRunning = true;
         try {
-          // Cloud uploads are chunked, so large media is fine — always back up in full.
-          await runCloudBackup(config, { excludeMedia: false });
+          // Do not override the user's media policy: false means full media backup,
+          // true means back up structured data while excluding large media blobs.
+          await runCloudBackup(config, { excludeMedia: config.excludeMedia });
         } catch {
-          /* silent — surfaced in the data page status on next open */
+          /* surfaced in the data page status on next open */
         } finally {
           backupRunning = false;
         }

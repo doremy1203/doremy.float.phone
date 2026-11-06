@@ -91,6 +91,8 @@ export type CloudBackupManifest = {
 export type CloudBackupState = {
   lastManifestName?: string;
   lastCreatedAt?: string;
+  /** Last scheduler attempt, including unchanged/failed runs; prevents five-minute retry loops. */
+  lastAttemptAt?: string;
   lastTotalBytes?: number;
   lastTotalRecords?: number;
   lastCombinedHash?: string;
@@ -383,7 +385,7 @@ export async function runCloudBackup(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const state = loadCloudBackupState();
-    saveCloudBackupState({ ...state, lastResult: "error", lastError: message });
+    saveCloudBackupState({ ...state, lastAttemptAt: new Date().toISOString(), lastResult: "error", lastError: message });
     throw error;
   }
 }
@@ -518,7 +520,7 @@ async function runCloudBackupInternal(
   // (With streaming, unchanged modules were already reused from the cloud — no
   // uploads happened — so skipping here leaves no orphan objects.)
   if (!options.force && state.lastCombinedHash && state.lastCombinedHash === combinedHash && uploadedModuleIds.size === 0) {
-    saveCloudBackupState({ ...state, lastResult: "skipped", lastError: undefined });
+    saveCloudBackupState({ ...state, lastAttemptAt: new Date().toISOString(), lastResult: "skipped", lastError: undefined });
     return { status: "skipped", uploadedModules: 0, totalBytes, totalRecords, manifestName: state.lastManifestName ?? "" };
   }
 
@@ -563,6 +565,7 @@ async function runCloudBackupInternal(
   saveCloudBackupState({
     lastManifestName: manifestName,
     lastCreatedAt: createdAt,
+    lastAttemptAt: createdAt,
     lastTotalBytes: totalBytes,
     lastTotalRecords: totalRecords,
     lastCombinedHash: anomaly ? state.lastCombinedHash : combinedHash,

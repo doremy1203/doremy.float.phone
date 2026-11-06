@@ -5,6 +5,7 @@ export const maxDuration = 60;
 
 const GATEWAY_SLUG = "ai-phone-push";
 const GENERATE_SLUG = "push-generate";
+const LIFE_SCHEDULER_SLUG = "life-scheduler";
 const RESULT_SLUG = "push-shortcut-result";
 const BRIDGE_SLUG = "push-bridge";
 const SCREEN_SLUG = "screen-chat";
@@ -14,6 +15,7 @@ type DeployRequest = {
   token?: string;
   gatewayCode?: string;
   generateCode?: string;
+  lifeSchedulerCode?: string;
   resultCode?: string;
   bridgeCode?: string;
   screenChatCode?: string;
@@ -70,7 +72,8 @@ async function assertDedicatedProject(params: {
             and c.relname <> all (array[
               'push_server_config', 'push_subscriptions', 'push_jobs', 'push_outbox',
               'push_shortcut_commands', 'push_bridge_config', 'push_bridge_snapshots',
-              'push_screen_sessions', 'push_screen_threads'
+              'push_screen_sessions', 'push_screen_threads',
+              'life_schedule_runtime', 'life_schedule_diagnostics', 'life_schedule_diagnostic_events'
             ])
         ) then 'personal-cloud-safe-v2'
         else 'shared-project-blocked'
@@ -111,6 +114,7 @@ export async function POST(request: Request) {
   const token = typeof payload.token === "string" ? payload.token.trim() : "";
   const gatewayCode = typeof payload.gatewayCode === "string" ? payload.gatewayCode : "";
   const generateCode = typeof payload.generateCode === "string" ? payload.generateCode : "";
+  const lifeSchedulerCode = typeof payload.lifeSchedulerCode === "string" ? payload.lifeSchedulerCode : "";
   const resultCode = typeof payload.resultCode === "string" ? payload.resultCode : "";
   const bridgeCode = typeof payload.bridgeCode === "string" ? payload.bridgeCode : "";
   const screenChatCode = typeof payload.screenChatCode === "string" ? payload.screenChatCode : "";
@@ -133,6 +137,13 @@ export async function POST(request: Request) {
     || generateCode.length > 900_000
   ) {
     return NextResponse.json({ ok: false, error: "离线生成器部署包无效。" }, { status: 400 });
+  }
+  if (
+    !lifeSchedulerCode.includes("Cloud-resident life schedule evaluator")
+    || !lifeSchedulerCode.includes("Deno.serve")
+    || lifeSchedulerCode.length > 250_000
+  ) {
+    return NextResponse.json({ ok: false, error: "云端生活日程引擎部署包无效。" }, { status: 400 });
   }
   if (
     !resultCode.includes("iPhone 快捷指令结果入口")
@@ -212,6 +223,14 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { ok: false, step: "部署屏幕速聊入口失败", error: await upstreamMessage(screenChat) },
         { status: screenChat.status },
+      );
+    }
+
+    const lifeScheduler = await deployFunction({ projectRef, token, slug: LIFE_SCHEDULER_SLUG, code: lifeSchedulerCode });
+    if (!lifeScheduler.ok) {
+      return NextResponse.json(
+        { ok: false, step: "部署云端生活日程引擎失败", error: await upstreamMessage(lifeScheduler) },
+        { status: lifeScheduler.status },
       );
     }
 

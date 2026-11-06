@@ -16,4 +16,5 @@
     android:initialLayout="@layout/phone_widget"
     android:resizeMode="horizontal|vertical"
     android:widgetCategory="home_screen"
-    android:description="@string/phone_widget_desc" />
+    android:description="@string/phone_widget_desc"
+    android:configure="app.floatphone.shell.PhoneWidgetConfigActivity" />

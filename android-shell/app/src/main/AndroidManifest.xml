@@ -51,30 +51,18 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
-    <uses-permission android:name="android.permission.BODY_SENSORS" />
 
     <!-- 健康数据（睡眠）：经 Health Connect 读，不是直接读厂商运动 App。
          这是 Health Connect 自己的权限（Android 14+ 由系统管），请求时由
          系统弹出授权，用户拒绝也不影响 App 其余部分。 -->
     <uses-permission android:name="android.permission.health.READ_SLEEP" />
 
-    <!-- 日程与通讯录：角色记你的安排、认你的朋友 -->
+    <!-- 日程：仅在用户启用日历联动时读取或写入系统日历。 -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
-    <uses-permission android:name="android.permission.READ_CONTACTS" />
 
-    <!-- 媒体：读相册/音乐，为后续「角色看照片、一起听歌」留口子 -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
+    <!-- 文件导入通过系统文件选择器授予单个 URI，不申请整库媒体读取权限。 -->
 
-    <!-- 电话与短信：来电识别、通话状态感知 -->
-    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
-    <uses-permission android:name="android.permission.READ_CALL_LOG" />
-    <uses-permission android:name="android.permission.READ_SMS" />
-    <uses-permission android:name="android.permission.RECEIVE_SMS" />
 
     <!-- 系统能力：常驻、精确闹钟、设置项、状态栏 -->
     <!-- 设闹钟的**调用方权限**。系统时钟（AOSP 的 HandleSetAlarm、
@@ -94,13 +82,10 @@
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
-    <uses-permission android:name="android.permission.EXPAND_STATUS_BAR" />
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
-    <!-- 蓝牙与传感：耳机状态、贴贴等联动 -->
+    <!-- 蓝牙音频路由：用于通话时连接已配对耳机；不扫描附近设备。 -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
-    <uses-permission android:name="android.permission.NFC" />
 
     <!-- 前台服务扩展类型（Android 14+ 要求逐项声明） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -111,9 +96,9 @@
     <application
         android:label="@string/app_name"
         android:icon="@drawable/appicon"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:supportsRtl="true"
-        android:usesCleartextTraffic="false"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/Theme.FloatShell">
 
         <activity
@@ -161,6 +146,28 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Visible, user-enabled ambient-light automation; notification includes a stop action. -->
+        <service
+            android:name=".AmbientLightMonitorService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled ambient-light automation for device rules" />
+        </service>
+
+        <!-- 系统电源事件由本机现实桥处理，不依赖网页或登录态。 -->
+        <receiver
+            android:name=".NativeRealityBridgeReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.ACTION_POWER_CONNECTED" />
+                <action android:name="android.intent.action.ACTION_POWER_DISCONNECTED" />
+                <action android:name="android.intent.action.BATTERY_LOW" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
@@ -168,15 +175,6 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
-
-        <!-- 查岗提醒闹钟：只发提醒通知，不在后台截屏；用户点开后才进入预览审批。 -->
-        <receiver
-            android:name=".CheckInAlarmReceiver"
-            android:exported="false" />
-
-        <receiver
-            android:name=".CheckInAccessibilitySettingsReceiver"
-            android:exported="false" />
 
         <!-- 通话浮窗服务：TYPE_APPLICATION_OVERLAY 浮在其他 App 上层。
              mediaPlayback 类型同时把进程钉在前台，网页语音才不会被系统掐断。 -->
@@ -190,22 +188,14 @@
         <service
             android:name=".CheckInService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="用户发起或明确同意的单次屏幕预览确认浮层" />
-        </service>
+            android:foregroundServiceType="specialUse" />
 
         <!-- 截屏悬浮球：随手点一下就能截屏发给角色（你自己发起，不是角色查岗）。
              点击后交给 CheckInService 走同一套预览与审批。 -->
         <service
             android:name=".ScreenshotBallService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="用户主动开启的屏幕截取悬浮球" />
-        </service>
+            android:foregroundServiceType="specialUse" />
 
         <!-- 媒体控制：持有「通知使用权」后才有资格读活跃媒体会话、直接控制播放。
              它**不读任何通知内容**（onNotificationPosted 刻意不重写），存在的唯一
@@ -230,6 +220,14 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/phone_widget_info" />
         </receiver>
+        <activity
+            android:name=".PhoneWidgetConfigActivity"
+            android:exported="true"
+            android:theme="@style/Theme.FloatShell" />
+        <receiver
+            android:name=".PhoneWidgetPinReceiver"
+            android:enabled="true"
+            android:exported="false" />
 
         <!-- 浮窗通知上的动作按钮（挂断/返回） -->
         <receiver
@@ -254,5 +252,14 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/call_control_service" />
         </service>
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.sharedvideos"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/shared_video_paths" />
+        </provider>
     </application>
 </manifest>

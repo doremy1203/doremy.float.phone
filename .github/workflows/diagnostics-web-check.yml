@@ -1,0 +1,35 @@
+name: Validate Runtime Diagnostics Web UI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "components/settings/runtime-diagnostics.tsx"
+      - "components/phone-settings-app.tsx"
+      - "lib/qa-error-log.ts"
+      - "package.json"
+      - "package-lock.json"
+      - "next.config.mjs"
+      - ".github/workflows/diagnostics-web-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  web-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Production web build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          NODE_OPTIONS: "--max-old-space-size=6144"
+        run: npm run build

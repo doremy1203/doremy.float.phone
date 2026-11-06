@@ -32,8 +32,8 @@ const SHELL_PREFIX = "shell:";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  // 自检默认只读；只有用户明确点击「发送测试通知」时传 ?probe=1。
-  const probe = url.searchParams.get("probe") === "1";
+  // 探测广播会真的弹一条通知，允许用 ?probe=0 关掉。
+  const probe = url.searchParams.get("probe") !== "0";
   const steps: Step[] = [];
 
   // ── ① 站点配置 ──

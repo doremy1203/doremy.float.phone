@@ -11,7 +11,7 @@ import {
 import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./settings-types";
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { previewMessagesForApi, sendLLMRequest, ChatEngineError } from "./chat-engine";
-import { loadMemoryConfig } from "./memory-storage";
+import { loadMemoryConfig, loadMemoryEntriesByType } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
@@ -19,7 +19,7 @@ import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from
 import { getWeekStartIso } from "./calendar-utils";
 import { parseStoryResponse } from "./story-parser";
 import { STORY_PARSER_VERSION } from "./story-parser";
-import { loadStoryMessages, replaceStoryMessages, resolveActiveStorySchemes, type StoryCharacterSettings, type StoryMessage } from "./story-storage";
+import { loadStoryMessages, replaceStoryMessages, resolveActiveStorySchemes, loadStorySessionsForOwner, resolveStoryMemorySettings, type StoryCharacterSettings, type StoryMessage, type StoryMemorySettings } from "./story-storage";
 import type { ChatMessage } from "./chat-storage";
 import { MacroEngine } from "./macro-engine";
 
@@ -46,6 +46,10 @@ export type StoryGenerationOptions = {
     independent?: boolean;
     inheritRecentMemory?: boolean;
     startedAt?: string;
+    sessionId?: string;
+    ownerType?: "single" | "group";
+    ownerId?: string;
+    memorySettings?: StoryMemorySettings;
   };
   signal?: AbortSignal;
 };
@@ -265,28 +269,88 @@ async function buildStoryPromptMessages(
   const userIdentity = resolveUserIdentity(characterId, "story");
   const historyMessages = history.map((message) => toHistoryMessage(message, contextExcludedTags));
   const memConfig = loadMemoryConfig();
-  const independent = Boolean(storyMemory?.independent);
-  const context = independent
-    ? {
+  const memorySettings = storyMemory?.memorySettings
+    ? { ...resolveStoryMemorySettings(), ...storyMemory.memorySettings }
+    : resolveStoryMemorySettings({ independentStory: storyMemory?.independent });
+  // 分线自己的完整聊天历史始终进入上下文；各开关只控制外部记忆来源。
+  const usePublicShortTerm = memorySettings.readPublicShortTermMemory || memorySettings.readOtherAppsMemory;
+  const context = usePublicShortTerm
+    ? prepareShortTermContext(characterId, "story", {
+      userName: userIdentity?.name ?? "用户",
+      history: historyMessages,
+      afterTimestamp: !storyMemory?.memorySettings && storyMemory?.inheritRecentMemory === false ? storyMemory.startedAt : undefined,
+      includeOtherApps: memorySettings.readOtherAppsMemory,
+      includeStoryPublic: memorySettings.readPublicShortTermMemory,
+    })
+    : {
       recentBlocks: [],
       truncatedHistory: historyMessages,
       wbActivationContext: historyMessages.slice(-10).map((message) => message.content).join("\n"),
       unifiedRecentItems: [],
-    }
-    : prepareShortTermContext(characterId, "story", {
-      userName: userIdentity?.name ?? "用户",
-      history: historyMessages,
-      afterTimestamp: storyMemory?.inheritRecentMemory === false ? storyMemory.startedAt : undefined,
-    });
+    };
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = context;
 
   let memories: Awaited<ReturnType<typeof retrieveMemoriesForPrompt>> | null = null;
   let coreMemories: Awaited<ReturnType<typeof retrieveCoreMemoriesForPrompt>> | null = null;
-  if (!independent) {
-    [memories, coreMemories] = await Promise.all([
-      retrieveMemoriesForPrompt(characterId, wbActivationContext, memConfig).catch(() => null),
-      retrieveCoreMemoriesForPrompt(characterId, memConfig).catch(() => null),
-    ]);
+  [memories, coreMemories] = await Promise.all([
+    memorySettings.readLongTermMemory
+      ? retrieveMemoriesForPrompt(characterId, wbActivationContext, memConfig).catch(() => null)
+      : Promise.resolve(null),
+    memorySettings.readCoreMemory
+      ? retrieveCoreMemoriesForPrompt(characterId, memConfig).catch(() => null)
+      : Promise.resolve(null),
+  ]);
+
+  // 分线间共享必须同时满足“本分线允许读取”与“来源分线允许被读取”，并按 session id 精确授权。
+  let sharedBranchContext = "";
+  if (memorySettings.readOtherBranchMemory && storyMemory?.sessionId && storyMemory.ownerId) {
+    const allowedIds = new Set(memorySettings.readableBranchIds || []);
+    const siblingSessions = loadStorySessionsForOwner(storyMemory.ownerType || "single", storyMemory.ownerId)
+      .filter((session) => session.id !== storyMemory.sessionId && allowedIds.has(session.id));
+    const snippets: string[] = [];
+    for (const sibling of siblingSessions) {
+      const siblingSettings = resolveStoryMemorySettings(sibling);
+      if (!siblingSettings.allowOtherBranchesRead) continue;
+      const label = sibling.branchName || "未命名分线";
+
+      if (siblingSettings.sharedMemoryTypes.includes("branch") && siblingSettings.writeBranchMemory) {
+        const branchSummary = loadStoryMessages(sibling.id)
+          .filter((message) => message.role === "assistant" && Boolean(
+            message.branchMemorySummary !== undefined
+              ? message.branchMemorySummary
+              : sibling.memorySettings?.writeBranchMemory !== false ? message.storySummary : "",
+          ))
+          .slice(-12)
+          .map((message) => (message.branchMemorySummary !== undefined
+            ? message.branchMemorySummary
+            : sibling.memorySettings?.writeBranchMemory !== false ? message.storySummary : "")?.trim())
+          .filter((value): value is string => Boolean(value));
+        if (branchSummary.length) snippets.push(`【分线摘要：${label}】\n${branchSummary.join("\n")}`);
+      }
+
+      if (siblingSettings.sharedMemoryTypes.includes("public_short_term") && siblingSettings.writePublicShortTermMemory) {
+        const publicSummary = loadStoryMessages(sibling.id)
+          .filter((message) => message.role === "assistant" && Boolean(message.storySummary))
+          .slice(-12)
+          .map((message) => message.storySummary?.trim())
+          .filter((value): value is string => Boolean(value));
+        if (publicSummary.length) snippets.push(`【分线公共短期事件：${label}】\n${publicSummary.join("\n")}`);
+      }
+
+      const belongsExclusivelyToSibling = (entry: { metadata?: Record<string, unknown> }) => {
+        const ids = Array.isArray(entry.metadata?.sourceSessionIds) ? entry.metadata?.sourceSessionIds.map(String) : [];
+        return ids.length === 1 && ids[0] === sibling.id;
+      };
+      if (siblingSettings.sharedMemoryTypes.includes("long_term") && siblingSettings.writeLongTermMemory) {
+        const entries = (await loadMemoryEntriesByType(characterId, "long_term")).filter(belongsExclusivelyToSibling);
+        if (entries.length) snippets.push(`【分线长期记忆：${label}】\n${entries.slice(-8).map((entry) => entry.content).join("\n")}`);
+      }
+      if (siblingSettings.sharedMemoryTypes.includes("core") && siblingSettings.writeCoreMemory) {
+        const entries = (await loadMemoryEntriesByType(characterId, "core")).filter(belongsExclusivelyToSibling);
+        if (entries.length) snippets.push(`【分线核心记忆：${label}】\n${entries.slice(-8).map((entry) => entry.content).join("\n")}`);
+      }
+    }
+    sharedBranchContext = snippets.join("\n\n");
   }
 
   const now = new Date();
@@ -321,8 +385,11 @@ async function buildStoryPromptMessages(
       content: `# 多人见面剧情\n当前场景共有以下角色：\n${roster}\n请让每个角色保持各自人设、称呼和行动逻辑，按场景自然分配对白与反应；不要把多人合并成同一个说话者，也不要代替用户决定行动。`,
     });
   }
-  if (independent) {
-    messages.push({ role: "system", content: "# 独立剧情\n本分线不参考角色既有短期、核心或长期记忆，只根据角色设定和本分线已经发生的内容继续。" });
+  if (sharedBranchContext.trim()) {
+    messages.push({ role: "system", content: `# 获准读取的其他剧情分线记忆\n以下仅为用户明确选择且对方允许共享的分线摘要；不得把它们当作当前分线已经亲历的事实：\n${sharedBranchContext}` });
+  }
+  if (!memorySettings.readCoreMemory && !memorySettings.readLongTermMemory && !memorySettings.readPublicShortTermMemory && !sharedBranchContext) {
+    messages.push({ role: "system", content: "# 分线记忆隔离\n本分线不读取角色公共核心、长期或短期记忆；只根据角色设定与本分线自身聊天历史继续。" });
   }
   if (settingsPrompt) messages.push({ role: "system", content: settingsPrompt });
   if (settings?.floatingPhoneInContext && floatingChatContext?.trim()) {

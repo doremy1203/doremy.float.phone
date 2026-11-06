@@ -6,6 +6,8 @@ import { ChatReasoningVisibilityController } from "@/components/chat-reasoning-v
 import { CSSImportEnhancer } from "@/components/css-import-enhancer";
 import { PWAManifestInjector } from "@/components/pwa-manifest-injector";
 import { PWARegistrar } from "@/components/pwa-registrar";
+import { DeviceCompatibilityBootstrap } from "@/components/device-compatibility-bootstrap";
+import { GlobalNoticeHost } from "@/components/ui/global-notice-host";
 import "../styles/fonts.css";
 import "./globals.css";
 
@@ -46,9 +48,11 @@ export default function RootLayout({
       <body>
         <PWAManifestInjector />
         <PWARegistrar />
+        <DeviceCompatibilityBootstrap />
         <CSSImportEnhancer />
         <ChatPluginBootstrap />
         <ChatReasoningVisibilityController />
+        <GlobalNoticeHost />
         {children}
       </body>
     </html>

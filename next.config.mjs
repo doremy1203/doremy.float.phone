@@ -27,6 +27,11 @@ const nextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
   },
+  typescript: {
+    // 历史注释里的 TS 错误均已修复（2026-10 全仓 tsc --noEmit 零错误），构建期类型检查重新打开，
+    // 防止类型回归悄悄溜进 main。若个别文件需要豁免，用 // @ts-expect-error 精确标注，不要整体关闭。
+    ignoreBuildErrors: false,
+  },
   outputFileTracingIncludes: {
     "/api/**": ["./data/**"],
   },

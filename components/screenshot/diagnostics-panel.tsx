@@ -17,9 +17,9 @@ import { RefreshCw, Stethoscope } from "lucide-react";
 import { isShellEnvironment as isShell } from "@/lib/shell-call-overlay";
 import {
   readCheckInDiagnostics,
-  readNativeCheckInDiagnostics,
   readScreenshotDiagnostics,
   readScreenshotShareTargets,
+  openNativeAccessibilitySettings,
 } from "@/lib/screenshot";
 import type { CheckInDiagnostics, ScreenshotDiagnostics, ScreenshotShareTargetState } from "@/lib/screenshot";
 
@@ -50,7 +50,6 @@ const TONE_COLOR: Record<string, string> = {
 export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: string) => void }) {
   const [shot, setShot] = useState<ScreenshotDiagnostics | null>(null);
   const [checkIn, setCheckIn] = useState<CheckInDiagnostics | null>(null);
-  const [nativeCheckIn, setNativeCheckIn] = useState<ReturnType<typeof readNativeCheckInDiagnostics>>(null);
   const [share, setShare] = useState<ScreenshotShareTargetState | null>(null);
   const [open, setOpen] = useState(false);
 
@@ -59,7 +58,6 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
   const refresh = useCallback(() => {
     setShot(readScreenshotDiagnostics());
     setCheckIn(readCheckInDiagnostics());
-    setNativeCheckIn(readNativeCheckInDiagnostics());
     setShare(readScreenshotShareTargets());
   }, []);
 
@@ -75,7 +73,7 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
   const shotRows: Row[] = shot
     ? [
         { label: "系统支持", value: shot.supported ? "支持（Android 11+）" : "不支持（需 Android 11+）", tone: toneOf(shot.supported) },
-        { label: "无障碍实例连接", value: shot.accessibilityOn ? "已连接" : "未连接（可能被系统回收）", tone: toneOf(shot.accessibilityOn) },
+        { label: "无障碍服务", value: shot.accessibilityOn ? "已开启" : "未开启（截屏的前提）", tone: toneOf(shot.accessibilityOn) },
         { label: "当前可截", value: shot.ready ? "可以" : "不可以", tone: toneOf(shot.ready) },
         { label: "进行中", value: shot.capturing ? "有一张还没截完" : "空闲", tone: shot.capturing ? "warn" : "ok" },
         { label: "累计截屏", value: `${shot.captureCount ?? 0} 次`, tone: "ok" },
@@ -120,23 +118,11 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
       ]
     : [];
 
-  const nativeRows: Row[] = nativeCheckIn
-    ? [
-        { label: "无障碍系统开关", value: nativeCheckIn.accessibilityEnabledInSettings ? "系统设置显示已开启" : "系统设置显示未开启", tone: nativeCheckIn.accessibilityEnabledInSettings ? "ok" : "bad" },
-        { label: "无障碍实例", value: nativeCheckIn.accessibilityConnected ? "当前已连接" : "未连接 / 可能被系统回收", tone: nativeCheckIn.accessibilityConnected ? "ok" : "bad" },
-        { label: "通知权限", value: nativeCheckIn.notificationsEnabled ? "允许通知" : "通知被关闭，无法显示故障横幅", tone: nativeCheckIn.notificationsEnabled ? "ok" : "bad" },
-        { label: "忽略电池优化", value: nativeCheckIn.ignoringBatteryOptimizations ? "已允许" : "未允许（建议开启）", tone: nativeCheckIn.ignoringBatteryOptimizations ? "ok" : "warn" },
-        { label: "原生闹钟", value: nativeCheckIn.scheduled ? "已登记" : "未登记", tone: nativeCheckIn.scheduled ? "ok" : "warn" },
-        ...(nativeCheckIn.scheduled
-          ? [{ label: "下次提醒", value: `${nativeCheckIn.characterName || "角色"} · ${formatWhen(nativeCheckIn.dueAt)}`, tone: "ok" as const }]
-          : []),
-        { label: "待处理提醒", value: nativeCheckIn.pending ? (nativeCheckIn.opened ? "已点击，等待网页接收" : "已到点，等待用户点击") : "无", tone: nativeCheckIn.pending ? "warn" : "ok" },
-      ]
-    : [];
-
   const checkInRows: Row[] = checkIn
     ? [
         { label: "浮窗权限", value: checkIn.canDraw ? "已授予" : "未授予", tone: toneOf(checkIn.canDraw) },
+        { label: "系统无障碍开关", value: checkIn.systemAccessibilityEnabled === true ? "已开启" : checkIn.systemAccessibilityEnabled === false ? "未开启" : "旧版壳无法读取", tone: checkIn.systemAccessibilityEnabled === true ? "ok" : checkIn.systemAccessibilityEnabled === false ? "bad" : "warn" },
+        { label: "无障碍服务实例", value: checkIn.screenshot?.accessibilityOn ? "已连接" : "未连接", tone: checkIn.screenshot?.accessibilityOn ? "ok" : "bad" },
         { label: "常驻服务", value: checkIn.running ? "运行中" : "未运行", tone: toneOf(checkIn.running) },
         { label: "活动实例", value: checkIn.hasInstance ? "有" : "无", tone: checkIn.hasInstance ? "ok" : "warn" },
         { label: "窗口已挂上", value: checkIn.windowAdded ? "是" : "否", tone: checkIn.hasInstance ? toneOf(checkIn.windowAdded) : "warn" },
@@ -215,26 +201,13 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
             ))
           )}
 
-          <div style={{ padding: "14px 0 6px", fontWeight: 600 }}>后台调度</div>
-          {nativeRows.length === 0 ? (
-            <div className="menu-item" style={{ cursor: "default" }}>
-              <div className="menu-label-group">
-                <span className="menu-desc">读不到原生闹钟状态（请更新安卓壳）</span>
-              </div>
+          {inShell && checkIn?.systemAccessibilityEnabled === true && checkIn.screenshot?.accessibilityOn === false ? (
+            <div role="alert" className="per-note is-warn" style={{ margin: "8px 0 10px" }}>
+              <b>系统开关已开启，但无障碍服务实例未连接。</b>
+              <p style={{ marginTop: 4 }}>这通常表示无障碍服务进程被系统/厂商后台策略回收，或服务异常断开；此时查岗截屏无法工作。请重新打开无障碍设置，关闭后重新开启“通话浮窗与界面陪伴”，再返回这里点“重新检测”；同时把小手机设为允许后台运行，并按机型关闭电池优化/允许自启动。</p>
+              <button type="button" className="ui-btn ui-btn-outline" style={{ marginTop: 8 }} onClick={openNativeAccessibilitySettings}>打开无障碍设置</button>
             </div>
-          ) : (
-            nativeRows.map(row => (
-              <div className="menu-item" key={row.label} style={{ cursor: "default" }}>
-                <div className="menu-label-group">
-                  <span className="menu-label" style={{ fontSize: 13 }}>{row.label}</span>
-                </div>
-                <span style={{ fontSize: 12, color: TONE_COLOR[row.tone ?? "ok"], maxWidth: "60%", textAlign: "right", wordBreak: "break-all" }}>
-                  {row.value}
-                </span>
-              </div>
-            ))
-          )}
-
+          ) : null}
           <div style={{ padding: "14px 0 6px", fontWeight: 600 }}>查岗浮层</div>
           {checkInRows.length === 0 ? (
             <div className="menu-item" style={{ cursor: "default" }}>
@@ -270,7 +243,7 @@ export function ScreenshotDiagnosticsPanel({ onNotice }: { onNotice?: (msg: stri
           </div>
 
           <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)", marginTop: 6 }}>
-            这里只显示状态，不含任何画面内容。若系统开关显示已开启、但无障碍实例未连接，通常是服务被系统回收：到系统无障碍设置关闭再开启「小手机/通话控制服务」；若仍反复断开，再允许自启动、后台运行并关闭电池优化。通知权限关闭时，系统无法展示故障横幅。
+            这里只显示状态，不含任何画面内容。查岗浮层「该弹没弹」时，先看浮窗权限与常驻服务两项。
           </div>
         </div>
       )}

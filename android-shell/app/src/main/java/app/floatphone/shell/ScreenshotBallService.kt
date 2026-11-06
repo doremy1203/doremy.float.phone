@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
+import android.content.res.Configuration
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -58,8 +59,14 @@ class ScreenshotBallService : Service() {
 
         private const val PREFS = "screenshot_ball_prefs"
 
-        /** 贴边留白。 */
+        /** 默认位置与屏幕边缘的间距。 */
         private const val EDGE_DP = 6
+
+        /** 松手靠近边缘时，只露出这一小段，减少遮挡但仍可抓住拖回。 */
+        private const val EDGE_PEEK_DP = 12
+
+        /** 只有拖到边缘附近才进入内缩状态；屏幕中间松手不吸边。 */
+        private const val EDGE_TRIGGER_DP = 24
 
         /** 直径默认值（用户可在设置里改，32~96）。 */
         private const val DEFAULT_DIAMETER_DP = 50
@@ -286,6 +293,17 @@ class ScreenshotBallService : Service() {
         return START_STICKY
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        main.post {
+            if (ballView != null) {
+                diameterPx = dp(ballDiameterDp)
+                clamp(allowTucked = true)
+                applyPosition()
+            }
+        }
+    }
+
     override fun onDestroy() {
         teardown()
         super.onDestroy()
@@ -324,19 +342,28 @@ class ScreenshotBallService : Service() {
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val screenW = resources.displayMetrics.widthPixels
         val screenH = resources.displayMetrics.heightPixels
+        val hasSavedX = prefs.contains("x")
         val savedX = prefs.getInt("x", -1)
         val savedY = prefs.getInt("y", -1)
-        // 直径可能刚被改过，重新算一次，否则换大球时初始位置会偏出屏幕
+        // 负数 X 代表用户主动把球收进左边缘，不能当成「没有保存过位置」。
         diameterPx = dp(ballDiameterDp)
-        posX = if (savedX >= 0) savedX else screenW - diameterPx - dp(EDGE_DP)
-        posY = if (savedY >= 0) savedY else screenH / 3
-        clamp()
+        posX = if (hasSavedX) savedX else screenW - diameterPx - dp(EDGE_DP)
+        posY = if (prefs.contains("y")) savedY else screenH / 3
+        clamp(allowTucked = true)
     }
 
-    private fun clamp() {
+    /**
+     * 普通拖动时球必须完整留在屏幕内；旋转/恢复位置时则允许保留已内缩的边缘状态。
+     */
+    private fun clamp(allowTucked: Boolean = false) {
         val screenW = resources.displayMetrics.widthPixels
         val screenH = resources.displayMetrics.heightPixels
-        posX = posX.coerceIn(0, maxOf(0, screenW - diameterPx))
+        val peekPx = dp(EDGE_PEEK_DP).coerceAtMost(diameterPx)
+        val wasTuckedLeft = allowTucked && posX < 0
+        val wasTuckedRight = allowTucked && posX + diameterPx > screenW
+        val minX = if (wasTuckedLeft) -(diameterPx - peekPx) else 0
+        val maxX = if (wasTuckedRight) maxOf(0, screenW - peekPx) else maxOf(0, screenW - diameterPx)
+        posX = posX.coerceIn(minX, maxX)
         posY = posY.coerceIn(0, maxOf(0, screenH - diameterPx))
     }
 
@@ -405,7 +432,7 @@ class ScreenshotBallService : Service() {
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     if (moved) {
-                        // 松手贴边：吸到左或右，避免球停在屏幕正中间挡视线
+                        // 平时自由停在松手位置；只有松手点靠近左右边缘时才内缩避让。
                         snapToEdge()
                         savePosition()
                     } else {
@@ -422,10 +449,19 @@ class ScreenshotBallService : Service() {
         runCatching { windowManager.addView(view, params) }
     }
 
-    /** 松手后吸附到最近的左右边缘。 */
+    /**
+     * 不再强制左右吸边：中间区域松手就留在原地。
+     * 只有拖到边缘触发区时，才把大部分球身收进屏幕外，留下可点击/可拖回的边缘。
+     */
     private fun snapToEdge() {
         val screenW = resources.displayMetrics.widthPixels
-        posX = if (posX + diameterPx / 2 < screenW / 2) dp(EDGE_DP) else screenW - diameterPx - dp(EDGE_DP)
+        val triggerPx = dp(EDGE_TRIGGER_DP)
+        val peekPx = dp(EDGE_PEEK_DP).coerceAtMost(diameterPx)
+        when {
+            posX <= triggerPx -> posX = -(diameterPx - peekPx)
+            posX + diameterPx >= screenW - triggerPx -> posX = maxOf(0, screenW - peekPx)
+            else -> clamp()
+        }
         posY = posY.coerceIn(0, maxOf(0, resources.displayMetrics.heightPixels - diameterPx))
         applyPosition()
     }

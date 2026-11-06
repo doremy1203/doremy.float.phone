@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { AlertCircle, Camera, ChevronDown, Image, Info, Plus, Power, RefreshCw, ScanFace, Sparkles, Trash2, Upload } from "lucide-react";
+import { AlertCircle, Camera, ChevronDown, Image, Info, Plus, RefreshCw, ScanFace, Sparkles, Trash2, Upload } from "lucide-react";
 import type { ImageGenerationSettings as ImageGenerationSettingsType, NovelAiPreset, OpenAiImagePreset } from "@/lib/settings-types";
 import {
     DEFAULT_IMAGE_GENERATION_SETTINGS,
@@ -12,11 +12,14 @@ import {
 import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
 import { getChatImageFromIndexedDB, saveChatImageToIndexedDB } from "@/lib/chat-asset-storage";
+import { fileToUserAvatarDataUrl } from "@/lib/user-avatar-image";
 import {
     fetchImageGenerationModels,
     fetchNovelAiModels,
     filterLikelyImageModels,
     generateImageFromConfiguredApi,
+    loadImageGenerationCallRecords,
+    clearImageGenerationCallRecords,
 } from "@/lib/image-generation-service";
 import { Alert } from "@/components/ui/feedback";
 import { Input, Select, Textarea, Toggle } from "@/components/ui/form";
@@ -67,6 +70,7 @@ export function ImageGenerationSettings() {
     const [settings, setSettings] = useState<ImageGenerationSettingsType>(DEFAULT_IMAGE_GENERATION_SETTINGS);
     const [characters, setCharacters] = useState<Character[]>([]);
     const [referencePreviews, setReferencePreviews] = useState<Record<string, string>>({});
+    const [userReferencePreview, setUserReferencePreview] = useState<string | null>(null);
     const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
     const [cropCharacterId, setCropCharacterId] = useState<string | null>(null);
     const [cropDraft, setCropDraft] = useState({ x: 0.27, y: 0.12, size: 0.46 });
@@ -92,6 +96,7 @@ export function ImageGenerationSettings() {
     const [testPreviewUrl, setTestPreviewUrl] = useState<string | null>(null);
     const [pendingDeletePresetId, setPendingDeletePresetId] = useState<string | null>(null);
     const [pendingDeleteOpenAiPresetId, setPendingDeleteOpenAiPresetId] = useState<string | null>(null);
+    const [imageCallRecords, setImageCallRecords] = useState(loadImageGenerationCallRecords);
     const openaiPresets = useMemo<OpenAiImagePreset[]>(() => (
         settings.openaiPresets?.length ? settings.openaiPresets : [{
             id: "preset_openai_default",
@@ -109,6 +114,13 @@ export function ImageGenerationSettings() {
         ? settings.activeOpenAiPresetId
         : openaiPresets[0].id;
     const activeOpenAiPreset = openaiPresets.find(p => p.id === activeOpenAiPresetId) || openaiPresets[0];
+
+    useEffect(() => {
+        const refresh = () => setImageCallRecords(loadImageGenerationCallRecords());
+        window.addEventListener("image-generation-diagnostics-updated", refresh);
+        refresh();
+        return () => window.removeEventListener("image-generation-diagnostics-updated", refresh);
+    }, []);
 
     useEffect(() => {
         // Sync the ratio hint to the saved size on load, so the hint is present
@@ -159,6 +171,14 @@ export function ImageGenerationSettings() {
             }
             setReferencePreviews(next);
         });
+        return () => { cancelled = true; };
+    }, [settings.characterReferences]);
+
+    useEffect(() => {
+        let cancelled = false;
+        const assetId = settings.characterReferences?.["__user__"]?.assetId;
+        if (!assetId) { setUserReferencePreview(null); return; }
+        void getChatImageFromIndexedDB(assetId).then(dataUrl => { if (!cancelled) setUserReferencePreview(dataUrl); });
         return () => { cancelled = true; };
     }, [settings.characterReferences]);
 
@@ -469,7 +489,8 @@ export function ImageGenerationSettings() {
     };
 
     const selectedCharacter = characters.find(character => character.id === selectedCharacterId) || null;
-    const selectedReference = selectedCharacter ? settings.characterReferences?.[selectedCharacter.id] : undefined;
+    const activeCropPreview = cropCharacterId === "__user__" ? userReferencePreview : (cropCharacterId ? referencePreviews[cropCharacterId] : null);
+    const selectedReference = selectedCharacterId ? settings.characterReferences?.[selectedCharacterId] : undefined;
     const characterListOverflows = characterScrollMetrics.scrollHeight > characterScrollMetrics.clientHeight + 1;
     const characterScrollThumbPercent = characterListOverflows
         ? Math.max(14, characterScrollMetrics.clientHeight / characterScrollMetrics.scrollHeight * 100)
@@ -917,6 +938,34 @@ export function ImageGenerationSettings() {
             </div>
 
             <div className="flex flex-col gap-2">
+                <p className="settings-menu-section-title">生图 API 调用记录</p>
+                <div className="menu-group p-3 flex flex-col gap-3">
+                    <div className="flex items-center justify-between gap-2">
+                        <span className="menu-desc">本机保存最近 80 次请求；不记录 API Key 或请求头。</span>
+                        <button type="button" onClick={() => { clearImageGenerationCallRecords(); setImageCallRecords([]); }} className="shrink-0 rounded-lg border border-[var(--c-card-border)] px-2 py-1 text-xs">清空</button>
+                    </div>
+                    {imageCallRecords.length === 0 ? <p className="py-3 text-center text-xs opacity-60">暂无生图调用记录。</p> : imageCallRecords.slice(0, 20).map(record => (
+                        <details key={record.id} className="rounded-xl border border-[var(--c-card-border)] bg-[var(--c-card)] p-3">
+                            <summary className="cursor-pointer list-none">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="text-xs font-semibold">{record.status === "success" ? "成功" : record.status === "failed" ? "失败" : "未执行"} · {record.appId || "未标记 APP"}</span>
+                                    <span className="text-[10px] opacity-60">{new Date(record.startedAt).toLocaleString()} · {(record.durationMs / 1000).toFixed(1)}s</span>
+                                </div>
+                                <p className="mt-1 break-all text-[11px] opacity-75">{record.provider} / {record.model} · {record.participantNames.join("、") || "未指定角色"} · {record.usedReferenceImage ? "使用参考图" : "未使用参考图"}</p>
+                    <p className="mt-1 text-[11px] opacity-70">实际加载参考图：{typeof record.referenceImageCount === "number" ? record.referenceImageCount + " 张" : "未知（请求在加载阶段失败或旧记录）"}{record.referenceImageLabels?.length ? " · " + record.referenceImageLabels.join("、") : ""}</p>
+                            </summary>
+                            <div className="mt-3 space-y-2 text-[11px]">
+                                <p>角色 ID：{record.participantIds.join(", ") || "无"}</p>
+                                <p>参考图模式：{record.referenceImageMode}</p>
+                                {record.error && <p className="break-words text-rose-600">错误：{record.error}</p>}
+                                <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/5 p-2">{record.prompt}</pre>
+                            </div>
+                        </details>
+                    ))}
+                </div>
+            </div>
+
+            <div className="flex flex-col gap-2">
                 <p className="settings-menu-section-title">Image Hosting</p>
                 <div className="menu-group">
                     <div className="menu-item">
@@ -1017,7 +1066,7 @@ export function ImageGenerationSettings() {
                 {settings.provider === "novelai" && (
                     <Alert variant="info">
                         <Info size={16} className="mt-[2px] shrink-0" />
-                        <span className="leading-[1.5]">NovelAI 会使用角色专属特征提示词，但暂不读取参考图；切回 OpenAI 兼容引擎后参考图仍会保留。</span>
+                        <span className="leading-[1.5]">NovelAI 当前适配器只使用角色文字特征，不读取脸部参考图；为了避免多角色身份被模型融合，不会把多人参考图硬塞成一张。切回支持多图编辑的 OpenAI 兼容模型后，已保存的参考图仍会保留。</span>
                     </Alert>
                 )}
                 <div className="relative">
@@ -1026,6 +1075,19 @@ export function ImageGenerationSettings() {
                         className="menu-group max-h-[292px] overflow-y-auto overscroll-contain pr-3"
                         onScroll={syncCharacterScrollMetrics}
                     >
+                        <button
+                            type="button"
+                            className={`menu-item w-full text-left ${selectedCharacterId === "__user__" ? "bg-[var(--c-input)]" : ""}`}
+                            onClick={() => setSelectedCharacterId("__user__")}
+                        >
+                            <span className="h-11 w-11 shrink-0 overflow-hidden rounded-xl bg-[var(--c-input)]">
+                                {userReferencePreview ? <img src={userReferencePreview} alt="" className="h-full w-full object-cover" /> : <span className="flex h-full w-full items-center justify-center"><Camera size={18} /></span>}
+                            </span>
+                            <span className="min-w-0 flex flex-1 flex-col">
+                                <span className="menu-label truncate">用户本人</span>
+                                <span className="menu-desc truncate">{userReferencePreview ? "用户身份参考已配置" : "上传用户本人参考图"}</span>
+                            </span>
+                        </button>
                         {characters.length === 0 ? (
                             <div className="ui-empty py-8">
                                 <Camera size={22} />
@@ -1083,30 +1145,20 @@ export function ImageGenerationSettings() {
                     )}
                 </div>
 
-                {selectedCharacter && (
+                {(selectedCharacter || selectedCharacterId === "__user__") && (
                     <div className="menu-group p-4 flex flex-col gap-4">
                         <div className="flex items-center justify-between gap-3">
                             <div className="min-w-0">
-                                <div className="menu-label truncate">{selectedCharacter.name} · 专属生图设定</div>
-                                <div className="menu-desc">只影响这个角色，不会改动角色卡正文。</div>
+                                <div className="menu-label truncate">{selectedCharacter?.name || "用户本人"} · 身份参考设定</div>
+                                <div className="menu-desc">仅用于稳定人物身份，不会改动角色卡正文。</div>
                             </div>
-                            {referencePreviews[selectedCharacter.id] && (
-                                <button
-                                    type="button"
-                                    className={`ui-btn shrink-0 ${selectedReference?.enabled === false ? "ui-btn-primary" : "ui-btn-outline"}`}
-                                    onClick={() => updateCharacterReference(selectedCharacter.id, { enabled: selectedReference?.enabled === false })}
-                                >
-                                    <Power size={16} />
-                                    {selectedReference?.enabled === false ? "启用参考图" : "关闭参考图"}
-                                </button>
-                            )}
                         </div>
 
                         <div className="flex flex-col gap-1">
                             <label className="menu-desc ml-1">专属人物特征提示词</label>
                             <Textarea
                                 value={selectedReference?.featurePrompt || ""}
-                                onChange={(event) => updateCharacterReference(selectedCharacter.id, { featurePrompt: event.target.value })}
+                                onChange={(event) => updateCharacterReference(selectedCharacterId || "__user__", { featurePrompt: event.target.value })}
                                 placeholder="例如：黑色长卷发、灰蓝色眼睛、左眼下有一颗小痣、清冷气质……"
                                 rows={4}
                             />
@@ -1122,15 +1174,14 @@ export function ImageGenerationSettings() {
                                 <span className="menu-right settings-tools-menu-toggle">
                                     <Toggle
                                         checked={selectedReference?.novelAiFeaturePromptEnabled !== false}
-                                        onChange={(novelAiFeaturePromptEnabled) => updateCharacterReference(selectedCharacter.id, { novelAiFeaturePromptEnabled })}
+                                        onChange={(novelAiFeaturePromptEnabled) => updateCharacterReference(selectedCharacterId || "__user__", { novelAiFeaturePromptEnabled })}
                                         className="settings-toggle-control"
                                     />
                                 </span>
                             </div>
                         )}
 
-                        {settings.provider !== "novelai" && (
-                            <div className="flex gap-2">
+                        <div className="flex gap-2">
                                 <button
                                     type="button"
                                     className="ui-btn ui-btn-soft-action flex-1"
@@ -1140,42 +1191,50 @@ export function ImageGenerationSettings() {
                                         input.accept = "image/*";
                                         input.onchange = async () => {
                                             const file = input.files?.[0];
-                                            if (file) await uploadReference(selectedCharacter.id, file);
+                                            if (file && selectedCharacterId) await uploadReference(selectedCharacterId, file);
                                         };
                                         input.click();
                                     }}
                                 >
                                     <Upload size={16} />
-                                    {referencePreviews[selectedCharacter.id] ? "更换参考图" : "选择参考图"}
+                                    {(selectedCharacterId === "__user__" ? userReferencePreview : referencePreviews[selectedCharacterId || ""]) ? "更换参考图" : "上传参考图"}
                                 </button>
-                                {referencePreviews[selectedCharacter.id] && (
-                                    <button type="button" className="ui-btn ui-btn-outline flex-1" onClick={() => openFaceCrop(selectedCharacter.id)}>
+                                {(selectedCharacterId === "__user__" ? userReferencePreview : referencePreviews[selectedCharacterId || ""]) && (
+                                    <button type="button" className="ui-btn ui-btn-outline flex-1" onClick={() => selectedCharacterId && openFaceCrop(selectedCharacterId)}>
                                         <ScanFace size={16} />
                                         选取脸部
                                     </button>
                                 )}
-                            </div>
-                        )}
+                        </div>
+                        <label className="menu-item">
+                            <span className="menu-label">身份参考图发送模式</span>
+                            <select value={settings.referenceImageMode ?? "multi"} onChange={event => updateSettings({ referenceImageMode: event.target.value as "multi" | "collage" | "current" })} className="rounded-lg border border-stone-200 bg-white px-2 py-1.5 text-xs">
+                                <option value="multi">多图上传（推荐，支持多图的 OpenAI 兼容服务）</option>
+                                <option value="collage">拼成一张带编号参考图（兼容只收单图的服务）</option>
+                                <option value="current">仅当前主角色参考图</option>
+                            </select>
+                        </label>
+                        <p className="menu-desc">OpenAI 兼容生图会自动传入出镜人员的参考图；若服务只认第一张，可切到「拼图」。NovelAI 暂不接收参考图片，但会使用上方填写的身份特征描述。</p>
                     </div>
                 )}
             </div>
 
-            {cropCharacterId && referencePreviews[cropCharacterId] && (
+            {cropCharacterId && activeCropPreview && (
                 <ContentDialog
                     title="选取脸部锁定区域"
                     confirmLabel="保存选区"
                     cancelLabel="取消"
                     onCancel={() => setCropCharacterId(null)}
                     onConfirm={() => {
-                        updateCharacterReference(cropCharacterId, { faceCrop: cropDraft, enabled: true });
+                        updateCharacterReference(cropCharacterId, { faceCrop: cropDraft });
                         setCropCharacterId(null);
                     }}
                 >
                     <div className="flex flex-col gap-3">
-                        <p className="menu-desc">拖动方框覆盖角色脸部；发送参考图时只会截取这个区域，减少服装和背景干扰。</p>
+                        <p className="menu-desc">拖动方框覆盖脸部，生图时会优先使用选中的身份区域，尽量减少服装和背景干扰。</p>
                         <div ref={cropContainerRef} className="relative mx-auto w-fit max-h-[52vh] max-w-full overflow-hidden rounded-xl bg-black/80">
                             <img
-                                src={referencePreviews[cropCharacterId]}
+                                src={activeCropPreview || ""}
                                 alt="参考图脸部选取"
                                 draggable={false}
                                 className="block max-h-[52vh] max-w-full select-none object-contain"

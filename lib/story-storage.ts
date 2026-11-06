@@ -323,6 +323,63 @@ export type StoryCharacterSettings = {
   floatingPhoneInContext?: boolean;
 };
 
+export type StoryMemorySettings = {
+  readCoreMemory: boolean;
+  readLongTermMemory: boolean;
+  readPublicShortTermMemory: boolean;
+  readOtherBranchMemory: boolean;
+  readOtherAppsMemory: boolean;
+  writePublicShortTermMemory: boolean;
+  writeLongTermMemory: boolean;
+  writeCoreMemory: boolean;
+  writeBranchMemory: boolean;
+  allowOtherBranchesRead: boolean;
+  /** 当前分线允许读取的其他分线 session id。 */
+  readableBranchIds: string[];
+  /** 允许共享给其他分线的记忆类型。 */
+  sharedMemoryTypes: Array<"branch" | "public_short_term" | "long_term" | "core">;
+};
+
+/** 新旧数据兼容：缺少配置时沿用旧版常规剧情行为。 */
+export const DEFAULT_STORY_MEMORY_SETTINGS: StoryMemorySettings = {
+  readCoreMemory: true,
+  readLongTermMemory: true,
+  readPublicShortTermMemory: true,
+  readOtherBranchMemory: false,
+  readOtherAppsMemory: true,
+  writePublicShortTermMemory: true,
+  writeLongTermMemory: true,
+  writeCoreMemory: true,
+  writeBranchMemory: true,
+  allowOtherBranchesRead: true,
+  readableBranchIds: [],
+  sharedMemoryTypes: ["branch", "public_short_term", "long_term", "core"],
+};
+
+export function resolveStoryMemorySettings(session?: Pick<StorySession, "memorySettings" | "independentStory"> | null): StoryMemorySettings {
+  const stored = session?.memorySettings;
+  const resolved: StoryMemorySettings = {
+    ...DEFAULT_STORY_MEMORY_SETTINGS,
+    ...stored,
+    readableBranchIds: Array.isArray(stored?.readableBranchIds) ? [...stored.readableBranchIds] : [],
+    sharedMemoryTypes: Array.isArray(stored?.sharedMemoryTypes) ? [...stored.sharedMemoryTypes] : [...DEFAULT_STORY_MEMORY_SETTINGS.sharedMemoryTypes],
+  };
+  // 旧版 independentStory 继续表现为不继承角色记忆，但不覆盖新配置。
+  if (!stored && session?.independentStory) {
+    resolved.readCoreMemory = false;
+    resolved.readLongTermMemory = false;
+    resolved.readPublicShortTermMemory = false;
+    resolved.readOtherAppsMemory = false;
+    resolved.writePublicShortTermMemory = false;
+    resolved.writeLongTermMemory = false;
+    resolved.writeCoreMemory = false;
+    resolved.writeBranchMemory = false;
+    resolved.allowOtherBranchesRead = false;
+    resolved.writePublicShortTermMemory = false;
+  }
+  return resolved;
+}
+
 export type StoryOwnerType = "single" | "group";
 
 /** 多人见面组保存在 KV 中，具体剧情消息仍按 StorySession 分会话存储。 */
@@ -352,8 +409,10 @@ export type StorySession = {
   /** 新分线是否允许读取创建前的最近记忆；开启后由 UI 锁定，避免反复改变语义。 */
   inheritRecentMemory?: boolean;
   inheritRecentMemoryLocked?: boolean;
-  /** 独立剧情不读取角色短期、核心和长期记忆。 */
+  /** 旧版独立剧情兼容字段；新版本以每条分线的 memorySettings 为准。 */
   independentStory?: boolean;
+  /** 每条分线独立的记忆读写权限；各开关互不绑定。 */
+  memorySettings?: StoryMemorySettings;
   /** 小说目录页展示的自定义标签，保存在该故事的主线会话上。 */
   catalogTags?: string[];
   /** 从相册设置的剧情封面/头像（data URL）；通常保存在主线会话。 */
@@ -385,6 +444,8 @@ export type StoryMessage = {
   rawContent: string;
   renderedContent?: string;
   storySummary?: string;
+  /** 仅供其他分线读取的专属摘要；与公共短期事件摘要分开保存。 */
+  branchMemorySummary?: string;
   regexSignature?: string;
   parserVersion?: number;
   createdAt: string;
@@ -392,6 +453,7 @@ export type StoryMessage = {
 
 export type StoryProjectionEntry = {
   id: string;
+  sessionId?: string;
   timestamp: string;
   content: string;
 };
@@ -684,6 +746,7 @@ export type CreateStorySessionOptions = {
   branchOrder?: number;
   inheritRecentMemory?: boolean;
   independentStory?: boolean;
+  memorySettings?: StoryMemorySettings;
   baseSession?: StorySession;
 };
 
@@ -730,6 +793,7 @@ export function createOrGetStorySession(characterId: string, options: CreateStor
     inheritRecentMemory: branchId === "main" ? true : Boolean(options.inheritRecentMemory),
     inheritRecentMemoryLocked: branchId !== "main" && Boolean(options.inheritRecentMemory),
     independentStory: branchId === "main" ? false : Boolean(options.independentStory),
+    memorySettings: options.memorySettings ? { ...options.memorySettings, readableBranchIds: [...options.memorySettings.readableBranchIds], sharedMemoryTypes: [...options.memorySettings.sharedMemoryTypes] } : (base?.memorySettings ? { ...base.memorySettings, readableBranchIds: [...base.memorySettings.readableBranchIds], sharedMemoryTypes: [...base.memorySettings.sharedMemoryTypes] } : undefined),
     createdAt: now,
     updatedAt: now,
     foldTags: base?.foldTags ?? "think,thinking,story_status,story_theater",
@@ -937,12 +1001,14 @@ function compactProjectionText(text: string, maxLen = 160): string {
 
 export function loadStoryProjectionEntries(
   characterId: string,
-  options?: { afterTimestamp?: string; userName?: string; charName?: string }
+  options?: { afterTimestamp?: string; userName?: string; charName?: string; memoryTarget?: "short_term" | "long_term" | "core" }
 ): StoryProjectionEntry[] {
   const sessions = _sessionsCache.filter((item) => {
     const participants = item.participantIds?.length ? item.participantIds : [item.characterId];
     if (!participants.includes(characterId)) return false;
-    return !item.independentStory || Boolean(item.includedInMemoryAt);
+    const memorySettings = resolveStoryMemorySettings(item);
+    const targetEnabled = options?.memoryTarget === "long_term" ? memorySettings.writeLongTermMemory : options?.memoryTarget === "core" ? memorySettings.writeCoreMemory : memorySettings.writePublicShortTermMemory;
+    return targetEnabled && (!item.independentStory || Boolean(item.includedInMemoryAt) || Boolean(item.memorySettings));
   });
   if (!sessions.length) return [];
   const messages = sessions.flatMap((session) => loadStoryMessages(session.id))
@@ -961,6 +1027,7 @@ export function loadStoryProjectionEntries(
     const ts = formatChatTimestamp(current.createdAt);
     projections.push({
       id: `story_projection_${current.id}`,
+      sessionId: current.sessionId,
       timestamp: current.createdAt,
       content: `[事件 ${ts}] ${summaryText}`,
     });

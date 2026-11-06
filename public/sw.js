@@ -1,7 +1,7 @@
-// v13：本次升版是为了强制作废旧缓存。
+// v14：升版强制作废旧缓存（一起看布局/解析修复 + 生活场景转移等大批变更）。
 // 折叠逻辑的修复已进 main，但客户端仍在跑旧 JS —— /_next/static/ 走 cache-first，
 // 旧包会被一直留在 RUNTIME_CACHE 里。升 CACHE_VERSION 会在 activate 时整批清空。
-const CACHE_VERSION = "ai-phone-pwa-v13";
+const CACHE_VERSION = "ai-phone-pwa-v14";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

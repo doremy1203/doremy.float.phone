@@ -28,10 +28,48 @@ import {
   shouldFireCheckIn,
   type CheckInCharacterConfig,
 } from "./checkin-config";
-import { consumePendingUserShot, hasCheckInBridge, notifyCheckInUnavailable, readCheckInCapabilities, requestCheckIn } from "./checkin";
-import type { CheckInOutcome } from "./types";
+import { consumePendingUserShot, hasCheckInBridge, readCheckInCapabilities, requestCheckIn } from "./checkin";
 import { resolveCheckInGuidance } from "./checkin-guidance";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
+import type { CheckInOutcome } from "./types";
+import { loadVirtualLifeState } from "../life/life-storage";
+import { getActorClock, getCurrentActorSchedule, resolveActorLifeNow } from "../life/life-runtime";
+
+
+/** Keep autonomous screenshot requests consistent with the character's current life context. */
+function isCheckInAllowedByLifeContext(characterId: string): boolean {
+  const life = loadVirtualLifeState();
+  if (!life.settings.enabled) return true; // Preserve legacy check-in behavior when the life engine is off.
+  if (!life.settings.enableCharacterAutonomy) return false;
+  const now = resolveActorLifeNow(getActorClock(life, "character", characterId));
+  const schedule = getCurrentActorSchedule(life, "character", characterId, now);
+  const actor = life.actorStates.find(item => item.ownerType === "character" && item.ownerId === characterId);
+  const activity = (actor?.activity || "") + " " + (schedule?.title || "");
+  if (/睡眠|睡觉|入睡|午休/.test(activity)) return false;
+  if (/开会|手术|考试|驾驶|训练|专注工作|专注学习/.test(actor?.activity || "")) return false;
+  const player = life.actorStates.find(item => item.ownerType === "player" && item.ownerId === "player");
+  if (actor?.actualLocationId && player?.actualLocationId && actor.actualLocationId === player.actualLocationId) return false;
+  const sharedScene = life.scenes.some(scene => scene.status === "active" && scene.participants.some(p => p.ownerType === "player" && p.ownerId === "player") && scene.participants.some(p => p.ownerType === "character" && p.ownerId === characterId));
+  return !sharedScene;
+}
+
+export function buildCheckInLifeContextNote(characterId: string): string {
+  const life = loadVirtualLifeState();
+  if (!life.settings.enabled) return "";
+  const character = loadCharacters().find(item => item.id === characterId);
+  const now = resolveActorLifeNow(getActorClock(life, "character", characterId));
+  const schedule = getCurrentActorSchedule(life, "character", characterId, now);
+  const actor = life.actorStates.find(item => item.ownerType === "character" && item.ownerId === characterId);
+  const parts = [
+    "生活情境（只补充你自己的状态，不代表你知道玩家此刻在哪里）：",
+    "你的虚拟时间：" + now.toLocaleString("zh-CN"),
+    actor?.activity ? "你实际正在：" + actor.activity : "",
+    actor?.actualLocationName ? "你实际所在地点：" + actor.actualLocationName : "",
+    schedule?.title ? "原计划：" + schedule.title : "",
+    character?.name ? "请按上述生活状态自然回应查岗结果；不要假装一直盯着玩家，也不要将未发生的事情写成记忆。" : "",
+  ].filter(Boolean);
+  return parts.join("\n");
+}
 
 /** 一次查岗尝试的结论（给调用方/设置页做记录用）。 */
 export type CheckInAttempt =
@@ -88,11 +126,7 @@ export async function runCheckIn(
   const readiness = checkInReadiness();
   if (!readiness.bridgeAvailable) return { ok: false, reason: "当前 App 版本不支持查岗" };
   if (!readiness.supported) return { ok: false, reason: "系统版本太低，查岗需要 Android 11 及以上" };
-  if (!readiness.accessibilityOn) {
-    const characterName = loadCharacters().find(c => c.id === characterId)?.name?.trim() || "角色";
-    notifyCheckInUnavailable(characterName);
-    return { ok: false, reason: "无障碍服务当前未连接，已尝试发送修复通知" };
-  }
+  if (!readiness.accessibilityOn) return { ok: false, reason: "无障碍服务没有开启" };
   if (!readiness.overlayReady) return { ok: false, reason: "浮窗权限没有授予，弹不出确认浮层" };
 
   const character = loadCharacters().find(c => c.id === characterId);
@@ -131,11 +165,12 @@ export async function runCheckIn(
       });
       // 用户可给这次结果写一句反应指导语（设置 → 截屏 → 主动查岗）。
       // 只随本轮请求送出、不落库——否则后面每一轮都会重新看到它。
-      const acceptedGuidance = resolveCheckInGuidance("accepted", name);
-      void requestBackgroundChatReply(
-        sessionId,
-        acceptedGuidance ? { ephemeralSystemNote: acceptedGuidance } : undefined,
-      ).catch(() => undefined);
+      const acceptedGuidance = [resolveCheckInGuidance("accepted", name), buildCheckInLifeContextNote(characterId)].filter(Boolean).join("\n\n");
+      void requestBackgroundChatReply(sessionId, {
+        ephemeralSystemNote: acceptedGuidance || undefined,
+        appId: "checkin",
+        appTags: ["checkin", "screenshot", "accepted"],
+      }).catch(() => undefined);
       return { ok: true, accepted: true };
     } catch {
       return { ok: false, reason: "图片没能保存，这次没发出去" };
@@ -161,11 +196,12 @@ export async function runCheckIn(
   // 拒绝也让它有反应（用户明确要的）——被拒时该失落还是说没关系，交给角色自己决定。
   // 三种失败结果各自可配指导语，同样只随本轮请求送出。
   const guidanceKind = declined ? "declined" : timedOut ? "timeout" : "failed";
-  const guidance = resolveCheckInGuidance(guidanceKind, name);
-  void requestBackgroundChatReply(
-    sessionId,
-    guidance ? { ephemeralSystemNote: guidance } : undefined,
-  ).catch(() => undefined);
+  const guidance = [resolveCheckInGuidance(guidanceKind, name), buildCheckInLifeContextNote(characterId)].filter(Boolean).join("\n\n");
+  void requestBackgroundChatReply(sessionId, {
+    ephemeralSystemNote: guidance || undefined,
+    appId: "checkin",
+    appTags: ["checkin", "screenshot", guidanceKind],
+  }).catch(() => undefined);
   return { ok: true, accepted: false, reason: outcome.reason };
 }
 
@@ -213,7 +249,7 @@ export async function deliverUserShot(outcome: CheckInOutcome): Promise<{ ok: bo
       base64: outcome.base64,
       width: outcome.width,
       height: outcome.height,
-      bytes: outcome.bytes,
+      bytes: Math.floor(outcome.base64.length * 3 / 4),
     });
     if (!record) {
       return { ok: false, reason: "图片没能保存，这次没发出去" };
@@ -315,11 +351,7 @@ export async function requestCheckInForTool(characterId: string): Promise<CheckI
   const readiness = checkInReadiness();
   if (!readiness.bridgeAvailable) return { ok: false, message: "当前 App 版本不支持这个动作，需要更新安卓壳。" };
   if (!readiness.supported) return { ok: false, message: "TA 的系统版本太低（需要 Android 11 及以上），暂时做不到。" };
-  if (!readiness.accessibilityOn) {
-    const characterName = loadCharacters().find(c => c.id === characterId)?.name?.trim() || "角色";
-    notifyCheckInUnavailable(characterName);
-    return { ok: false, message: "无障碍服务当前未连接，已提示用户重新开启服务。" };
-  }
+  if (!readiness.accessibilityOn) return { ok: false, message: "TA 还没有开启无障碍服务，暂时截不到屏幕。" };
   if (!readiness.overlayReady) return { ok: false, message: "TA 还没有授予浮窗权限，弹不出确认框。" };
 
   const sessionId = findLatestPrivateSession(characterId);
@@ -399,26 +431,14 @@ export async function requestCheckInForTool(characterId: string): Promise<CheckI
  * 挂进桌面壳的轮询（与定时主动联系同一处）。刻意串行执行：
  * 同一时刻只弹一个浮层——两个浮层叠在一起，用户根本没法处理。
  */
-let checkInPollInFlight: Promise<number> | null = null;
-
-/** 多个 focus/pageshow/visibility/timer 事件可能同时触发扫描；合并成同一轮，
- * 避免两个扫描循环交错，导致同一时刻弹出多个角色的查岗浮层。 */
-export function pollDueCheckIns(): Promise<number> {
-  if (checkInPollInFlight) return checkInPollInFlight;
-
-  const run = (async () => {
-    const all = loadCheckInConfig();
-    let fired = 0;
-    for (const [characterId, config] of Object.entries(all)) {
-      if (!shouldFireCheckIn(characterId, config)) continue;
-      const result = await runCheckIn(characterId, config);
-      if (result.ok) fired += 1;
-    }
-    return fired;
-  })();
-
-  checkInPollInFlight = run.finally(() => {
-    checkInPollInFlight = null;
-  });
-  return checkInPollInFlight;
+export async function pollDueCheckIns(): Promise<number> {
+  const all = loadCheckInConfig();
+  let fired = 0;
+  for (const [characterId, config] of Object.entries(all)) {
+    if (!shouldFireCheckIn(characterId, config)) continue;
+    if (!isCheckInAllowedByLifeContext(characterId)) continue;
+    const result = await runCheckIn(characterId, config);
+    if (result.ok) fired += 1;
+  }
+  return fired;
 }

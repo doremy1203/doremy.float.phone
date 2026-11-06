@@ -177,6 +177,9 @@ const MEDIA_MIN_BYTES = 2048;
 
 function stripMediaDeep(value: unknown): unknown {
   if (typeof value === "string") {
+    // media-store refs point to blobs stored out-of-band; keeping the URI while
+    // omitting the blob creates broken media cards after a light backup restore.
+    if (value.startsWith("media-store://")) return "";
     return value.length > MEDIA_MIN_BYTES && MEDIA_DATAURL_RE.test(value) ? "" : value;
   }
   if (Array.isArray(value)) return value.map(stripMediaDeep);
@@ -190,10 +193,13 @@ function stripMediaDeep(value: unknown): unknown {
 
 // KV / localStorage values are JSON strings; parse, strip nested data-URLs, re-stringify.
 function stripMediaInString(value: string): string {
-  if (typeof value !== "string" || value.length <= MEDIA_MIN_BYTES) return value;
+  if (typeof value !== "string") return value;
   if (MEDIA_DATAURL_RE.test(value)) return "";
-  if (/"data:(?:image|audio|video)/i.test(value)) {
-    try { return JSON.stringify(stripMediaDeep(JSON.parse(value))); } catch { return value; }
+  const mayContainMedia = value.includes("media-store://") || /"data:(?:image|audio|video)/i.test(value);
+  if (value.length <= MEDIA_MIN_BYTES && !mayContainMedia) return value;
+  if (mayContainMedia) {
+    try { return JSON.stringify(stripMediaDeep(JSON.parse(value))); }
+    catch { return value.replace(/media-store:\/\/[^\s"'\\]+/g, ""); }
   }
   return value;
 }

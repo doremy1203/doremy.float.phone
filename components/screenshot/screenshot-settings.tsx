@@ -23,7 +23,7 @@ import { isShellEnvironment as isShell, openAccessibilitySettings } from "@/lib/
 import {
   captureAndStoreScreenshot,
   clearAllScreenshots,
-  deleteScreenshotRecord,
+  removeScreenshotRecord,
   flushPendingUserShot,
   hasScreenshotBallBridge,
   hasScreenshotBridge,
@@ -229,7 +229,7 @@ export function ScreenshotSettings({ onNotice }: { onNotice?: (msg: string) => v
 
   /** 删单张：连同媒体库里的图一起删，不留下无人引用的图片占存储。 */
   const doDeleteOne = useCallback(async (id: string) => {
-    await deleteScreenshotRecord(id);
+    await removeScreenshotRecord(id);
     refresh();
     onNotice?.("已删除这张截屏");
   }, [onNotice, refresh]);

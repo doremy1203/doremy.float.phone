@@ -11,7 +11,7 @@ import { getChatImageFromIndexedDB } from "@/lib/chat-asset-storage";
    ================================================================ */
 
 /** 固定展示顺序：私聊 / 群聊 / 查手机 / 朋友圈 / 剧情 / 其他APP */
-export const MEMORY_SOURCE_TAG_ORDER: readonly string[] = ["私聊", "群聊", "查手机", "朋友圈", "剧情", "其他APP"];
+export const MEMORY_SOURCE_TAG_ORDER: readonly string[] = ["私聊", "群聊", "查手机", "朋友圈", "剧情", "照片墙", "生活", "小组件", "一起看", "其他APP"];
 
 /** 事件来源 → 筛选标签（其余来源一律归入「其他APP」收纳） */
 export function getMemoryEventSourceTag(evt: NativeTimelineEntry): string {
@@ -20,6 +20,10 @@ export function getMemoryEventSourceTag(evt: NativeTimelineEntry): string {
     if (app === "checkphone") return "查手机";
     if (app === "moments") return "朋友圈";
     if (app === "story") return "剧情";
+    if (app === "photo_wall") return "照片墙";
+    if (app === "life") return "生活";
+    if (app === "phone_widget") return "小组件";
+    if (app === "watch" || app === "global_watch") return "一起看";
     return "其他APP";
 }
 

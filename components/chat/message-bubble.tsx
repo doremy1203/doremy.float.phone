@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo, memo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, memo, type ComponentPropsWithoutRef, type HTMLAttributes } from "react";
 import { findCustomStickerByName, resolveCustomStickerUrl } from "@/lib/custom-sticker-storage";
 import { isMediaStoreRef, loadMediaObjectUrl } from "@/lib/media-cache-storage";
 import { getChatImageFromIndexedDB } from "@/lib/chat-asset-storage";
@@ -13,7 +13,7 @@ import { MediaPreviewOverlay } from "@/components/chat/media-preview-overlay";
 import { findStickerByName } from "@/lib/sticker-data";
 import { splitBilingualText } from "@/lib/bilingual-text";
 import { isInvisibleOrWhitespaceOnly } from "@/lib/rich-message-parser";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
 // CommonMark 的 flanking 规则会让 **「加粗」** 这类紧贴全角标点的写法解析失败
@@ -22,9 +22,11 @@ import remarkCjkFriendly from "remark-cjk-friendly";
 import remarkBreaks from "remark-breaks";
 import { createPortal } from "react-dom";
 import { Blocks, Maximize2, ReceiptText } from "lucide-react";
+import { SharedVideoLinkCard, isShortVideoShareUrl } from "@/components/chat/shared-video-link-card";
 import { retryChatGeneratedImage } from "@/lib/generated-image-retry";
 import { hasCharacterReferenceImage } from "@/lib/image-generation-service";
 import { GeneratedImageErrorDialog } from "./generated-image-error-dialog";
+import { ImageParticipantPicker } from "./image-participant-picker";
 import { ScanPayCard } from "@/components/chat/scan-pay-card";
 import { payWithWalletBalance } from "@/lib/wallet-storage";
 import { formatShoppingPaymentRequestHistory } from "@/lib/shopping-payment-request";
@@ -150,6 +152,10 @@ export const MessageBubble = memo(function MessageBubble({ msg, onUpdate, charNa
         if (prev.msg.isTyping !== next.msg.isTyping) return false;
         if (prev.msg.mediaData?.status !== next.msg.mediaData?.status) return false;
         if (prev.msg.mediaData?.label !== next.msg.mediaData?.label) return false;
+        if ((prev.msg.mediaData?.imageRefs || []).join("|") !== (next.msg.mediaData?.imageRefs || []).join("|")) return false;
+        if (prev.msg.mediaData?.imageRefsExcludePrimary !== next.msg.mediaData?.imageRefsExcludePrimary) return false;
+        if (prev.msg.mediaData?.imageCollection !== next.msg.mediaData?.imageCollection) return false;
+        if (prev.msg.mediaData?.imageIndex !== next.msg.mediaData?.imageIndex) return false;
         if (prev.msg.mediaData?.claimedBy?.length !== next.msg.mediaData?.claimedBy?.length) return false;
         if (prev.msg.mediaData?.appName !== next.msg.mediaData?.appName) return false;
         if (prev.msg.mediaData?.appCardTitle !== next.msg.mediaData?.appCardTitle) return false;
@@ -522,27 +528,35 @@ function linkifyBareUrls(text: string): string {
     });
 }
 
+type MarkdownNodeProps = { node?: unknown };
+function withoutMarkdownNode<T extends MarkdownNodeProps>(props: T): Omit<T, "node"> {
+    const { node, ...htmlProps } = props;
+    void node;
+    return htmlProps;
+}
+
 const MARKDOWN_COMPONENTS = {
-    p: ({ node, className, ...props }: any) => (
-        <div
-            className={["chat-markdown-paragraph", className].filter(Boolean).join(" ")}
-            {...props}
-        />
+    p: (props: ComponentPropsWithoutRef<"p"> & MarkdownNodeProps) => {
+        const { className, ...htmlProps } = withoutMarkdownNode(props);
+        return <div className={["chat-markdown-paragraph", className].filter(Boolean).join(" ")} {...htmlProps} />;
+    },
+    li: (props: ComponentPropsWithoutRef<"li"> & MarkdownNodeProps) => <li {...withoutMarkdownNode(props)} />,
+    blockquote: (props: ComponentPropsWithoutRef<"blockquote"> & MarkdownNodeProps) => <blockquote {...withoutMarkdownNode(props)} />,
+    table: (props: ComponentPropsWithoutRef<"table"> & MarkdownNodeProps) => (
+        <div className="chat-markdown-table-wrap"><table {...withoutMarkdownNode(props)} /></div>
     ),
-    li: ({ node, ...props }: any) => <li {...props} />,
-    blockquote: ({ node, ...props }: any) => <blockquote {...props} />,
-    table: ({ node, ...props }: any) => (
-        <div className="chat-markdown-table-wrap">
-            <table {...props} />
-        </div>
-    ),
-    a: ({ node, ...props }: any) => <a className="chat-markdown-link" target="_blank" rel="noreferrer" {...props} />,
-    user: ({ node, ...props }: any) => <span className="rm-user" {...props} />,
-    prologue: ({ node, ...props }: any) => <div className="rm-prologue" {...props} />,
-    profile: ({ node, ...props }: any) => <div className="rm-profile" {...props} />,
-    branches: ({ node, ...props }: any) => <div className="rm-branches" {...props} />,
-    content: ({ node, ...props }: any) => <div className="rm-content" {...props} />
-} as any;
+    a: (props: ComponentPropsWithoutRef<"a"> & MarkdownNodeProps) => {
+        const { href, children, ...htmlProps } = withoutMarkdownNode(props);
+        const targetUrl = typeof href === "string" ? href : "";
+        if (targetUrl && isShortVideoShareUrl(targetUrl)) return <SharedVideoLinkCard url={targetUrl} />;
+        return <a className="chat-markdown-link" {...htmlProps} href={targetUrl} target="_blank" rel="noreferrer">{children}</a>;
+    },
+    user: (props: HTMLAttributes<HTMLSpanElement> & MarkdownNodeProps) => <span className="rm-user" {...withoutMarkdownNode(props)} />,
+    prologue: (props: HTMLAttributes<HTMLDivElement> & MarkdownNodeProps) => <div className="rm-prologue" {...withoutMarkdownNode(props)} />,
+    profile: (props: HTMLAttributes<HTMLDivElement> & MarkdownNodeProps) => <div className="rm-profile" {...withoutMarkdownNode(props)} />,
+    branches: (props: HTMLAttributes<HTMLDivElement> & MarkdownNodeProps) => <div className="rm-branches" {...withoutMarkdownNode(props)} />,
+    content: (props: HTMLAttributes<HTMLDivElement> & MarkdownNodeProps) => <div className="rm-content" {...withoutMarkdownNode(props)} />
+} as unknown as Components;
 
 function MarkdownTextContent({
     content,
@@ -1246,6 +1260,8 @@ function GeneratedImagePromptDialog({
     useReferenceImage,
     onUseReferenceImageChange,
     hasReferenceImage,
+    characterIds,
+    onCharacterIdsChange,
 }: {
     value: string;
     onChange: (value: string) => void;
@@ -1256,6 +1272,8 @@ function GeneratedImagePromptDialog({
     useReferenceImage: boolean;
     onUseReferenceImageChange: (useRef: boolean) => void;
     hasReferenceImage: boolean;
+    characterIds: string[];
+    onCharacterIdsChange: (ids: string[]) => void;
 }) {
     return (
         <div
@@ -1296,6 +1314,7 @@ function GeneratedImagePromptDialog({
                     ) : (
                         <div className="chat-generated-image-prompt-empty-hint">该角色未配置参考图</div>
                     )}
+                    <ImageParticipantPicker value={characterIds} onChange={onCharacterIdsChange} busy={busy} compact />
                     {error && <div className="chat-generated-image-retry-error">{error}</div>}
                 </div>
                 <div className="modal-footer" data-ui="modal-footer">
@@ -1328,6 +1347,11 @@ function ImageBubble({
     // 媒体维护压缩后 mediaUrl 是 media-store:// 引用，直接当 <img src> 会裂图，
     // 与 MediaFileBubble 相同：先解析为 object URL 再渲染。
     const [resolvedUrl, setResolvedUrl] = useState<string>(isMediaStoreRef(rawUrl) ? "" : rawUrl);
+    const [groupUrls, setGroupUrls] = useState<string[]>([]);
+    const [groupLoading, setGroupLoading] = useState(false);
+    const [groupLoadError, setGroupLoadError] = useState(false);
+    const groupUrlsRef = useRef<string[]>([]);
+    const [previewImageUrl, setPreviewImageUrl] = useState<string>("");
     const [refExpired, setRefExpired] = useState(false);
     const [showPromptEditor, setShowPromptEditor] = useState(false);
     const [promptDraft, setPromptDraft] = useState("");
@@ -1338,29 +1362,120 @@ function ImageBubble({
     const isPending = regenerating || (!resolvedUrl && d?.imageGenerationStatus === "pending");
     const canRegenerate = Boolean(d?.label?.trim());
     const [showPreview, setShowPreview] = useState(false);
+    const [previewOriginRect, setPreviewOriginRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+    // 多图集合的当前页：用于指示点，让「这是几张、看到第几张」一眼可见。
+    const [activeGroupIndex, setActiveGroupIndex] = useState(0);
+    const [expandedCollection, setExpandedCollection] = useState(false);
+    const [groupDragOffset, setGroupDragOffset] = useState(0);
+    const groupGestureRef = useRef<{ pointerId: number; startX: number; startY: number; startAt: number; mode: "pending" | "horizontal" } | null>(null);
+    const suppressGroupTapRef = useRef(false); // Prevent pointer-up from also firing a tap/open action.
 
     const [hasRef, setHasRef] = useState(() => hasCharacterReferenceImage(characterId));
-    const [useReferenceDraft, setUseReferenceDraft] = useState(d?.useReferenceImage === true);
+    const [useReferenceDraft, setUseReferenceDraft] = useState(d?.disableReferenceImage !== true && d?.useReferenceImage !== false);
+    const [participantDraft, setParticipantDraft] = useState<string[]>(() => {
+        const saved = Array.isArray(d?.imageGenerationCharacterIds) ? d.imageGenerationCharacterIds : [];
+        return saved.length ? saved : (characterId ? [characterId] : []);
+    });
 
     useEffect(() => {
+        let active = true;
+        let revokeUrl = "";
+        setResolvedUrl(isMediaStoreRef(rawUrl) ? "" : rawUrl);
+        setRefExpired(false);
+
         if (!isMediaStoreRef(rawUrl)) {
-            setResolvedUrl(rawUrl);
-            setRefExpired(false);
+            return () => { active = false; };
+        }
+
+        void loadMediaObjectUrl(rawUrl).then(objUrl => {
+            if (!active) {
+                if (objUrl) URL.revokeObjectURL(objUrl);
+                return;
+            }
+            if (objUrl) {
+                revokeUrl = objUrl;
+                setResolvedUrl(objUrl);
+                setRefExpired(false);
+            } else {
+                setRefExpired(true);
+            }
+        }).catch(() => {
+            // A stale/deleted media reference should render the existing recovery UI,
+            // not produce an unhandled promise rejection or leave the previous photo visible.
+            if (active) {
+                setResolvedUrl("");
+                setRefExpired(true);
+            }
+        });
+
+        return () => {
+            active = false;
+            if (revokeUrl) URL.revokeObjectURL(revokeUrl);
+        };
+    }, [rawUrl]);
+
+    useEffect(() => {
+        const savedRefs = Array.isArray(d?.imageRefs) ? d.imageRefs.filter((ref): ref is string => typeof ref === "string" && ref.length > 0) : [];
+        // 新消息存完整引用数组；旧消息只存了首图之外的引用，按 rawUrl 自动兼容。
+        const refs = savedRefs.length
+            ? (d?.imageRefsExcludePrimary === true
+                ? (rawUrl ? [rawUrl, ...savedRefs] : savedRefs)
+                : (rawUrl && savedRefs[0] !== rawUrl ? [rawUrl, ...savedRefs] : savedRefs))
+            : (rawUrl ? [rawUrl] : []);
+        if (refs.length < 2 || d?.imageCollection !== true) {
+            groupUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
+            groupUrlsRef.current = [];
+            setGroupUrls([]);
+            setGroupLoading(false);
+            setGroupLoadError(false);
             return;
         }
-        let revokeUrl = "";
-        loadMediaObjectUrl(rawUrl).then(objUrl => {
-            if (objUrl) { setResolvedUrl(objUrl); revokeUrl = objUrl; }
-            else setRefExpired(true);
+        let alive = true;
+        setActiveGroupIndex(0);
+        setGroupLoading(true);
+        setGroupLoadError(false);
+        void Promise.allSettled(refs.map(async ref => {
+            const url = await loadMediaObjectUrl(ref);
+            if (!url) throw new Error("媒体引用不存在");
+            return url;
+        })).then(results => {
+            const loaded = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+            const complete = results.length === refs.length && loaded.length === refs.length;
+            if (!alive) {
+                loaded.forEach(url => URL.revokeObjectURL(url));
+                return;
+            }
+            groupUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
+            if (loaded.length > 0) {
+                // 一张引用失效也不能让整组消息消失；保留能读取的图片并明确提示不完整。
+                groupUrlsRef.current = loaded;
+                setGroupUrls(loaded);
+                setGroupLoadError(!complete);
+            } else {
+                groupUrlsRef.current = [];
+                setGroupUrls([]);
+                setGroupLoadError(true);
+            }
+        }).catch(() => {
+            if (alive) setGroupLoadError(true);
+        }).finally(() => {
+            if (alive) setGroupLoading(false);
         });
-        return () => { if (revokeUrl) URL.revokeObjectURL(revokeUrl); };
-    }, [rawUrl]);
+        return () => { alive = false; };
+    }, [rawUrl, d?.imageCollection, d?.imageRefsExcludePrimary, Array.isArray(d?.imageRefs) ? d.imageRefs.join("|") : ""]);
+
+    useEffect(() => () => {
+        groupUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
+        groupUrlsRef.current = [];
+    }, []);
 
     const openPromptEditor = useCallback(() => {
         const latestHasRef = hasCharacterReferenceImage(characterId);
         setHasRef(latestHasRef);
         setPromptDraft(d?.label?.trim() || "");
-        setUseReferenceDraft(latestHasRef && d?.useReferenceImage === true);
+        setUseReferenceDraft(latestHasRef && d?.disableReferenceImage !== true && d?.useReferenceImage !== false);
+        const savedParticipants = Array.isArray(d?.imageGenerationCharacterIds) ? d.imageGenerationCharacterIds : [];
+        setParticipantDraft(savedParticipants.length ? savedParticipants : (characterId ? [characterId] : []));
         setRetryError("");
         setShowPromptEditor(true);
     }, [characterId, d?.label, d?.useReferenceImage]);
@@ -1375,7 +1490,7 @@ function ImageBubble({
         setShowPromptEditor(false);
         setRegenerating(true);
         setRetryError("");
-        retryChatGeneratedImage(msg, characterId, nextDescription, latestHasRef ? useReferenceDraft : undefined)
+        retryChatGeneratedImage(msg, characterId, nextDescription, latestHasRef ? useReferenceDraft : undefined, participantDraft)
             .then(async (updated) => {
                 if (updated?.mediaUrl) {
                     try {
@@ -1394,14 +1509,17 @@ function ImageBubble({
             .finally(() => {
                 setRegenerating(false);
             });
-    }, [characterId, msg, onUpdate, promptDraft, useReferenceDraft]);
+    }, [characterId, msg, onUpdate, promptDraft, useReferenceDraft, participantDraft]);
 
     // 预览层与提示词对话框：图片正常/失败占位两种形态共用（操作按钮统一收在点开后的预览层里）
     const previewAndDialog = (
         <>
             {showPreview && (
                 <MediaPreviewOverlay
-                    imageUrl={resolvedUrl || undefined}
+                    imageUrl={previewImageUrl || resolvedUrl || undefined}
+                    galleryImages={d?.imageCollection === true && groupUrls.length > 1 ? groupUrls : undefined}
+                    initialIndex={activeGroupIndex}
+                    originRect={previewOriginRect}
                     description={!resolvedUrl ? label : undefined}
                     saveFilename={resolvedUrl ? ensureExtension(label, "image") : undefined}
                     onRegenerate={canRegenerate ? () => { setShowPreview(false); openPromptEditor(); } : undefined}
@@ -1416,6 +1534,8 @@ function ImageBubble({
                     useReferenceImage={useReferenceDraft}
                     onUseReferenceImageChange={setUseReferenceDraft}
                     hasReferenceImage={hasRef}
+                    characterIds={participantDraft}
+                    onCharacterIdsChange={setParticipantDraft}
                     onConfirm={handleRetry}
                     onCancel={() => setShowPromptEditor(false)}
                     busy={regenerating}
@@ -1429,13 +1549,157 @@ function ImageBubble({
         </>
     );
 
+    if (groupUrls.length > 1 && d?.imageCollection === true) {
+        const beginCollectionGesture = (event: React.PointerEvent<HTMLDivElement>) => {
+            event.stopPropagation();
+            if (expandedCollection) return;
+            groupGestureRef.current = {
+                pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
+                startAt: Date.now(), mode: "pending",
+            };
+        };
+        const moveCollectionGesture = (event: React.PointerEvent<HTMLDivElement>) => {
+            const gesture = groupGestureRef.current;
+            if (!gesture || gesture.pointerId !== event.pointerId) return;
+            const dx = event.clientX - gesture.startX;
+            const dy = event.clientY - gesture.startY;
+            if (gesture.mode === "pending") {
+                if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+                if (Math.abs(dy) > Math.abs(dx)) { groupGestureRef.current = null; return; }
+                gesture.mode = "horizontal";
+                // Capture only after the gesture is clearly horizontal: taps still
+                // reach the photo button and open the gallery, while swipes continue
+                // working even if the finger leaves the stack's bounds.
+                try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* older WebView */ }
+            }
+            if (gesture.mode !== "horizontal") return;
+            let offset = dx;
+            if ((activeGroupIndex === 0 && dx > 0) || (activeGroupIndex === groupUrls.length - 1 && dx < 0)) offset *= 0.28;
+            setGroupDragOffset(Math.max(-8, Math.min(8, offset * 0.16)));
+            event.preventDefault();
+            event.stopPropagation();
+        };
+        const finishCollectionGesture = (event: React.PointerEvent<HTMLDivElement>) => {
+            const gesture = groupGestureRef.current;
+            if (!gesture || gesture.pointerId !== event.pointerId) return;
+            groupGestureRef.current = null;
+            const dx = event.clientX - gesture.startX;
+            const dy = event.clientY - gesture.startY;
+            const elapsed = Math.max(1, Date.now() - gesture.startAt);
+            if (gesture.mode === "horizontal") {
+                suppressGroupTapRef.current = true;
+                const swipeEnough = Math.abs(dx) > 34 || (Math.abs(dx) > 18 && elapsed < 250);
+                if (swipeEnough && Math.abs(dx) >= Math.abs(dy)) {
+                    setActiveGroupIndex(current => Math.max(0, Math.min(groupUrls.length - 1, current + (dx < 0 ? 1 : -1))));
+                }
+                setGroupDragOffset(0);
+                window.setTimeout(() => { suppressGroupTapRef.current = false; }, 120);
+                event.stopPropagation();
+                return;
+            }
+            setGroupDragOffset(0);
+        };
+        return (
+            <>
+                {expandedCollection ? (
+                    <div className="chat-photo-carousel-expanded chat-photo-card w-[min(230px,75vw)] max-w-full overflow-y-auto rounded-2xl p-2" style={{ maxHeight: "min(52vh,440px)", touchAction: "pan-y", WebkitOverflowScrolling: "touch" }}>
+                        <div className="mb-2 flex items-center justify-between px-1">
+                            <span className="text-xs font-medium text-stone-700">共 {groupUrls.length} 张照片</span>
+                            <button type="button" onClick={event => { event.stopPropagation(); setExpandedCollection(false); }} className="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[11px] text-stone-600">收起</button>
+                        </div>
+                        <div className="flex flex-col gap-2">
+                            {groupUrls.map((url, itemIndex) => (
+                                <button type="button" key={`${itemIndex}-${url}`} onClick={event => { event.stopPropagation(); const rect=event.currentTarget.getBoundingClientRect(); setPreviewOriginRect({left:rect.left,top:rect.top,width:rect.width,height:rect.height}); setActiveGroupIndex(itemIndex); setPreviewImageUrl(url); setShowPreview(true); }} className="relative block w-full overflow-hidden rounded-xl bg-stone-100">
+                                    <img src={url} alt={`${label} ${itemIndex + 1}`} className="block max-h-[280px] w-full object-contain" loading={itemIndex < 2 ? "eager" : "lazy"} />
+                                    <span className="absolute bottom-2 right-2 rounded-full bg-black/60 px-2 py-0.5 text-xs text-white">{itemIndex + 1}/{groupUrls.length}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                ) : (
+                    <div
+                        className="chat-photo-carousel-stack relative h-[174px] w-[min(164px,52vw)] max-w-full select-none overflow-hidden"
+                        style={{ touchAction: "pan-y", WebkitUserSelect: "none" }}
+                        onPointerDown={beginCollectionGesture}
+                        onPointerMove={moveCollectionGesture}
+                        onPointerUp={finishCollectionGesture}
+                        onPointerCancel={() => { groupGestureRef.current = null; setGroupDragOffset(0); }}
+                    >
+                        <button type="button" onClick={event => { event.stopPropagation(); setExpandedCollection(true); }} aria-label="展开照片组" title="展开照片组" className="absolute bottom-1 right-1 z-30 grid h-6 w-6 place-items-center rounded-full border border-white/40 bg-black/35 text-sm leading-none text-white/90 backdrop-blur-sm">⌄</button>
+                        {groupUrls.map((url, itemIndex) => {
+                            const relative = itemIndex - activeGroupIndex;
+                            const distance = Math.abs(relative);
+                            if (distance > 1) return null;
+                            const scale = 1 - distance * 0.045;
+                            const x = relative * 5 + groupDragOffset;
+                            return (
+                                <button
+                                    key={`${itemIndex}-${url}`}
+                                    type="button"
+                                    aria-label={`打开整组照片浏览，共 ${groupUrls.length} 张图片`}
+                                    onClick={event => {
+                                        event.stopPropagation();
+                                        if (suppressGroupTapRef.current) { suppressGroupTapRef.current = false; return; }
+                                        const rect=event.currentTarget.getBoundingClientRect();
+                                        setPreviewOriginRect({left:rect.left,top:rect.top,width:rect.width,height:rect.height});
+                                        setShowPreview(true);
+                                    }}
+                                    className="absolute left-[8px] top-0 h-[170px] w-[132px] overflow-hidden rounded-[10px] border border-white/35 bg-stone-900 shadow-none"
+                                    style={{
+                                        transform: `translate3d(${x}px,0,0) scale(${scale})`,
+                                        transformOrigin: "left center",
+                                        transition: groupGestureRef.current?.mode === "horizontal" ? "none" : "transform .10s ease-out, opacity .10s ease-out",
+                                        zIndex: 10 - distance,
+                                        opacity: 1 - distance * 0.1,
+                                        pointerEvents: relative === 0 ? "auto" : "none",
+                                    }}
+                                >
+                                    <img src={url} alt={`${label} ${itemIndex + 1}`} className="h-full w-full object-contain" draggable={false} loading={itemIndex < 2 ? "eager" : "lazy"} />
+                                    <span className="absolute bottom-2 right-2 rounded-full bg-black/60 px-2.5 py-1 text-xs tabular-nums text-white">{activeGroupIndex + 1}/{groupUrls.length}</span>
+                                </button>
+                            );
+                        })}
+                        <div aria-hidden className="pointer-events-none absolute left-[9px] top-2 flex gap-1">
+                            {groupUrls.map((url, itemIndex) => <span key={`${itemIndex}-${url}`} className={`h-1 rounded-full ${itemIndex === activeGroupIndex ? "w-3 bg-white/90" : "w-1 bg-white/45"}`} />)}
+                        </div>
+                    </div>
+                )}
+                {previewAndDialog}
+            </>
+        );
+    }
+    if (d?.imageCollection === true && groupLoadError) {
+        return (
+            <>
+                <div className="chat-photo-card chat-photo-card--image w-[min(260px,75vw)] max-w-full overflow-hidden rounded-xl">
+                    {resolvedUrl ? (
+                        <button type="button" onClick={e => { e.stopPropagation(); setPreviewImageUrl(resolvedUrl); setShowPreview(true); }} className="block w-full">
+                            <img src={resolvedUrl} alt={label} className="block max-h-[320px] w-auto max-w-full" />
+                        </button>
+                    ) : <div className="p-4 text-sm">首张图片也暂时无法读取</div>}
+                    <div role="status" className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900">
+                        多图集合加载不完整，当前只显示首张图片。请重新发送这组图片。
+                    </div>
+                </div>
+                {previewAndDialog}
+            </>
+        );
+    }
+    if (d?.imageCollection === true && groupLoading && groupUrls.length < 2) {
+        return (
+            <div className="chat-photo-card chat-photo-card--image relative w-[min(260px,75vw)] max-w-full overflow-hidden rounded-xl">
+                {resolvedUrl ? <img src={resolvedUrl} alt={label} className="block max-h-[320px] w-auto max-w-full" /> : <div className="p-8 text-sm">正在读取多图…</div>}
+                <div role="status" className="bg-stone-50 px-3 py-2 text-xs text-stone-600">正在整理多图集合…</div>
+            </div>
+        );
+    }
     if (resolvedUrl) {
         return (
             <>
                 <div
                     className="chat-photo-card chat-photo-card--image rounded-none"
                     style={{ cursor: "pointer" }}
-                    onClick={e => { e.stopPropagation(); setShowPreview(true); }}
+                    onClick={e => { e.stopPropagation(); setPreviewImageUrl(resolvedUrl); setShowPreview(true); }}
                 >
                     <img
                         src={resolvedUrl}
@@ -2024,13 +2288,19 @@ function MediaFileBubble({
     }, []);
 
     const [hasRef, setHasRef] = useState(() => hasCharacterReferenceImage(characterId));
-    const [imageUseReferenceDraft, setImageUseReferenceDraft] = useState(msg.mediaData?.useReferenceImage === true);
+    const [imageUseReferenceDraft, setImageUseReferenceDraft] = useState(msg.mediaData?.disableReferenceImage !== true && msg.mediaData?.useReferenceImage !== false);
+    const [imageParticipantDraft, setImageParticipantDraft] = useState<string[]>(() => {
+        const saved = Array.isArray(msg.mediaData?.imageGenerationCharacterIds) ? msg.mediaData.imageGenerationCharacterIds : [];
+        return saved.length ? saved : (characterId ? [characterId] : []);
+    });
 
     const openImagePromptEditor = useCallback(() => {
         const latestHasRef = hasCharacterReferenceImage(characterId);
         setHasRef(latestHasRef);
         setImagePromptDraft(msg.mediaData?.label?.trim() || "");
-        setImageUseReferenceDraft(latestHasRef && msg.mediaData?.useReferenceImage === true);
+        setImageUseReferenceDraft(latestHasRef && msg.mediaData?.disableReferenceImage !== true && msg.mediaData?.useReferenceImage !== false);
+        const savedParticipants = Array.isArray(msg.mediaData?.imageGenerationCharacterIds) ? msg.mediaData.imageGenerationCharacterIds : [];
+        setImageParticipantDraft(savedParticipants.length ? savedParticipants : (characterId ? [characterId] : []));
         setImageRetryError("");
         setShowImagePromptEditor(true);
     }, [characterId, msg.mediaData?.label, msg.mediaData?.useReferenceImage]);
@@ -2045,7 +2315,7 @@ function MediaFileBubble({
         setShowImagePromptEditor(false);
         setImageRegenerating(true);
         setImageRetryError("");
-        retryChatGeneratedImage(msg, characterId, nextDescription, latestHasRef ? imageUseReferenceDraft : undefined)
+        retryChatGeneratedImage(msg, characterId, nextDescription, latestHasRef ? imageUseReferenceDraft : undefined, imageParticipantDraft)
             .then(async (updated) => {
                 if (updated?.mediaUrl) {
                     try {
@@ -2064,7 +2334,7 @@ function MediaFileBubble({
             .finally(() => {
                 setImageRegenerating(false);
             });
-    }, [characterId, imagePromptDraft, imageUseReferenceDraft, msg, onUpdate]);
+    }, [characterId, imagePromptDraft, imageUseReferenceDraft, imageParticipantDraft, msg, onUpdate]);
 
     const handleSeek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
         e.stopPropagation();
@@ -2185,6 +2455,8 @@ function MediaFileBubble({
                         useReferenceImage={imageUseReferenceDraft}
                         onUseReferenceImageChange={setImageUseReferenceDraft}
                         hasReferenceImage={hasRef}
+                        characterIds={imageParticipantDraft}
+                        onCharacterIdsChange={setImageParticipantDraft}
                         onConfirm={handleRegenerateImage}
                         onCancel={() => setShowImagePromptEditor(false)}
                         busy={imageRegenerating}

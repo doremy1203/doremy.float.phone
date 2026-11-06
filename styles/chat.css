@@ -56,7 +56,10 @@
   top: 0;
   left: 0;
   right: 0;
-  z-index: 10;
+  /* A higher sibling stacking layer keeps the fixed header above scrolled message rows and expanded media. */
+  z-index: 200;
+  isolation: isolate;
+  pointer-events: auto;
 }
 
 /* 聊天插件 chat.header 坑位：头部与消息区都是 absolute 浮层，坑位必须自己定位，
@@ -90,6 +93,8 @@
   left: 0;
   right: 0;
   bottom: 0;
+  z-index: 0;
+  isolation: isolate;
   flex: none;
   min-height: 0;
   overflow-y: auto;
@@ -108,6 +113,31 @@
   pointer-events: none;
 }
 
+
+/* 多图展开必须参与消息正文的正常排版流：展开时把后续消息向下推，不能覆盖相邻消息。
+   同时让面板留在消息滚动容器内，滚动到顶栏后由滚动视口裁切，不能越过固定顶栏。 */
+.chat-app .chat-room-wrapper .chat-photo-carousel-expanded {
+  position: static !important;
+  inset: auto !important;
+  transform: none !important;
+  z-index: auto !important;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin-block: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 消息正文允许多图展开后的自然高度撑开；避免旧样式的固定高度/裁切造成内容叠压。 */
+.chat-app .chat-room-wrapper .chat-photo-carousel-expanded img {
+  flex: 0 0 auto;
+  max-width: 100%;
+  object-fit: contain;
+}
 
 /* Scroll anchoring: keep scroll pinned to bottom when images/media load */
 .chat-scroll-anchored > *:not(:last-child) {
@@ -981,20 +1011,30 @@
 }
 
 .chat-toast-overlay {
-  position: absolute;
-  top: 96px;
-  left: 0;
-  right: 0;
+  /* Center against the viewport, not a translated/narrow chat pane. */
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 96px);
+  left: 50%;
+  right: auto;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  transform: translateX(-50%);
   display: flex;
   justify-content: center;
   pointer-events: none;
-  z-index: 40;
+  z-index: 10050;
 }
 
 .chat-toast-floating {
   position: static;
   bottom: auto;
   align-self: auto;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 /* ── Bubble role defaults ── */
@@ -2786,13 +2826,81 @@
 .chat-plus-menu {
   margin: 8px 0 0;
   border-radius: var(--ui-radius-card);
+  position: relative;
+  padding: 10px 12px;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  padding: 16px;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(3, 69px);
+  grid-auto-columns: 66px;
+  grid-template-columns: none;
+  gap: 8px 7px;
+  max-width: 100%;
+  max-height: 260px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   content-visibility: auto;
   transform-origin: top center;
   animation: chatPanelExpand 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.chat-plus-menu::-webkit-scrollbar { display: none; }
+.chat-plus-menu-item {
+  appearance: none;
+  width: 66px;
+  min-width: 0;
+  min-height: 0;
+  padding: 4px 2px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  transition: background 0.14s, transform 0.14s, opacity 0.14s;
+}
+.chat-plus-menu-item:focus-visible {
+  outline: 2px solid var(--c-icon-active);
+  outline-offset: 1px;
+}
+.chat-plus-menu-item:active { background: color-mix(in srgb, var(--c-panel) 75%, transparent); }
+.chat-plus-menu-item.is-dragging {
+  opacity: .72;
+  transform: scale(.94);
+  background: color-mix(in srgb, var(--c-icon-active) 12%, var(--c-panel));
+  box-shadow: 0 4px 14px rgba(0,0,0,.12);
+}
+.chat-plus-menu-item.is-drop-target {
+  position: relative;
+  outline: 2px solid var(--c-icon-active, #d987aa);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--c-icon-active) 13%, var(--c-panel));
+}
+.chat-plus-menu-item.is-drop-target::after {
+  content: attr(data-drop-index);
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  z-index: 2;
+  padding: 2px 4px;
+  border-radius: 6px;
+  background: var(--c-icon-active, #d987aa);
+  color: #fff;
+  font-size: 9px;
+  line-height: 1.2;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0,0,0,.14);
+}
+.chat-plus-tool-label {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: center;
 }
 
 /* ── Plus menu icon box ── */

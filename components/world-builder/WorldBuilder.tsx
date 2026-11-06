@@ -226,8 +226,8 @@ export default function WorldBuilder() {
                 }
                 const { downloadFile } = await import("@/lib/download-utils");
                 await downloadFile(blob, `${selected.name}.glb`);
-              } catch (e: any) {
-                alert("导出失败: " + e.message);
+              } catch (error: unknown) {
+                alert("导出失败: " + (error instanceof Error ? error.message : String(error)));
               }
             }}
           >

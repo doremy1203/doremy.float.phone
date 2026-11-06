@@ -1,0 +1,139 @@
+name: Validate global compatibility improvements
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "app/**"
+      - "components/**"
+      - "lib/**"
+      - "scripts/**"
+      - "DESIGN.md"
+      - "app/globals.css"
+      - "styles/immersive-design.css"
+      - "components/chat/call-auto-chat-control.tsx"
+      - "components/chat/voice-call-screen.tsx"
+      - "components/screenshot/**"
+      - "components/settings/image-generation-settings.tsx"
+      - "components/settings/video-analysis-settings.tsx"
+      - "android-shell/app/src/main/java/app/floatphone/shell/MainActivity.kt"
+      - "android-shell/app/src/main/AndroidManifest.xml"
+      - "components/settings/device-compatibility-settings.tsx"
+      - "components/device-compatibility-bootstrap.tsx"
+      - "components/phone-settings-app.tsx"
+      - "components/desktop-shell.tsx"
+      - "components/life/life-engine-app.tsx"
+      - "components/photo-wall-app.tsx"
+      - "components/photo-wall/**"
+      - "components/watch-together-app.tsx"
+      - "lib/gemini-video-understanding.ts"
+      - "lib/video-analysis-settings.ts"
+      - "lib/video-keyframe-analysis.ts"
+      - "components/chat/chat-contacts-list.tsx"
+      - "components/ui/page-shell.tsx"
+      - "lib/desktop-layout-storage.ts"
+      - "components/archive-room-app.tsx"
+      - "components/icon-glyph.tsx"
+      - "components/chat/rich-input-modals.tsx"
+      - "components/chat/message-bubble.tsx"
+      - "components/chat/media-preview-overlay.tsx"
+      - "components/chat/chat-room.tsx"
+      - "components/phone-qa-app.tsx"
+      - "components/ui/modal.tsx"
+      - "styles/qa.css"
+      - "components/main-app.tsx"
+      - "lib/download-utils.ts"
+      - "styles/chat.css"
+      - "lib/desktop-config.ts"
+      - "lib/media-cache-storage.ts"
+      - "lib/photo-wall-templates.ts"
+      - "lib/chat-engine.ts"
+      - "lib/tool-executor.ts"
+      - "lib/tool-storage.ts"
+      - "app/api/tool-proxy/route.ts"
+      - "app/api/push/shortcut-commands/**"
+      - "app/shortcut-run/route.ts"
+      - "lib/shortcut-command-client.ts"
+      - "lib/shortcut-command-media-client.ts"
+      - "lib/server/shortcut-commands.ts"
+      - "lib/server/shortcut-command-delivery.ts"
+      - "lib/cloud-backup/**"
+      - "lib/widget/bridge.ts"
+      - "next.config.mjs"
+      - "app/layout.tsx"
+      - "app/error.tsx"
+      - "app/global-error.tsx"
+      - "styles/phone-shell.css"
+      - "components/widget/widget-settings.tsx"
+      - "lib/chat-storage.ts"
+      - "lib/device-compatibility.ts"
+      - "lib/shell-notify.ts"
+      - "lib/device-action/**"
+      - "lib/image-generation-service.ts"
+      - "lib/perception/**"
+      - "lib/settings-storage.ts"
+      - "lib/settings-types.ts"
+      - "lib/screenshot/**"
+      - "lib/shell-call-overlay.ts"
+      - "lib/system-calendar/bridge.ts"
+      - "lib/widget/engine.ts"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/check-custom-app-sdk-consistency.mjs"
+      - "scripts/check-weixin-prompt-equivalence.mjs"
+      - "scripts/check-personal-push-dist.mjs"
+      - "scripts/build-personal-push-dist.mjs"
+      - "scripts/build-weixin-assistant-dist.mjs"
+      - "scripts/test-life-*.mjs"
+      - "supabase/functions/**"
+      - "public/ai-phone-push/**"
+      - "public/weixin-local-assistant/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: global-improvements-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Collect dependency security audit (report only)
+        shell: bash
+        run: |
+          npm audit --json > npm-audit.json || true
+          node -e 'const a=require("./npm-audit.json"); for (const [name,v] of Object.entries(a.vulnerabilities||{})) { const via=(v.via||[]).filter(x=>typeof x==="object"); console.log(JSON.stringify({name,severity:v.severity,range:v.range,fixAvailable:v.fixAvailable,advisories:via.map(x=>({title:x.title,url:x.url,range:x.range}))})); } console.log("AUDIT_SUMMARY",JSON.stringify(a.metadata?.vulnerabilities||{}));'
+      - name: Block high or critical production dependency vulnerabilities
+        run: npm audit --omit=dev --audit-level=high
+      - name: Check custom APP SDK contract
+        run: npm run check:sdk
+      - name: Check WeChat assistant prompt parity and generated artifact
+        run: npm run check:weixin
+      - name: Check personal push source and deployment artifacts
+        run: npm run check:push
+      - name: Life schedule regression tests (UTC)
+        run: TZ=UTC npm run test:life
+      - name: Life schedule regression tests (daylight-saving timezone)
+        run: TZ=America/New_York npm run test:life
+      - name: Photo wall sticker sizing regression tests
+        run: npm run test:photo-wall
+      - name: ESLint
+        run: npm run lint
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+      - name: Production build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          NODE_OPTIONS: "--max-old-space-size=6144"
+        run: npm run build

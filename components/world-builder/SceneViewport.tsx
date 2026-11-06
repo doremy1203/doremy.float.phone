@@ -1,7 +1,7 @@
 "use client";
 
-import { useRef, useCallback, useMemo, useEffect, Suspense, useState, type ComponentProps } from "react";
-import { Canvas, useThree, useFrame } from "@react-three/fiber";
+import { useRef, useCallback, useMemo, useEffect, Suspense, useState, type ComponentProps, type ComponentRef } from "react";
+import { Canvas, useThree, useFrame, type ThreeEvent } from "@react-three/fiber";
 import { OrbitControls, TransformControls, useGLTF, PerspectiveCamera, ContactShadows, Environment, Html } from "@react-three/drei";
 import { EffectComposer, Bloom, Vignette, HueSaturation, BrightnessContrast } from "@react-three/postprocessing";
 import * as THREE from "three";
@@ -22,7 +22,7 @@ function getModelBox(group: THREE.Object3D): THREE.Box3 {
   group.traverse((child) => {
     if (!(child as THREE.Mesh).isMesh) return;
     const mat = (child as THREE.Mesh).material as THREE.Material;
-    if (mat && (mat as any).opacity < 0.1) return; // 跳过 hitbox
+    if (mat && mat.opacity < 0.1) return; // 跳过 hitbox
     const mesh = child as THREE.Mesh;
     mesh.geometry.computeBoundingBox();
     const meshBox = mesh.geometry.boundingBox!.clone();
@@ -100,7 +100,7 @@ function AreaLight({ color, intensity, width, height }: { color: string; intensi
     if (!ref.current) return;
     // 清理旧灯
     ref.current.children.forEach((c) => {
-      if ((c as any).isRectAreaLight) ref.current.remove(c);
+      if (c instanceof THREE.RectAreaLight) ref.current.remove(c);
     });
     const light = new THREE.RectAreaLight(color, intensity, width, height);
     ref.current.add(light);
@@ -127,7 +127,6 @@ function LightSceneModel({
   onTransformEnd: (id: string, pos: [number, number, number], rot: [number, number, number], scale: [number, number, number]) => void;
 }) {
   const groupRef = useRef<THREE.Group>(null!);
-  const tcRef = useRef<any>(null);
   const [mounted, setMounted] = useState(false);
   const light = obj.light!;
 
@@ -170,12 +169,12 @@ function LightSceneModel({
 
         {/* 可视化小球（选中用） */}
         <mesh
-          onClick={(e) => {
+          onClick={(e: ThreeEvent<MouseEvent>) => {
             e.stopPropagation();
             if (placing) onPlace([e.point.x, e.point.y, e.point.z]);
             else onSelect();
           }}
-          onPointerDown={(e) => e.stopPropagation()}
+          onPointerDown={(e: ThreeEvent<PointerEvent>) => e.stopPropagation()}
         >
           <sphereGeometry args={[0.15, 12, 8]} />
           <meshBasicMaterial color={helperColor} transparent opacity={selected ? 1 : 0.6} />
@@ -192,7 +191,6 @@ function LightSceneModel({
 
       {selected && groupRef.current && (
         <TransformControls
-          ref={tcRef}
           object={groupRef.current}
           space="local"
           onMouseUp={() => {
@@ -262,7 +260,7 @@ function SceneModel({
     });
   }, [clone, settings.shadows, settings.doubleSide]);
   const groupRef = useRef<THREE.Group>(null!);
-  const tcRef = useRef<any>(null);
+  const tcRef = useRef<ComponentRef<typeof TransformControls> | null>(null);
 
   // 计算包围盒，用作透明点击热区
   const hitBox = useMemo(() => {
@@ -289,7 +287,10 @@ function SceneModel({
   // 拖拽时实时吸附
   useEffect(() => {
     if (!selected || !tcRef.current || !settings.snap) return;
-    const tc = tcRef.current;
+    const tc = tcRef.current as unknown as {
+      addEventListener: (type: "objectChange", listener: () => void) => void;
+      removeEventListener: (type: "objectChange", listener: () => void) => void;
+    };
     const handleChange = () => {
       if (!groupRef.current) return;
       const others: THREE.Object3D[] = [];
@@ -313,8 +314,8 @@ function SceneModel({
         {/* 漫步是纯视觉偏移；选中/关闭漫步时由 R3F 按 props 归位 */}
         <primitive
           object={clone}
-          onPointerDown={(e: any) => e.stopPropagation()}
-          onClick={(e: any) => {
+          onPointerDown={(e: ThreeEvent<PointerEvent>) => e.stopPropagation()}
+          onClick={(e: ThreeEvent<MouseEvent>) => {
             e.stopPropagation();
             if (placing) {
               onPlace([e.point.x, e.point.y, e.point.z]);

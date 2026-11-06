@@ -75,6 +75,8 @@ export type BridgeRule = {
     /** ai 模式：加工提示词，{payload} / {type} 占位 */
     prompt?: string;
   };
+  /** 离线回复库：一行一条，角色可提前准备，断网时由本机随机选用。 */
+  offlineReplies?: string[];
   actions: BridgeRuleActions;
   /** 触发间隔（分钟）：间隔内再次收到同信号只存档不执行；0/缺省 = 每次都触发 */
   cooldownMinutes?: number;

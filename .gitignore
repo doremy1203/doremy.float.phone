@@ -28,3 +28,22 @@ tools/weixin-local-assistant/config.txt
 *.ts.net.crt
 *.ts.net.key
 /public/models/world-builder/
+
+# 一起看内置解析的本地视频缓存
+.watch-cache/
+
+# Local environment files: keep only the documented, secret-free template.
+.env.*
+!.env.example
+!.env.template
+
+# Android local build outputs and signing material.
+.gradle/
+android-shell/.gradle/
+android-shell/**/build/
+*.apk
+*.aab
+*.keystore
+*.jks
+*.p12
+*.pfx

@@ -8,8 +8,14 @@ on:
         required: false
         type: string
   push:
+    branches: [main, feature/life-system, feature/life-system-mainline]
+    paths: ["android-shell/**", ".github/workflows/android-shell.yml", "scripts/check-android-permissions.mjs", "!android-shell/**/*.md"]
+  pull_request:
     branches: [main]
-    paths: ["android-shell/**", ".github/workflows/android-shell.yml"]
+    paths: ["android-shell/**", ".github/workflows/android-shell.yml", "scripts/check-android-permissions.mjs", "!android-shell/**/*.md"]
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -23,6 +29,9 @@ jobs:
       SHELL_SITE_URL: ${{ inputs.site_url || vars.SHELL_SITE_URL }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check Android manifest permission baseline and version parity
+        run: node scripts/check-android-permissions.mjs
 
       - uses: actions/setup-java@v4
         with:
@@ -41,17 +50,52 @@ jobs:
           echo "$SHELL_KEYSTORE_BASE64" | base64 -d > /tmp/shell.keystore
           echo "SHELL_KEYSTORE_FILE=/tmp/shell.keystore" >> "$GITHUB_ENV"
 
-      - name: Build APKs
-        run: gradle -p android-shell assembleDebug assembleRelease
+      - name: Validate optional release signing secrets
+        shell: bash
+        run: |
+          if [[ -n "$SHELL_KEYSTORE_BASE64" ]]; then
+            for key in SHELL_KEYSTORE_PASSWORD SHELL_KEY_ALIAS SHELL_KEY_PASSWORD; do
+              if [[ -z "${!key}" ]]; then
+                echo "::error::$key is required when SHELL_KEYSTORE_BASE64 is configured."
+                exit 1
+              fi
+            done
+          else
+            echo "No release keystore configured. Only the installable debug APK will be published; unsigned release APKs are intentionally skipped."
+          fi
 
+      - name: Build debug APK
+        run: gradle -p android-shell assembleDebug
+
+      - name: Build signed release APK
+        if: ${{ env.SHELL_KEYSTORE_FILE != '' }}
+        run: gradle -p android-shell assembleRelease
+
+      - name: Verify debug APK signature
+        shell: bash
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          APKSIGNER="$(find "$SDK_ROOT/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER"
+          "$APKSIGNER" verify --verbose android-shell/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Verify signed release APK signature
+        if: ${{ env.SHELL_KEYSTORE_FILE != '' }}
+        shell: bash
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          APKSIGNER="$(find "$SDK_ROOT/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER"
+          "$APKSIGNER" verify --verbose android-shell/app/build/outputs/apk/release/*.apk
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: float-shell-debug
           path: android-shell/app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload release APK
+      - name: Upload signed release APK
+        if: ${{ env.SHELL_KEYSTORE_FILE != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: float-shell-release
+          name: float-shell-release-signed
           path: android-shell/app/build/outputs/apk/release/*.apk

@@ -89,3 +89,18 @@ export function stripTextToolDirectives(text: string): string {
     output += text.slice(cursor);
     return output.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
+/**
+ * Remove malformed text-tool protocol lines before they can be shown as chat.
+ * Valid directives are handled by stripTextToolDirectives; this catches broken
+ * brackets/JSON such as model output that starts a directive but never closes it.
+ */
+export function stripMalformedTextToolDirectives(text: string): string {
+    return text
+        .replace(
+            /(^|\r?\n)([^\r\n]*?)\[(?:执行动作|工具调用|获取指令|获取工具)\s*[:：][^\r\n]*(?:\r?\n|$)/g,
+            (_match, lineBreak: string, prefix: string) => lineBreak + prefix + (prefix ? "\n" : ""),
+        )
+        .replace(/[ \t]+\n/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}

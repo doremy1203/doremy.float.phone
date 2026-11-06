@@ -1,5 +1,7 @@
 "use client";
 
+import { isCompatibilityFeatureEnabled } from "../device-compatibility";
+
 // 截屏 ↔ 安卓壳的原生桥对接层。
 //
 // 与其它桥最大的不同：**它是异步的**。
@@ -20,7 +22,7 @@ type ScreenshotBridgeLike = {
 };
 
 function bridge(): ScreenshotBridgeLike | null {
-  if (typeof window === "undefined") return null;
+  if (typeof window === "undefined" || !isCompatibilityFeatureEnabled("screenshot")) return null;
   const candidate = (window as unknown as { AndroidShell?: ScreenshotBridgeLike }).AndroidShell;
   return candidate && typeof candidate === "object" ? candidate : null;
 }
@@ -87,6 +89,10 @@ function parseAck(raw: unknown): CaptureAck {
  */
 export function captureScreenshot(timeoutMs = 8000): Promise<ScreenshotCaptureResult> {
   return new Promise<ScreenshotCaptureResult>((resolve) => {
+    if (!isCompatibilityFeatureEnabled("screenshot")) {
+      resolve({ ok: false, reason: "截屏接口已在系统设置 → 设备兼容性中停用" });
+      return;
+    }
     const b = bridge();
     if (!b?.captureScreenshot) {
       resolve({ ok: false, reason: "当前 App 版本不支持截屏，需要更新安卓壳" });
@@ -94,20 +100,19 @@ export function captureScreenshot(timeoutMs = 8000): Promise<ScreenshotCaptureRe
     }
 
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let unsubscribe: (() => void) | undefined;
+    const cleanup: { timer?: ReturnType<typeof setTimeout>; unsubscribe?: () => void } = {};
 
     const finish = (result: ScreenshotCaptureResult) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
-      unsubscribe?.();
+      if (cleanup.timer) clearTimeout(cleanup.timer);
+      cleanup.unsubscribe?.();
       resolve(result);
     };
 
     // 先订阅、再发起：原生回调可能很快，若反过来会漏掉事件。
     ensureShellOverlayListener();
-    unsubscribe = subscribeShellOverlayEvents((event) => {
+    cleanup.unsubscribe = subscribeShellOverlayEvents((event) => {
       if (event.action !== "screenshot") return;
       if (event.ok === false) {
         finish({ ok: false, reason: event.reason || "截屏失败" });
@@ -124,7 +129,7 @@ export function captureScreenshot(timeoutMs = 8000): Promise<ScreenshotCaptureRe
       }
     });
 
-    timer = setTimeout(() => {
+    cleanup.timer = setTimeout(() => {
       finish({ ok: false, reason: "截屏超时了，请确认无障碍服务还开着，然后重试" });
     }, Math.max(1000, timeoutMs));
 

@@ -1,0 +1,106 @@
+/*
+ * Float immersive polish — scoped decoration, not a global theme replacement.
+ * Keep each app's saved theme and business layout authoritative.
+ */
+:root {
+  --float-paper: #fffaf4;
+  --float-rose: #a66e7b;
+  --float-rose-wash: #f7eaed;
+  --float-antique-gold: #b99a69;
+  --float-ink: #463a40;
+  --float-paper-line: rgba(157, 119, 103, 0.16);
+  --float-motion-ease: cubic-bezier(0.2, 0.75, 0.25, 1);
+}
+
+/* Photo wall: keep the existing cream paper / Polaroid palette; add tactile feedback only. */
+.photo-wall-app button {
+  transition:
+    transform 170ms var(--float-motion-ease),
+    box-shadow 220ms var(--float-motion-ease),
+    color 180ms ease,
+    background-color 180ms ease;
+}
+
+.photo-wall-app img {
+  backface-visibility: hidden;
+}
+
+.photo-wall-app [data-photo-wall-viewport] {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(166, 110, 123, 0.34) transparent;
+}
+
+/* Watch together: remove the heavy television-like frame in favour of a floating cinema screen. */
+.watch-together-app .watch-player {
+  border: 1px solid rgba(255, 246, 234, 0.72) !important;
+  border-radius: 18px !important;
+  box-shadow:
+    0 0 0 1px rgba(130, 91, 64, 0.24),
+    0 16px 38px rgba(58, 37, 25, 0.22),
+    0 0 28px rgba(228, 185, 153, 0.12) !important;
+  transition: box-shadow 260ms var(--float-motion-ease), border-color 260ms ease;
+}
+
+.watch-together-app .watch-player::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  border: 1px solid rgba(255, 251, 245, 0.12);
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.watch-together-app .watch-room-title > div {
+  border-radius: 13px !important;
+  box-shadow: 0 8px 22px rgba(87, 59, 39, 0.075) !important;
+}
+
+.watch-together-app .watch-link-panel {
+  border-radius: 16px !important;
+}
+
+.watch-together-app .watch-interaction-panel > div {
+  border-radius: 17px !important;
+  box-shadow: 0 14px 32px rgba(61, 39, 28, 0.12) !important;
+}
+
+.watch-together-app [aria-label="双人同步电波"] > span {
+  transform-origin: center bottom;
+  animation: float-radio-wave 1.05s ease-in-out infinite alternate;
+}
+
+.watch-together-app [aria-label="双人同步电波"] > span:nth-child(3n + 1) { animation-delay: -0.82s; }
+.watch-together-app [aria-label="双人同步电波"] > span:nth-child(3n + 2) { animation-delay: -0.48s; }
+.watch-together-app [aria-label="双人同步电波"] > span:nth-child(3n) { animation-delay: -0.18s; }
+
+@keyframes float-radio-wave {
+  from { transform: scaleY(0.55); opacity: 0.58; }
+  to { transform: scaleY(1.18); opacity: 1; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .watch-together-app .watch-player:hover {
+    border-color: rgba(255, 237, 216, 0.95) !important;
+    box-shadow:
+      0 0 0 1px rgba(130, 91, 64, 0.28),
+      0 19px 44px rgba(58, 37, 25, 0.24),
+      0 0 34px rgba(228, 185, 153, 0.17) !important;
+  }
+}
+
+.photo-wall-app button:active:not(:disabled),
+.watch-together-app button:active:not(:disabled) {
+  transform: translateY(1px) scale(0.99);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .watch-together-app button,
+  .watch-together-app .watch-player {
+    transition: none !important;
+  }
+
+  .watch-together-app [aria-label="双人同步电波"] > span {
+    animation: none !important;
+  }
+}

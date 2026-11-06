@@ -22,8 +22,8 @@ export type OfflinePushSelfCheckResult = {
 };
 
 /** 调服务端自检接口。probe=false 时不发测试广播（避免打扰）。 */
-export async function runOfflinePushSelfCheck(probe = false): Promise<OfflinePushSelfCheckResult> {
-    const response = await fetch(`/api/push/selfcheck${probe ? "?probe=1" : ""}`, {
+export async function runOfflinePushSelfCheck(probe = true): Promise<OfflinePushSelfCheckResult> {
+    const response = await fetch(`/api/push/selfcheck${probe ? "" : "?probe=0"}`, {
         credentials: "include",
         cache: "no-store",
     });

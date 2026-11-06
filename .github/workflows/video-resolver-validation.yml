@@ -1,0 +1,32 @@
+name: Validate local video resolver
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/video-resolver/**"
+      - ".github/workflows/video-resolver-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: video-resolver-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install yt-dlp
+        run: python -m pip install --upgrade yt-dlp
+      - name: Compile Python source
+        run: python -m py_compile tools/video-resolver/server.py
+      - name: Run resolver regression tests
+        run: python -m unittest discover -s tools/video-resolver -p "test_*.py" -v

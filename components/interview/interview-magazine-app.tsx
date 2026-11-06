@@ -456,7 +456,7 @@ export function InterviewMagazineApp({ onClose }: Props) {
       transcript: baseMessages,
       round,
       lastUserAnswer,
-      // @ts-ignore - legacy signature missing phase
+      // @ts-expect-error - legacy signature missing phase
       phase: "嘉宾回答",
     });
     if (!isInterviewRunCurrent(runId)) return;
@@ -1494,7 +1494,7 @@ function ArticleScreen({
 
           {issue.article.pullQuote && (
             <div className="my-14 py-8 border-y border-white/10 text-center relative">
-              <span className="absolute -top-4 left-1/2 -translate-x-1/2 bg-[#0a0a0a] px-4 text-white/20 text-2xl font-serif">"</span>
+              <span className="absolute -top-4 left-1/2 -translate-x-1/2 bg-[#0a0a0a] px-4 text-white/20 text-2xl font-serif">&quot;</span>
               <p className="font-serif italic text-white/90 text-xl leading-relaxed">
                 {issue.article.pullQuote}
               </p>

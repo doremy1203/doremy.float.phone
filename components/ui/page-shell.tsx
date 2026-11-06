@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode, Ref } from "react";
+import { useEffect, type ReactNode, type Ref } from "react";
 import { ChevronLeft } from "lucide-react";
 
 type PageShellProps = {
@@ -15,6 +15,17 @@ type PageShellProps = {
 };
 
 export function PageShell({ title = "", onBack, leftAction, rightAction, children, footer, className, bodyRef }: PageShellProps) {
+  useEffect(() => {
+    if (!onBack) return;
+    const handleSwipeBack = (event: Event) => {
+      if (event.defaultPrevented) return;
+      event.preventDefault();
+      onBack();
+    };
+    document.addEventListener("phone-swipe-back", handleSwipeBack);
+    return () => document.removeEventListener("phone-swipe-back", handleSwipeBack);
+  }, [onBack]);
+
   return (
     <div className={`page-shell ${className ?? ""}`}>
       <header className="page-header" data-ui="header">
@@ -54,6 +65,16 @@ type PageOverlayHeaderProps = {
 };
 
 export function PageOverlayHeader({ title, onBack, rightAction, className }: PageOverlayHeaderProps) {
+  useEffect(() => {
+    const handleSwipeBack = (event: Event) => {
+      if (event.defaultPrevented) return;
+      event.preventDefault();
+      onBack();
+    };
+    document.addEventListener("phone-swipe-back", handleSwipeBack);
+    return () => document.removeEventListener("phone-swipe-back", handleSwipeBack);
+  }, [onBack]);
+
   return (
     <header className={`page-header pointer-events-none absolute top-0 left-0 right-0 z-10 ${className ?? ""}`}>
       <div className="page-header-safe-area" />

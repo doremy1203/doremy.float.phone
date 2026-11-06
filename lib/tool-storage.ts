@@ -9,9 +9,15 @@ import type {
 import {
     findEnabledInternalSubToolDefinition,
     getEnabledInternalCapabilities,
+    getInternalCapability,
     getInternalCapabilityToolDefinition,
+    LIFE_INVITATION_CAPABILITY_ID,
+    LIFE_FOLLOW_CAPABILITY_ID,
+    LIFE_SCHEDULE_CAPABILITY_ID,
 } from "./internal-capability-storage";
 import { loadCustomAppToolsForContext, type RegisteredCustomAppExtension } from "./custom-app-sdk-registry";
+import { LIFE_TOOL_DEFINITIONS } from "./life/life-tools";
+import { loadVirtualLifeState } from "./life/life-storage";
 import type { CustomAppToolDefinition } from "./custom-app-types";
 import {
     BUILTIN_PHONE_WORKFLOW_PACKAGE,
@@ -349,7 +355,7 @@ export type EnabledTool = {
     description: string;
     parameterSchema: string;
     usageGuide?: string;
-    source: "rest" | "rest_package" | "composite" | "composite_package" | "mcp" | "mcp_server" | "internal" | "custom_app" | "custom_app_package";
+    source: "rest" | "rest_package" | "composite" | "composite_package" | "mcp" | "mcp_server" | "internal" | "custom_app" | "custom_app_package" | "life";
     sourceId: string;       // RestToolConfig.id or McpServerConfig.id
     customAppId?: string;
     customAppName?: string;
@@ -483,12 +489,75 @@ export function getEnabledTools(appId?: string): EnabledTool[] {
         });
     }
 
+    {
+        // Life actions are global toolbox capabilities, available outside the Life APP too.
+        const lifeSettings = loadVirtualLifeState().settings;
+        if (lifeSettings.enabled && lifeSettings.enableCharacterAutonomy) {
+            for (const tool of LIFE_TOOL_DEFINITIONS) {
+                const capabilityId = tool.name === "life_propose_invitation"
+                    ? LIFE_INVITATION_CAPABILITY_ID
+                    : tool.name === "life_request_follow"
+                        ? LIFE_FOLLOW_CAPABILITY_ID
+                        : LIFE_SCHEDULE_CAPABILITY_ID;
+                const capability = getInternalCapability(capabilityId);
+                const allowed = capability?.enabled && capability.mode !== "off" && (tool.name === "life_propose_invitation"
+                    ? lifeSettings.enableInvitations
+                    : tool.name === "life_request_follow"
+                        ? lifeSettings.enableFollowRequestTool
+                        : tool.name === "life_change_schedule"
+                            ? lifeSettings.enableScheduleChangeTool
+                            : false);
+                if (allowed) tools.push({ ...tool, source: "life", sourceId: capabilityId });
+            }
+        }
+    }
+
     return tools;
 }
 
 export function findEnabledToolForSchema(name: string, appId?: string, macroContext?: ToolNameMacroContext): EnabledTool | undefined {
-    const direct = getEnabledTools(appId).find(t => toolNameMatches(t.name, name, macroContext));
-    if (direct) return direct;
+    const enabled = getEnabledTools(appId);
+    const matches = (tool: EnabledTool) => toolNameMatches(tool.name, name, macroContext);
+    // Match the runtime dispatcher priority: life-prefixed calls, internal, REST,
+    // composite, MCP, then custom apps. This prevents a duplicate name from exposing
+    // one tool's schema while executeSingleToolCall dispatches to another tool.
+    const lifeDirect = name.startsWith("life_") ? enabled.find(t => t.source === "life" && matches(t)) : undefined;
+    if (lifeDirect) return lifeDirect;
+
+    const internalDirect = enabled.find(t => t.source === "internal" && matches(t));
+    if (internalDirect) return internalDirect;
+
+    const internalSubTool = findEnabledInternalSubToolDefinition(name, appId);
+    if (internalSubTool) {
+        return {
+            name: internalSubTool.tool.name,
+            description: internalSubTool.tool.description,
+            parameterSchema: internalSubTool.tool.parameterSchema,
+            usageGuide: internalSubTool.tool.usageGuide,
+            source: "internal",
+            sourceId: internalSubTool.capability.id,
+        };
+    }
+
+    const restDirect = enabled.find(t => (t.source === "rest" || t.source === "rest_package") && matches(t));
+    if (restDirect) return restDirect;
+
+    const restPackages = loadRestToolPackages().filter(pkg => pkg.enabled);
+    const restPackageIds = new Set(restPackages.map(pkg => pkg.id));
+    for (const tool of loadRestTools()) {
+        if (!tool.enabled || !tool.packageId || !restPackageIds.has(tool.packageId)) continue;
+        if (!toolNameMatches(tool.name, name, macroContext)) continue;
+        return {
+            name: tool.name,
+            description: tool.description,
+            parameterSchema: tool.parameterSchema,
+            source: "rest",
+            sourceId: tool.id,
+        };
+    }
+
+    const compositeDirect = enabled.find(t => (t.source === "composite" || t.source === "composite_package") && matches(t));
+    if (compositeDirect) return compositeDirect;
 
     const compositePackages = loadCompositeToolPackages().filter(pkg => pkg.enabled);
     const compositePackageIds = new Set(compositePackages.map(pkg => pkg.id));
@@ -504,31 +573,8 @@ export function findEnabledToolForSchema(name: string, appId?: string, macroCont
         };
     }
 
-    const packages = loadRestToolPackages().filter(pkg => pkg.enabled);
-    const packageIds = new Set(packages.map(pkg => pkg.id));
-    for (const tool of loadRestTools()) {
-        if (!tool.enabled || !tool.packageId || !packageIds.has(tool.packageId)) continue;
-        if (!toolNameMatches(tool.name, name, macroContext)) continue;
-        return {
-            name: tool.name,
-            description: tool.description,
-            parameterSchema: tool.parameterSchema,
-            source: "rest",
-            sourceId: tool.id,
-        };
-    }
-
-    const internalSubTool = findEnabledInternalSubToolDefinition(name, appId);
-    if (internalSubTool) {
-        return {
-            name: internalSubTool.tool.name,
-            description: internalSubTool.tool.description,
-            parameterSchema: internalSubTool.tool.parameterSchema,
-            usageGuide: internalSubTool.tool.usageGuide,
-            source: "internal",
-            sourceId: internalSubTool.capability.id,
-        };
-    }
+    const mcpServerDirect = enabled.find(t => t.source === "mcp_server" && matches(t));
+    if (mcpServerDirect) return mcpServerDirect;
 
     for (const s of loadMcpServers()) {
         if (!s.enabled || !s.discoveredTools) continue;
@@ -557,6 +603,10 @@ export function findEnabledToolForSchema(name: string, appId?: string, macroCont
             customToolId: tool.id,
         };
     }
+
+    // Preserve the grouped custom-app entry when an app exposes multiple tools.
+    const customAppPackage = enabled.find(t => t.source === "custom_app_package" && matches(t));
+    if (customAppPackage) return customAppPackage;
     return undefined;
 }
 

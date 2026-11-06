@@ -24,6 +24,7 @@ export type DebugPromptSnapshot = {
 let _state: DebugChatState = null;
 const _listeners = new Set<() => void>();
 let _promptSnapshot: DebugPromptSnapshot | null = null;
+const _promptSnapshotsByApp = new Map<string, DebugPromptSnapshot>();
 const _promptListeners = new Set<() => void>();
 
 export function setDebugChatState(s: DebugChatState): void {
@@ -42,11 +43,18 @@ export function subscribeDebugChatState(fn: () => void): () => void {
 
 export function setDebugPromptSnapshot(snapshot: DebugPromptSnapshot): void {
     _promptSnapshot = snapshot;
+    // Keep the latest real request per APP in memory so switching between the six
+    // dedicated preview tabs does not erase another APP's last request.
+    _promptSnapshotsByApp.set(snapshot.appId, snapshot);
     _promptListeners.forEach(fn => fn());
 }
 
 export function getDebugPromptSnapshot(): DebugPromptSnapshot | null {
     return _promptSnapshot;
+}
+
+export function getDebugPromptSnapshotByApp(appId: string): DebugPromptSnapshot | null {
+    return _promptSnapshotsByApp.get(appId) ?? null;
 }
 
 export function subscribeDebugPromptSnapshot(fn: () => void): () => void {

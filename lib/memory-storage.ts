@@ -3,7 +3,7 @@
 
 import type { MemoryEntry, MemoryConfig } from "./memory-types";
 import { DEFAULT_MEMORY_CONFIG } from "./memory-types";
-import { kvGet, kvSet, registerKvMigration, registerDynamicPrefix } from "./kv-db";
+import { kvGet, kvSet, kvRemove, registerKvMigration, registerDynamicPrefix } from "./kv-db";
 import { openIndexedDbAtLeast } from "./idb-open";
 
 // ── Long-term memory DB (unchanged from v1) ──
@@ -180,7 +180,41 @@ export function loadMemoryConfig(): MemoryConfig {
     try {
         const raw = kvGet(CONFIG_KEY);
         if (!raw) return { ...DEFAULT_MEMORY_CONFIG };
-        return { ...DEFAULT_MEMORY_CONFIG, ...JSON.parse(raw) };
+        const parsed = JSON.parse(raw) as Partial<MemoryConfig>;
+        const config: MemoryConfig = {
+            ...DEFAULT_MEMORY_CONFIG,
+            ...parsed,
+            shortTermAllowedSources: {
+                ...DEFAULT_MEMORY_CONFIG.shortTermAllowedSources,
+                ...(parsed.shortTermAllowedSources ?? {}),
+            },
+            // 旧配置迁移：首次升级时沿用原来源选择，之后与短期来源开关独立。
+            longTermAllowedSources: {
+                ...DEFAULT_MEMORY_CONFIG.longTermAllowedSources,
+                ...(parsed.longTermAllowedSources ?? parsed.shortTermAllowedSources ?? {}),
+            },
+            shortTermSourceLimits: {
+                ...DEFAULT_MEMORY_CONFIG.shortTermSourceLimits,
+                ...(parsed.shortTermSourceLimits ?? {}),
+            },
+            shortTermAppLimits: {
+                ...DEFAULT_MEMORY_CONFIG.shortTermAppLimits,
+                ...(parsed.shortTermAppLimits ?? {}),
+            },
+            shortTermLimitVersion: parsed.shortTermLimitVersion ?? 0,
+        };
+        // Migrate values that exactly match the previous built-in defaults. Other custom values are preserved; a custom value identical to an old default cannot be distinguished from that default.
+        if ((parsed.shortTermLimitVersion ?? 0) < 2) {
+            const limits = { ...(config.shortTermAppLimits ?? {}) };
+            if (limits.chat === 30) limits.chat = 0;
+            if (limits.group_chat === 24) limits.group_chat = 0;
+            if (limits.life === 20) limits.life = 0;
+            if (limits.phone_widget === 4) limits.phone_widget = 50;
+            config.shortTermAppLimits = limits;
+            config.shortTermLimitVersion = 2;
+            kvSet(CONFIG_KEY, JSON.stringify(config));
+        }
+        return config;
     } catch {
         return { ...DEFAULT_MEMORY_CONFIG };
     }
@@ -202,6 +236,117 @@ registerDynamicPrefix(EVENT_COUNTER_PREFIX);
 registerDynamicPrefix(LAST_SUMMARY_TS_PREFIX);
 registerDynamicPrefix(CORE_COUNTER_PREFIX);
 registerDynamicPrefix(LAST_CORE_SUMMARY_TS_PREFIX);
+
+/**
+ * Move memory and per-character summary metadata written under legacy
+ * ChatContact.id values to the canonical Character.id. The entry rewrite is a
+ * single IndexedDB transaction; source keys are removed only after copying.
+ */
+export async function migrateCharacterMemoryIdentities(
+    mappings: Array<{ fromId: string; toId: string }>,
+): Promise<{ migratedEntries: number; migratedMetadata: number; available: boolean }> {
+    const map = new Map(mappings.filter(item => item.fromId && item.toId && item.fromId !== item.toId)
+        .map(item => [item.fromId, item.toId]));
+    if (map.size === 0) return { migratedEntries: 0, migratedMetadata: 0, available: true };
+    const db = await openDb();
+    if (!db) return { migratedEntries: 0, migratedMetadata: 0, available: false };
+    let migratedEntries = 0;
+    try {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.getAll();
+        await new Promise<void>((resolve, reject) => {
+            request.onsuccess = () => {
+                try {
+                    for (const entry of request.result as MemoryEntry[]) {
+                        const nextCharacterId = map.get(entry.characterId);
+                        if (!nextCharacterId) continue;
+                        store.put({ ...entry, characterId: nextCharacterId });
+                        migratedEntries += 1;
+                    }
+                } catch (error) {
+                    reject(error);
+                }
+            };
+            request.onerror = () => reject(request.error || new Error("读取旧角色记忆失败"));
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error("迁移角色记忆失败"));
+            tx.onabort = () => reject(tx.error || new Error("角色记忆迁移事务中止"));
+        });
+    } finally {
+        db.close();
+    }
+
+    let migratedMetadata = 0;
+    const moveCounter = (prefix: string) => {
+        for (const [fromId, toId] of map) {
+            const oldValue = Number(kvGet(prefix + fromId) || 0);
+            if (!oldValue) continue;
+            const nextValue = Number(kvGet(prefix + toId) || 0);
+            kvSet(prefix + toId, String(nextValue + oldValue));
+            kvRemove(prefix + fromId);
+            migratedMetadata += 1;
+        }
+    };
+    const moveLatestTimestamp = (prefix: string) => {
+        for (const [fromId, toId] of map) {
+            const oldValue = kvGet(prefix + fromId);
+            if (!oldValue) continue;
+            const nextValue = kvGet(prefix + toId);
+            if (!nextValue || oldValue > nextValue) kvSet(prefix + toId, oldValue);
+            kvRemove(prefix + fromId);
+            migratedMetadata += 1;
+        }
+    };
+    moveCounter(EVENT_COUNTER_PREFIX);
+    moveCounter(CORE_COUNTER_PREFIX);
+    moveLatestTimestamp(LAST_SUMMARY_TS_PREFIX);
+    moveLatestTimestamp(LAST_CORE_SUMMARY_TS_PREFIX);
+    for (const [fromId, toId] of map) {
+        const oldRaw = kvGet(SUMMARY_STATUS_PREFIX + fromId);
+        if (!oldRaw) continue;
+        const nextRaw = kvGet(SUMMARY_STATUS_PREFIX + toId);
+        try {
+            const oldStatus = JSON.parse(oldRaw) as { at?: string };
+            const nextStatus = nextRaw ? JSON.parse(nextRaw) as { at?: string } : null;
+            if (!nextStatus?.at || (oldStatus.at && oldStatus.at > nextStatus.at)) {
+                kvSet(SUMMARY_STATUS_PREFIX + toId, oldRaw);
+            }
+        } catch {
+            if (!nextRaw) kvSet(SUMMARY_STATUS_PREFIX + toId, oldRaw);
+        }
+        kvRemove(SUMMARY_STATUS_PREFIX + fromId);
+        migratedMetadata += 1;
+    }
+    return { migratedEntries, migratedMetadata, available: true };
+}
+
+export type MemorySummaryStatus = {
+    at: string;
+    ok: boolean;
+    error?: string;
+    eventCount?: number;
+};
+
+const SUMMARY_STATUS_PREFIX = "ai_phone_memory_summary_status:";
+registerDynamicPrefix(SUMMARY_STATUS_PREFIX);
+
+export function saveMemorySummaryStatus(characterId: string, status: MemorySummaryStatus): void {
+    if (typeof window === "undefined") return;
+    kvSet(SUMMARY_STATUS_PREFIX + characterId, JSON.stringify(status));
+}
+
+export function loadMemorySummaryStatus(characterId: string): MemorySummaryStatus | null {
+    if (typeof window === "undefined") return null;
+    try {
+        const raw = kvGet(SUMMARY_STATUS_PREFIX + characterId);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as Partial<MemorySummaryStatus>;
+        return typeof parsed?.at === "string" && typeof parsed?.ok === "boolean"
+            ? { at: parsed.at, ok: parsed.ok, error: typeof parsed.error === "string" ? parsed.error : undefined, eventCount: typeof parsed.eventCount === "number" ? parsed.eventCount : undefined }
+            : null;
+    } catch { return null; }
+}
 
 export function getEventCounter(characterId: string): number {
     if (typeof window === "undefined") return 0;

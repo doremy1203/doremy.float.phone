@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import ReactMarkdown from "react-markdown";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ComponentPropsWithoutRef } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 // CommonMark 的 flanking 规则会让 **「加粗」** 这类紧贴全角标点的写法解析失败
 // （** 后跟标点时要求前面是空格/标点，中文里前面通常是汉字），中文消息大量中招。
@@ -158,14 +158,23 @@ function focusEditableAtPoint(element: HTMLElement, point?: { x: number; y: numb
   selection.addRange(range);
 }
 
+type CoCreateMarkdownNodeProps = { node?: unknown };
+function withoutCoCreateMarkdownNode<T extends CoCreateMarkdownNodeProps>(props: T): Omit<T, "node"> {
+  const { node, ...htmlProps } = props;
+  void node;
+  return htmlProps;
+}
+
 const COCREATE_MARKDOWN_COMPONENTS = {
-  a: ({ node, ...props }: any) => <a target="_blank" rel="noreferrer" {...props} />,
-  table: ({ node, ...props }: any) => (
+  a: (props: ComponentPropsWithoutRef<"a"> & CoCreateMarkdownNodeProps) => (
+    <a target="_blank" rel="noreferrer" {...withoutCoCreateMarkdownNode(props)} />
+  ),
+  table: (props: ComponentPropsWithoutRef<"table"> & CoCreateMarkdownNodeProps) => (
     <div className="cocreate-markdown-table">
-      <table {...props} />
+      <table {...withoutCoCreateMarkdownNode(props)} />
     </div>
   ),
-} as any;
+} as unknown as Components;
 
 function CoCreateMarkdown({ content, className }: { content: string; className?: string }) {
   const cleaned = content.replace(/\n{3,}/g, "\n\n").trim();
@@ -1932,7 +1941,7 @@ export function CoCreateApp({ onClose, onNotice }: CoCreateAppProps) {
                 return (
                   <article key={message.id} className="cocreate-write-block">
                     <div className="cocreate-block-meta">
-                      <span>// AI</span>
+                      <span>{"// AI"}</span>
                       <strong>{partner?.name || "AI"}</strong>
                       <i />
                       <span>{formatDate(message.createdAt)}</span>
@@ -1966,7 +1975,7 @@ export function CoCreateApp({ onClose, onNotice }: CoCreateAppProps) {
                 return (
                   <article key={message.id} className="cocreate-tool-step" data-running={isRunningTool ? "1" : undefined}>
                     <div className="cocreate-tool-step-head">
-                      <strong>// AI {partner?.name || "AI"}</strong>
+                      <strong>{"// AI "}{partner?.name || "AI"}</strong>
                       {isRunningTool ? <Loader2 size={14} /> : <Check size={14} />}
                       <span>{isRunningTool ? "ACTION RUNNING" : "ACTION RESULT"}</span>
                       {isRunningTool && (
@@ -2337,17 +2346,17 @@ export function CoCreateApp({ onClose, onNotice }: CoCreateAppProps) {
             </div>
             <div className="cocreate-stat-row">
               <div>
-                <span>// WORDS</span>
+                <span>{"// WORDS"}</span>
                 <strong>{chapterWords.toLocaleString()}</strong>
                 <small>总字数</small>
               </div>
               <div>
-                <span>// CHAPTERS</span>
+                <span>{"// CHAPTERS"}</span>
                 <strong>{session.chapters.filter((chapter) => Boolean(chapter.archivedAt)).length}/{session.chapters.length}</strong>
                 <small>完成章节</small>
               </div>
               <div>
-                <span>// MEMORY</span>
+                <span>{"// MEMORY"}</span>
                 <strong>{session.rollingSummary ? "ON" : "READY"}</strong>
                 <small>共享记忆</small>
               </div>

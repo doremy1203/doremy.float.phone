@@ -55,6 +55,8 @@ export type ScreenshotDiagnostics = {
 
 /** 查岗浮层的内部状态快照（诊断用）。 */
 export type CheckInDiagnostics = {
+  /** 系统设置中的无障碍开关；与服务实例连接状态分开报告。 */
+  systemAccessibilityEnabled?: boolean;
   /** 浮窗权限是否已授予 */
   canDraw?: boolean;
   /** 服务是否在运行 */
@@ -110,7 +112,7 @@ export type CheckInCapabilities = {
  * 所以无论同意还是拒绝都会带回来——用户主动打的字不该被吞掉。
  */
 export type CheckInOutcome =
-  | { accepted: true; base64: string; width: number; height: number; bytes?: number; reply?: string; characterId?: string }
+  | { accepted: true; base64: string; width: number; height: number; reply?: string; characterId?: string }
   | { accepted: false; reason: string; reply?: string; characterId?: string };
 
 /**

@@ -5,6 +5,8 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three-stdlib";
 
+type LoadedGLTF = Awaited<ReturnType<GLTFLoader["loadAsync"]>>;
+
 export interface SceneObject {
   id: string;
   modelUrl: string;
@@ -101,17 +103,18 @@ export async function getModelSize(url: string): Promise<[number, number, number
     return [s.x, s.y, s.z];
   }
   const loader = new GLTFLoader();
-  const gltf: any = await new Promise((resolve, reject) => {
+  const gltf: LoadedGLTF = await new Promise<LoadedGLTF>((resolve, reject) => {
     loader.load(url, resolve, undefined, reject);
   });
   const box = new THREE.Box3().setFromObject(gltf.scene);
   const size = box.getSize(new THREE.Vector3());
   boxCache.set(url, size);
   // 清理
-  gltf.scene.traverse((child: any) => {
-    child.geometry?.dispose();
-    const mats = Array.isArray(child.material) ? child.material : [child.material];
-    mats.forEach((m: any) => m?.dispose?.());
+  gltf.scene.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.geometry.dispose();
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    materials.forEach((material) => material.dispose());
   });
   return [size.x, size.y, size.z];
 }

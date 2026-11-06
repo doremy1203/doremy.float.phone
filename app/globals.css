@@ -27,6 +27,7 @@
 @import "../styles/qa.css";
 @import "../styles/perception.css";
 @import "../styles/phone-widget.css";
+@import "../styles/immersive-design.css";
 
 @theme {
   /* 间距 (4px 基准) */

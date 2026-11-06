@@ -49,6 +49,7 @@ import { WidgetRenderer } from "@/components/widgets/widget-renderer";
 import { IconGlyph } from "@/components/icon-glyph";
 import {
   saveThemeAssetFromBlob,
+  readThemeProfile,
   deleteThemeAsset,
   getThemeAssetMap,
   describeAssetSaveError,
@@ -1140,7 +1141,6 @@ function GlobalCSSPage({
   const [localCSS, setLocalCSS] = useState(() => {
     // Read latest from storage in case 小卷 updated it
     try {
-      const { readThemeProfile } = require("@/lib/theme-storage");
       return readThemeProfile().globalCustomCSS || draft.globalCustomCSS;
     } catch { return draft.globalCustomCSS; }
   });
@@ -1220,10 +1220,7 @@ function IconSkinPage({
   const [dockThumbUrl, setDockThumbUrl] = useState<string | null>(null);
   const [iconUrlDrafts, setIconUrlDrafts] = useState<Record<string, string>>(() => {
     const skins = resolveActiveIconSkins(draft);
-    return Object.entries(skins).reduce<Record<string, string>>((result, [key, value]) => {
-      if (typeof value === "string" && /^https?:\/\//i.test(value)) result[key] = value;
-      return result;
-    }, {});
+    return Object.fromEntries(Object.entries(skins).filter((entry): entry is [string, string] => typeof entry[1] === "string" && /^https?:\/\//i.test(entry[1])));
   });
   const [uploadTarget, setUploadTarget] = useState<DesktopIconId | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<{ iconId: DesktopIconId; assetId: string } | null>(null);

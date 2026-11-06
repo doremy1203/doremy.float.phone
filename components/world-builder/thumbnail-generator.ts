@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three-stdlib";
 
+type LoadedGLTF = Awaited<ReturnType<GLTFLoader["loadAsync"]>>;
+
 const cache = new Map<string, string>();
 let renderer: THREE.WebGLRenderer | null = null;
 
@@ -71,19 +73,18 @@ export async function getThumbnail(url: string): Promise<string> {
     object = new THREE.Mesh(geo, mat);
   } else {
     const loader = new GLTFLoader();
-    let gltf: any;
-    if (url.startsWith("blob:")) {
+    const gltf: LoadedGLTF = url.startsWith("blob:")
+      ? await (async () => {
       // blob URL → fetch 二进制 → parse
       const res = await fetch(url);
       const buffer = await res.arrayBuffer();
-      gltf = await new Promise((resolve, reject) => {
+      return await new Promise<LoadedGLTF>((resolve, reject) => {
         loader.parse(buffer, "", resolve, reject);
       });
-    } else {
-      gltf = await new Promise((resolve, reject) => {
-        loader.load(url, resolve, undefined, reject);
-      });
-    }
+      })()
+      : await new Promise<LoadedGLTF>((resolve, reject) => {
+          loader.load(url, resolve, undefined, reject);
+        });
     object = gltf.scene;
   }
 
@@ -106,10 +107,11 @@ export async function getThumbnail(url: string): Promise<string> {
     (object as THREE.Mesh).geometry.dispose();
     ((object as THREE.Mesh).material as THREE.Material).dispose();
   } else {
-    object.traverse((child: any) => {
-      child.geometry?.dispose();
-      const mats = Array.isArray(child.material) ? child.material : [child.material];
-      mats.forEach((m: any) => m?.dispose?.());
+    object.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return;
+      child.geometry.dispose();
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      materials.forEach((material) => material.dispose());
     });
   }
 

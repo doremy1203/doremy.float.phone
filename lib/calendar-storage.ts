@@ -134,6 +134,40 @@ export function loadOwnerCalendarPlans(
     .sort((a, b) => a.weekStart.localeCompare(b.weekStart));
 }
 
+/**
+ * Merge plans accidentally stored under a legacy ChatContact.id into the
+ * canonical Character.id without overwriting target plans or manual entries.
+ */
+export function migrateCalendarOwnerIdentity(fromId: string, toId: string): number {
+  if (!fromId || !toId || fromId === toId) return 0;
+  const store = loadStore();
+  const sourcePlans = store.plans.filter(plan => plan.ownerType === "character" && plan.ownerId === fromId);
+  if (sourcePlans.length === 0) return 0;
+  const targetPlans = store.plans.filter(plan => plan.ownerType === "character" && plan.ownerId === toId);
+  const targetByWeek = new Map(targetPlans.map(plan => [plan.weekStart, plan]));
+  const mergedByWeek = new Map(targetPlans.map(plan => [plan.weekStart, plan]));
+  for (const source of sourcePlans) {
+    const target = targetByWeek.get(source.weekStart);
+    if (!target) {
+      mergedByWeek.set(source.weekStart, { ...source, ownerId: toId });
+      continue;
+    }
+    const items = new Map<string, CalendarScheduleItem>();
+    for (const item of target.items || []) items.set(item.id, item);
+    for (const item of source.items || []) if (!items.has(item.id)) items.set(item.id, item);
+    mergedByWeek.set(source.weekStart, {
+      ...target,
+      ownerId: toId,
+      items: sortScheduleItems([...items.values()]),
+      updatedAt: target.updatedAt >= source.updatedAt ? target.updatedAt : source.updatedAt,
+    });
+  }
+  const untouched = store.plans.filter(plan => !(plan.ownerType === "character" && plan.ownerId === fromId)
+    && !(plan.ownerType === "character" && plan.ownerId === toId));
+  saveStore({ plans: [...untouched, ...mergedByWeek.values()] });
+  return sourcePlans.length;
+}
+
 export function saveCalendarWeekPlan(plan: CalendarWeekPlan): CalendarWeekPlan {
   const store = loadStore();
   const normalized: CalendarWeekPlan = {

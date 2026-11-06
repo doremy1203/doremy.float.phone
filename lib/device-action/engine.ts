@@ -221,7 +221,7 @@ export function runDeviceAction(args: Record<string, unknown>): DeviceActionOutc
       if (!raw) return { ok: false, reason: "缺少 app 参数（应用名或包名）" };
       // 先当包名试，再当显示名找——角色多半只知道「微信」，不知道 com.tencent.mm
       let pkg = raw;
-      let label = raw;
+      const label = raw;
       if (!raw.includes(".")) {
         const found = findPackageByLabel(raw);
         if (!found) {

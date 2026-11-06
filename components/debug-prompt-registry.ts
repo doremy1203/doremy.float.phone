@@ -8,12 +8,22 @@ export type ExtraPromptAppId =
     | "cocreate"
     | "shopping"
     | "interview"
-    | "adventure";
+    | "adventure"
+    | "life"
+    | "photo_wall"
+    | "checkin"
+    | "watch_together"
+    | "phone_widget"
+    | "reality_bridge";
 
 export type ExtraPromptAppDefinition = {
     id: ExtraPromptAppId;
     label: string;
     emptyText: string;
+    /** Retained for future tabs that intentionally show only a real request snapshot. */
+    snapshotOnly?: boolean;
+    snapshotAppIds?: string[];
+    snapshotTags?: string[];
 };
 
 export const EXTRA_PROMPT_APPS: ExtraPromptAppDefinition[] = [
@@ -27,6 +37,12 @@ export const EXTRA_PROMPT_APPS: ExtraPromptAppDefinition[] = [
     { id: "shopping", label: "购物", emptyText: "选择购物任务后点击「预览」" },
     { id: "interview", label: "在场", emptyText: "选择角色与在场任务后点击「预览」" },
     { id: "adventure", label: "冒险", emptyText: "选择角色与冒险存档后点击「预览」" },
+    { id: "life", label: "生活系统", emptyText: "选择角色与生活回合类型后点击「预览」，查看当前生活状态和生活专属预设组装出的完整 Prompt。" },
+    { id: "photo_wall", label: "照片墙", emptyText: "选择角色和照片批注/装饰涂鸦任务后点击「预览」，查看照片墙专属 Prompt。" },
+    { id: "checkin", label: "签到", emptyText: "选择角色和查岗结果（同意、拒绝、超时或失败）后点击「预览」，查看对应事件与一次性指导语。" },
+    { id: "watch_together", label: "一起看", emptyText: "选择角色与陪看即时回应/观后感任务后点击「预览」，查看一起看专属 Prompt。" },
+    { id: "phone_widget", label: "桌面小组件", emptyText: "选择角色后点击「预览」，查看桌面状态生成使用的角色预设和触发消息。" },
+    { id: "reality_bridge", label: "现实桥梁", emptyText: "选择绑定了现实桥规则的角色后点击「预览」，查看离线回复库生成使用的 Prompt。" },
 ];
 
 export const EXTRA_PROMPT_APP_LABELS = Object.fromEntries(
