@@ -1031,8 +1031,12 @@
 /* 更窄视口（≤373px）：按 390px 设计稿整体等比缩放（格 66→16.92vw、
    距 20→5.13vw、图标 58→14.87vw、dock 354→90.77vw），窄屏呈现与正常
    手机完全相同的比例观感，无多余留白；网格/dock 同源，天然对齐。
-   ≥374px 不受影响。 */
-@media (max-width: 373px) and (hover: none) and (pointer: coarse) {
+   ≥374px 不受影响。
+   ⚠ 只按宽度判定，不再追加 (hover: none) and (pointer: coarse)：
+   安卓壳（FloatShell WebView）实测把 hover 报成 hover、pointer 报成 fine，
+   带上那组守卫整块窄屏适配永远不命中，页面退回桌面版「手机样机」布局
+   ——界面缩在屏幕中间、四周留边。宽度条件本身已经足够精确。 */
+@media (max-width: 373px) {
   .icon-grid,
   .dock {
     --slot-size: 16.92vw;
@@ -1056,7 +1060,13 @@
 
 /* ── Mobile responsive ── */
 
-@media (max-width: 500px) and (hover: none) and (pointer: coarse) {
+/* 全套手机布局（去壳、100vw/100lvh 铺满、安全区让位、键盘抬升）只按宽度生效。
+   原先带 (hover: none) and (pointer: coarse)：桌面浏览器确实是粗指针无悬停，
+   但安卓壳的 WebView 在部分机型上把这两个特性报成 fine / hover，条件不成立，
+   于是整块手机布局失效——页面退回桌面版「手机样机」：界面缩在屏幕中间、
+   四周一圈背景色看着像黑边，内容没铺满。
+   窄视口即手机/壳场景，不必再用指针特性二次甄别。 */
+@media (max-width: 500px) {
 
   /* 用户在设置里显式开启「显示系统状态栏」且运行时不在全屏时，控制器才会挂
      data-pwa-display-mode 标记（见 pwa-manifest-injector）：此时所有 App 共用系统

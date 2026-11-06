@@ -287,6 +287,14 @@ class MainActivity : AppCompatActivity() {
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
             allowFileAccess = false
+            // 视口：WebView 默认不认页面的 <meta name="viewport">，按自己的规则算
+            // 布局宽度，于是 width=device-width / initial-scale=1 全部落空——页面被
+            // 当成桌面站点摆进一个更宽的布局盒里，再整体缩放塞回屏幕，看起来就是
+            // 「界面缩在屏幕中间、四周一圈黑边，内容没铺满」。
+            // 打开后 WebView 尊重 meta 视口，页面 CSS 宽度 = 设备宽度，
+            // 网页里 @media (max-width: 500px) 那套手机布局才会正常命中。
+            useWideViewPort = true
+            loadWithOverviewMode = true
             userAgentString = "$userAgentString FloatShell/$VERSION"
         }
         CookieManager.getInstance().setAcceptCookie(true)
