@@ -1,0 +1,79 @@
+plugins {
+    id "com.android.application"
+}
+
+// 站点地址：默认 https://sun1123.netlify.app/，可在构建时用 -PappUrl=... 覆盖
+def appUrl = (project.findProperty("appUrl") ?: "https://sun1123.netlify.app/").toString()
+
+// ---------------------------------------------------------------
+// Release 签名：全部通过环境变量传入，仓库中不保存任何密钥文件
+//   SHELL_KEYSTORE_BASE64   .jks 文件的 Base64 内容
+//   SHELL_KEYSTORE_PASSWORD 密钥库密码
+//   SHELL_KEY_ALIAS         密钥别名
+//   SHELL_KEY_PASSWORD      密钥密码
+// 可选：SHELL_KEYSTORE_FILE 直接指向本地 .jks 文件（跳过 Base64 解码）
+// ---------------------------------------------------------------
+def signingDir = new File(rootDir, ".signing")
+def keystoreFromBase64 = System.getenv("SHELL_KEYSTORE_BASE64")
+def resolvedKeystore = null
+if (keystoreFromBase64) {
+    signingDir.mkdirs()
+    def decoded = new File(signingDir, "shell-release.jks")
+    decoded.bytes = keystoreFromBase64.replaceAll("\\s", "").decodeBase64()
+    resolvedKeystore = decoded
+} else if (System.getenv("SHELL_KEYSTORE_FILE")) {
+    resolvedKeystore = new File(System.getenv("SHELL_KEYSTORE_FILE"))
+} else {
+    def local = new File(rootDir, "keystore.jks")
+    if (local.exists()) {
+        resolvedKeystore = local
+    }
+}
+
+def storePassword = System.getenv("SHELL_KEYSTORE_PASSWORD")
+def keyAlias = System.getenv("SHELL_KEY_ALIAS")
+def keyPassword = System.getenv("SHELL_KEY_PASSWORD")
+def hasSigning = resolvedKeystore?.exists() && storePassword && keyAlias && keyPassword
+
+android {
+    namespace "app.sun1123.shell"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "app.sun1123.shell"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+        buildConfigField "String", "APP_URL", "\"${appUrl}\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        release {
+            if (hasSigning) {
+                storeFile resolvedKeystore
+                storePassword storePassword
+                keyAlias keyAlias
+                keyPassword keyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (hasSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

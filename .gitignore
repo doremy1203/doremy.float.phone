@@ -28,3 +28,16 @@ tools/weixin-local-assistant/config.txt
 *.ts.net.crt
 *.ts.net.key
 /public/models/world-builder/
+
+# Android 构建产物
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.signing/
+
+# 签名密钥：绝不提交到仓库
+*.jks
+*.keystore
+keys/
+android/keystore.jks
