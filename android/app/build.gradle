@@ -30,10 +30,10 @@ if (keystoreFromBase64) {
     }
 }
 
-def storePassword = System.getenv("SHELL_KEYSTORE_PASSWORD")
-def keyAlias = System.getenv("SHELL_KEY_ALIAS")
-def keyPassword = System.getenv("SHELL_KEY_PASSWORD")
-def hasSigning = resolvedKeystore?.exists() && storePassword && keyAlias && keyPassword
+def ksPassword = System.getenv("SHELL_KEYSTORE_PASSWORD")
+def ksAlias = System.getenv("SHELL_KEY_ALIAS")
+def ksKeyPassword = System.getenv("SHELL_KEY_PASSWORD")
+def hasSigning = resolvedKeystore?.exists() && ksPassword && ksAlias && ksKeyPassword
 
 android {
     namespace "app.sun1123.shell"
@@ -56,9 +56,9 @@ android {
         release {
             if (hasSigning) {
                 storeFile resolvedKeystore
-                storePassword storePassword
-                keyAlias keyAlias
-                keyPassword keyPassword
+                storePassword ksPassword
+                keyAlias ksAlias
+                keyPassword ksKeyPassword
             }
         }
     }
