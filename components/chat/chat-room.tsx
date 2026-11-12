@@ -3936,9 +3936,12 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
             setIsGenerating(false);
             clearGenerationLock(session.id);
         }
+        // 群聊没有单一角色，characterId 传空串；turn-coordinator 收到空值时会退回
+        // 按 session 建互斥键（session:<sessionId>）。若仍然直接因空 id 返回 null，
+        // 群聊的「请求回复」按钮（以及一切走 triggerAIResponse 的入口）就会点了没反应。
         const turn = beginTurn({
             kind: "user_reply",
-            characterId: character?.id ?? resolveSessionCharacterId(session) ?? "",
+            characterId: session.isGroup ? "" : (character?.id ?? resolveSessionCharacterId(session) ?? ""),
             sessionId: session.id,
         });
         if (!turn) return;
