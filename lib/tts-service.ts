@@ -184,51 +184,32 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
 
 // ── Fish Audio (鱼声) TTS ─────────────────────────────────
 
-// Fish Audio prosody.speed 与 Minimax 一致：0.5 ~ 2.0，默认 1.0。
-const FISH_AUDIO_SPEED_MIN = 0.5;
-const FISH_AUDIO_SPEED_MAX = 2.0;
-
-function normalizeFishAudioSpeed(speed: number | undefined): number {
-    if (typeof speed !== "number" || !Number.isFinite(speed)) return 1.0;
-    return Math.min(FISH_AUDIO_SPEED_MAX, Math.max(FISH_AUDIO_SPEED_MIN, speed));
-}
-
 async function synthesizeFishAudio(text: string, config: VoiceApiConfig): Promise<Blob | null> {
     if (!config.apiKey) throw new Error("Fish Audio API Key 未配置");
 
     const referenceId = (config.defaultVoice || "").trim();
     if (!referenceId) throw new Error("Fish Audio 音色 ID（reference_id）未配置");
 
-    const baseUrl = (config.baseUrl || "https://api.fish.audio/v1").replace(/\/$/, "");
-    const model = (config.model || "").trim();
-    const headers: Record<string, string> = {
-        Authorization: `Bearer ${config.apiKey}`,
-        "Content-Type": "application/json",
-    };
-    // Fish Audio 通过 `model` 请求头选择引擎（s2.1-pro 等），reference_id 选择音色。
-    if (model) headers["model"] = model;
-
-    const response = await fetchWithTimeout(`${baseUrl}/tts`, {
+    // Fish Audio 的 TTS 端点不支持浏览器 CORS，直连会被同源策略拦截，
+    // 因此改走本地服务端代理 /api/voice/fish-audio-tts，由服务端转发到 Fish Audio。
+    const response = await fetchWithTimeout("/api/voice/fish-audio-tts", {
         method: "POST",
-        headers,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+            apiKey: config.apiKey,
+            baseUrl: config.baseUrl || "https://api.fish.audio/v1",
+            model: (config.model || "").trim(),
+            referenceId,
             text,
-            reference_id: referenceId,
-            format: "mp3",
-            normalize: true,
-            prosody: {
-                speed: normalizeFishAudioSpeed(config.speechSpeed),
-                volume: 0,
-            },
+            speed: config.speechSpeed,
         }),
     });
 
     if (!response.ok) {
-        const errText = await response.text().catch(() => "");
         let message = `Fish Audio 请求失败 (${response.status})`;
         try {
-            const data = JSON.parse(errText) as { message?: unknown; reason?: unknown; error?: unknown };
-            message = String(data.message || data.reason || data.error || message);
+            const data = await response.json() as { message?: string; error?: string };
+            message = data.message || data.error || message;
         } catch { /* ignore */ }
         throw new Error(message.slice(0, 500));
     }
