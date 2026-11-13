@@ -2487,6 +2487,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
   }
 
   function openApp(iconId: DesktopIconId): void {
+    try { navigator.vibrate?.(15); } catch { /* 不支持就算了 */ }
     if (isFolderIconId(iconId)) return; // 文件夹 tile 由点击处打开面板，不走这里
     if (customAppIdFromIconId(iconId)) {
       openCustomAppWithBackgroundUpdateCheck(iconId);
