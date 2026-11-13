@@ -951,13 +951,11 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                     e.target.style.height = "auto";
                     e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
                 }}
-                onFocus={(e) => {
-                    if (panelOpen) {
-                        e.target.blur();
-                        onClosePanels();
-                        const target = e.target as HTMLTextAreaElement;
-                        requestAnimationFrame(() => requestAnimationFrame(() => target.focus()));
-                    }
+                onFocus={() => {
+                    // 面板开着时点输入框只关面板即可。这里绝不能 blur 后再用 rAF 重新
+                    // focus()：iOS WKWebView 里脱离用户手势的程序化 focus 不会弹出键盘，
+                    // 会让输入框进入「有焦点但打不了字」的卡死状态，只能重进聊天恢复。
+                    if (panelOpen) onClosePanels();
                     setSuggestClosed(false);
                 }}
                 onBlur={() => setSuggestClosed(true)}
@@ -1192,13 +1190,8 @@ const OfflineTextInputBar = memo(forwardRef<OfflineTextInputHandle, {
                     e.target.style.height = "auto";
                     e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
                 }}
-                onFocus={(e) => {
-                    if (showEmojiPanel) {
-                        e.target.blur();
-                        onCloseEmojiPanel();
-                        const target = e.target as HTMLTextAreaElement;
-                        requestAnimationFrame(() => requestAnimationFrame(() => target.focus()));
-                    }
+                onFocus={() => {
+                    if (showEmojiPanel) onCloseEmojiPanel();
                 }}
                 onKeyDown={e => {
                     if (shouldSendChatInputOnEnter(e, enterToSendEnabled)) {

@@ -1129,13 +1129,8 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
                         setInputText(event.target.value);
                         resizeTextarea();
                     }}
-                    onFocus={(event) => {
-                        if (showEmojiPanel) {
-                            event.target.blur();
-                            setShowEmojiPanel(false);
-                            const target = event.target;
-                            requestAnimationFrame(() => requestAnimationFrame(() => target.focus()));
-                        }
+                    onFocus={() => {
+                        if (showEmojiPanel) setShowEmojiPanel(false);
                     }}
                     onKeyDown={(event) => {
                         if (shouldSendChatInputOnEnter(event, enterToSendEnabled)) {
