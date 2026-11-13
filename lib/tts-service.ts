@@ -25,6 +25,7 @@ export function resolveVoiceConfig(characterId: string, appId?: ContentAppId): V
  * Supported providers:
  * - Minimax: REST API → hex-encoded mp3
  * - OpenAI: REST API → binary audio blob
+ * - FishAudio: REST API → binary audio blob
  */
 export async function synthesizeSpeech(
     text: string,
@@ -41,6 +42,10 @@ export async function synthesizeSpeech(
 
     if (provider === "OpenAI") {
         return synthesizeOpenAI(text, voiceConfig);
+    }
+
+    if (provider === "FishAudio") {
+        return synthesizeFishAudio(text, voiceConfig);
     }
 
     return null;
@@ -171,6 +176,61 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
     if (!response.ok) {
         const errText = await response.text().catch(() => "");
         throw new Error(`OpenAI TTS 请求失败 (${response.status}): ${errText}`);
+    }
+
+    const blob = await response.blob();
+    return new Blob([await blob.arrayBuffer()], { type: "audio/mpeg" });
+}
+
+// ── Fish Audio (鱼声) TTS ─────────────────────────────────
+
+// Fish Audio prosody.speed 与 Minimax 一致：0.5 ~ 2.0，默认 1.0。
+const FISH_AUDIO_SPEED_MIN = 0.5;
+const FISH_AUDIO_SPEED_MAX = 2.0;
+
+function normalizeFishAudioSpeed(speed: number | undefined): number {
+    if (typeof speed !== "number" || !Number.isFinite(speed)) return 1.0;
+    return Math.min(FISH_AUDIO_SPEED_MAX, Math.max(FISH_AUDIO_SPEED_MIN, speed));
+}
+
+async function synthesizeFishAudio(text: string, config: VoiceApiConfig): Promise<Blob | null> {
+    if (!config.apiKey) throw new Error("Fish Audio API Key 未配置");
+
+    const referenceId = (config.defaultVoice || "").trim();
+    if (!referenceId) throw new Error("Fish Audio 音色 ID（reference_id）未配置");
+
+    const baseUrl = (config.baseUrl || "https://api.fish.audio/v1").replace(/\/$/, "");
+    const model = (config.model || "").trim();
+    const headers: Record<string, string> = {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+    };
+    // Fish Audio 通过 `model` 请求头选择引擎（s2.1-pro 等），reference_id 选择音色。
+    if (model) headers["model"] = model;
+
+    const response = await fetchWithTimeout(`${baseUrl}/tts`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+            text,
+            reference_id: referenceId,
+            format: "mp3",
+            normalize: true,
+            prosody: {
+                speed: normalizeFishAudioSpeed(config.speechSpeed),
+                volume: 0,
+            },
+        }),
+    });
+
+    if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        let message = `Fish Audio 请求失败 (${response.status})`;
+        try {
+            const data = JSON.parse(errText) as { message?: unknown; reason?: unknown; error?: unknown };
+            message = String(data.message || data.reason || data.error || message);
+        } catch { /* ignore */ }
+        throw new Error(message.slice(0, 500));
     }
 
     const blob = await response.blob();

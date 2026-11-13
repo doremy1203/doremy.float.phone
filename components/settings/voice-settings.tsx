@@ -10,16 +10,20 @@ import { ConfirmDialog } from "@/components/ui/modal";
 import { Toggle, Input } from "@/components/ui/form";
 import { Alert } from "@/components/ui/feedback";
 
-const SUPPORTED_VOICE_PROVIDERS = new Set(["Minimax", "OpenAI"]);
+const SUPPORTED_VOICE_PROVIDERS = new Set(["Minimax", "OpenAI", "FishAudio"]);
 const MINIMAX_BASE_URL_OPTIONS = [
     { id: "cn", label: "国内版", baseUrl: "https://api.minimaxi.com/v1" },
     { id: "global", label: "海外版", baseUrl: "https://api.minimax.io/v1" },
 ];
 const DEFAULT_MINIMAX_BASE_URL = MINIMAX_BASE_URL_OPTIONS[0].baseUrl;
 const GLOBAL_MINIMAX_BASE_URL = MINIMAX_BASE_URL_OPTIONS[1].baseUrl;
+const DEFAULT_FISH_AUDIO_BASE_URL = "https://api.fish.audio/v1";
 const MINIMAX_SPEED_MIN = 0.5;
 const MINIMAX_SPEED_MAX = 2.0;
 const MINIMAX_SPEED_STEP = 0.1;
+const FISH_AUDIO_SPEED_MIN = 0.5;
+const FISH_AUDIO_SPEED_MAX = 2.0;
+const FISH_AUDIO_SPEED_STEP = 0.1;
 const DEFAULT_SPEECH_SPEED = 1.0;
 // Minimax voice_setting.pitch：半音，官方范围 ±12，0 为原声
 const MINIMAX_PITCH_MIN = -12;
@@ -30,6 +34,7 @@ const VOICE_PROVIDER_OPTIONS = [
     { value: "OpenAI", label: "OpenAI TTS" },
     { value: "MinimaxCN", label: "Minimax 语音国内版" },
     { value: "MinimaxGlobal", label: "Minimax 语音海外版" },
+    { value: "FishAudio", label: "鱼声 Fish Audio" },
 ];
 
 const DEFAULT_VOICE_CONFIGS: VoiceApiConfig[] = [
@@ -57,6 +62,14 @@ const DEFAULT_MINIMAX_MODELS = [
     { id: "speech-02-turbo", name: "speech-02-turbo" },
     { id: "speech-01-hd", name: "speech-01-hd" },
     { id: "speech-01-turbo", name: "speech-01-turbo (速度快/性价比高)" },
+];
+
+const FISH_AUDIO_MODELS = [
+    { id: "s2.1-pro", name: "s2.1-pro (推荐)" },
+    { id: "s2.1-pro-free", name: "s2.1-pro-free (免费版)" },
+    { id: "s2-pro", name: "s2-pro" },
+    { id: "s1", name: "s1" },
+    { id: "drama-3", name: "drama-3" },
 ];
 
 const MINIMAX_LANGUAGE_OPTIONS = [
@@ -182,7 +195,9 @@ function uniqueOptions(options: VoiceOption[]): VoiceOption[] {
 }
 
 function defaultVoiceOptions(provider: string): VoiceOption[] {
-    return provider === "OpenAI" ? DEFAULT_OPENAI_VOICES : DEFAULT_MINIMAX_VOICES;
+    if (provider === "OpenAI") return DEFAULT_OPENAI_VOICES;
+    if (provider === "FishAudio") return [];
+    return DEFAULT_MINIMAX_VOICES;
 }
 
 function voiceOptionsForConfig(config: VoiceApiConfig, fetchedVoices: Record<string, VoiceOption[]>): VoiceOption[] {
@@ -193,21 +208,38 @@ function voiceOptionsForConfig(config: VoiceApiConfig, fetchedVoices: Record<str
     ]);
 }
 
+function normalizeSpeechSpeed(speed: number | undefined, min: number, max: number): number {
+    return typeof speed === "number" && Number.isFinite(speed)
+        ? Math.min(max, Math.max(min, speed))
+        : DEFAULT_SPEECH_SPEED;
+}
+
 function normalizeVoiceConfigs(configs: VoiceApiConfig[]): VoiceApiConfig[] {
     return configs
         .filter(config => SUPPORTED_VOICE_PROVIDERS.has(config.provider))
         .map(config => {
-            if (config.provider !== "Minimax") return config;
-            const baseUrl = MINIMAX_BASE_URL_OPTIONS.some(option => option.baseUrl === config.baseUrl)
-                ? config.baseUrl
-                : DEFAULT_MINIMAX_BASE_URL;
-            const speechSpeed = typeof config.speechSpeed === "number" && Number.isFinite(config.speechSpeed)
-                ? Math.min(MINIMAX_SPEED_MAX, Math.max(MINIMAX_SPEED_MIN, config.speechSpeed))
-                : DEFAULT_SPEECH_SPEED;
-            const speechPitch = typeof config.speechPitch === "number" && Number.isFinite(config.speechPitch)
-                ? Math.min(MINIMAX_PITCH_MAX, Math.max(MINIMAX_PITCH_MIN, Math.round(config.speechPitch)))
-                : DEFAULT_SPEECH_PITCH;
-            return { ...config, baseUrl, speechSpeed, speechPitch };
+            if (config.provider === "Minimax") {
+                const baseUrl = MINIMAX_BASE_URL_OPTIONS.some(option => option.baseUrl === config.baseUrl)
+                    ? config.baseUrl
+                    : DEFAULT_MINIMAX_BASE_URL;
+                const speechPitch = typeof config.speechPitch === "number" && Number.isFinite(config.speechPitch)
+                    ? Math.min(MINIMAX_PITCH_MAX, Math.max(MINIMAX_PITCH_MIN, Math.round(config.speechPitch)))
+                    : DEFAULT_SPEECH_PITCH;
+                return {
+                    ...config,
+                    baseUrl,
+                    speechSpeed: normalizeSpeechSpeed(config.speechSpeed, MINIMAX_SPEED_MIN, MINIMAX_SPEED_MAX),
+                    speechPitch,
+                };
+            }
+            if (config.provider === "FishAudio") {
+                return {
+                    ...config,
+                    baseUrl: config.baseUrl || DEFAULT_FISH_AUDIO_BASE_URL,
+                    speechSpeed: normalizeSpeechSpeed(config.speechSpeed, FISH_AUDIO_SPEED_MIN, FISH_AUDIO_SPEED_MAX),
+                };
+            }
+            return config;
         });
 }
 
@@ -222,6 +254,7 @@ function makeCloneVoiceId(config: VoiceApiConfig): string {
 
 function providerSelectValue(config: VoiceApiConfig): string {
     if (config.provider === "OpenAI") return "OpenAI";
+    if (config.provider === "FishAudio") return "FishAudio";
     return config.baseUrl === GLOBAL_MINIMAX_BASE_URL ? "MinimaxGlobal" : "MinimaxCN";
 }
 
@@ -313,6 +346,22 @@ export function VoiceSettings() {
             });
             setManualModelIds(prev => ({ ...prev, [id]: true }));
             setManualVoiceIds(prev => ({ ...prev, [id]: false }));
+            return;
+        }
+        if (providerOption === "FishAudio") {
+            const wasFishAudio = current?.provider === "FishAudio";
+            updateConfig(id, {
+                provider: "FishAudio",
+                baseUrl: wasFishAudio ? (current?.baseUrl || DEFAULT_FISH_AUDIO_BASE_URL) : DEFAULT_FISH_AUDIO_BASE_URL,
+                model: wasFishAudio ? (current?.model || "s2.1-pro") : "s2.1-pro",
+                defaultVoice: wasFishAudio ? (current?.defaultVoice || "") : "",
+                speechSpeed: wasFishAudio ? (current?.speechSpeed ?? DEFAULT_SPEECH_SPEED) : DEFAULT_SPEECH_SPEED,
+            });
+            if (!wasFishAudio) {
+                setManualModelIds(prev => ({ ...prev, [id]: false }));
+                // 鱼声没有内置预设音色，切过来直接显示手动输入 reference_id
+                setManualVoiceIds(prev => ({ ...prev, [id]: true }));
+            }
             return;
         }
         const wasMinimax = current?.provider === "Minimax";
@@ -499,6 +548,37 @@ export function VoiceSettings() {
 
             } else if (config.provider === "OpenAI") {
                 setFetchedVoices(prev => ({ ...prev, [config.id]: DEFAULT_OPENAI_VOICES }));
+            } else if (config.provider === "FishAudio") {
+                if (!config.apiKey.trim()) {
+                    setFetchedVoices(prev => ({ ...prev, [config.id]: config.customVoices || [] }));
+                    setFetchError(prev => ({ ...prev, [config.id]: "填写 API Key 后可同步鱼声账户音色" }));
+                    return;
+                }
+                const base = (config.baseUrl || DEFAULT_FISH_AUDIO_BASE_URL).replace(/\/$/, "");
+                const response = await fetch(`${base}/model`, {
+                    headers: { Authorization: `Bearer ${config.apiKey.trim()}` },
+                });
+                if (!response.ok) {
+                    const text = await response.text().catch(() => "");
+                    throw new Error(`同步失败 (${response.status}) ${text.slice(0, 120)}`);
+                }
+                const data = await response.json().catch(() => ({}));
+                const items = Array.isArray(data?.items) ? data.items : (Array.isArray(data) ? data : []);
+                const voices: VoiceOption[] = (items as unknown[])
+                    .map(item => {
+                        const record = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+                        const id = String(record._id ?? record.id ?? record.voice_id ?? "");
+                        if (!id) return null;
+                        return {
+                            id,
+                            name: String(record.title ?? record.name ?? id),
+                            createdAt: typeof record.created_at === "number" ? record.created_at : undefined,
+                        } as VoiceOption;
+                    })
+                    .filter((voice): voice is VoiceOption => !!voice);
+                const nextCustomVoices = uniqueOptions([...voices, ...(config.customVoices || [])]);
+                updateConfig(config.id, { customVoices: nextCustomVoices });
+                setFetchedVoices(prev => ({ ...prev, [config.id]: nextCustomVoices }));
             } else {
                 throw new Error("该服务商暂不支持拉取模型列表");
             }
@@ -841,6 +921,83 @@ export function VoiceSettings() {
                                             </>
                                         )}
 
+                                        {config.provider === "FishAudio" && (
+                                            <>
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="menu-desc ml-1">接口地址 (Base URL)</label>
+                                                    <Input
+                                                        type="text"
+                                                        value={config.baseUrl || ""}
+                                                        onChange={(e) => updateConfig(config.id, { baseUrl: e.target.value })}
+                                                        placeholder={DEFAULT_FISH_AUDIO_BASE_URL}
+                                                    />
+                                                </div>
+                                                <div className="flex flex-col gap-1">
+                                                    <div className="flex items-center justify-between px-1">
+                                                        <label className="menu-desc">语速</label>
+                                                        <span className="menu-label font-medium">{(config.speechSpeed ?? DEFAULT_SPEECH_SPEED).toFixed(1)}×</span>
+                                                    </div>
+                                                    <input
+                                                        type="range"
+                                                        min={FISH_AUDIO_SPEED_MIN}
+                                                        max={FISH_AUDIO_SPEED_MAX}
+                                                        step={FISH_AUDIO_SPEED_STEP}
+                                                        value={config.speechSpeed ?? DEFAULT_SPEECH_SPEED}
+                                                        onChange={(e) => updateConfig(config.id, { speechSpeed: Number(e.target.value) })}
+                                                        className="w-full accent-black"
+                                                        aria-label="鱼声语速"
+                                                    />
+                                                    <div className="relative mt-1 h-5 px-1 text-xs text-gray-500" aria-hidden="true">
+                                                        <span className="absolute left-1 whitespace-nowrap">{FISH_AUDIO_SPEED_MIN.toFixed(1)}×</span>
+                                                        <span className="absolute whitespace-nowrap" style={{ left: "33.333%", transform: "translateX(-50%)" }}>1.0× 默认</span>
+                                                        <span className="absolute right-1 whitespace-nowrap">{FISH_AUDIO_SPEED_MAX.toFixed(1)}×</span>
+                                                    </div>
+                                                </div>
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="menu-desc ml-1">语音模型 (TTS Model)</label>
+                                                    <div className="flex flex-col gap-2">
+                                                        {manualModelIds[config.id] ? (
+                                                            <div className="flex gap-2">
+                                                                <Input
+                                                                    type="text"
+                                                                    value={config.model || ""}
+                                                                    onChange={(e) => updateConfig(config.id, { model: e.target.value })}
+                                                                    placeholder="手动输入模型 ID"
+                                                                    className="flex-1"
+                                                                />
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setManualModelIds(prev => ({ ...prev, [config.id]: false }))}
+                                                                    className="ui-icon-btn"
+                                                                    aria-label="返回模型下拉选择"
+                                                                    title="返回模型下拉选择"
+                                                                >
+                                                                    <List size={20} />
+                                                                </button>
+                                                            </div>
+                                                        ) : (
+                                                            <select
+                                                                value={FISH_AUDIO_MODELS.some(m => m.id === config.model) ? config.model : "__manual__"}
+                                                                onChange={(e) => {
+                                                                    if (e.target.value === "__manual__") {
+                                                                        setManualModelIds(prev => ({ ...prev, [config.id]: true }));
+                                                                        return;
+                                                                    }
+                                                                    updateConfig(config.id, { model: e.target.value });
+                                                                }}
+                                                                className="ui-select"
+                                                            >
+                                                                {FISH_AUDIO_MODELS.map(model => (
+                                                                    <option key={model.id} value={model.id}>{model.name}</option>
+                                                                ))}
+                                                                <option value="__manual__">手动输入...</option>
+                                                            </select>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </>
+                                        )}
+
                                         <div className="flex flex-col gap-1">
                                             <label className="menu-desc ml-1">默认音色 (Default Voice) 或 自定义 Voice ID</label>
                                             <div className="flex flex-col gap-2">
@@ -851,7 +1008,7 @@ export function VoiceSettings() {
                                                                 type="text"
                                                                 value={config.defaultVoice}
                                                                 onChange={(e) => updateConfig(config.id, { defaultVoice: e.target.value })}
-                                                                placeholder={config.provider === "OpenAI" ? "alloy" : "male-qn-qingse 或克隆 Voice ID"}
+                                                                placeholder={config.provider === "OpenAI" ? "alloy" : config.provider === "FishAudio" ? "粘贴鱼声音色 ID（reference_id）" : "male-qn-qingse 或克隆 Voice ID"}
                                                                 className="flex-1"
                                                             />
                                                             <button
@@ -903,7 +1060,7 @@ export function VoiceSettings() {
                                                         className="ui-btn ui-btn ui-btn-soft-action w-full"
                                                     >
                                                         <RefreshCw size={16} className={isFetching[config.id] ? "animate-spin" : ""} />
-                                                        {isFetching[config.id] ? "同步中..." : config.provider === "Minimax" ? "同步音色列表" : "显示默认音色"}
+                                                        {isFetching[config.id] ? "同步中..." : (config.provider === "Minimax" || config.provider === "FishAudio") ? "同步音色列表" : "显示默认音色"}
                                                     </button>
                                                     {config.provider === "Minimax" && (
                                                         <button
