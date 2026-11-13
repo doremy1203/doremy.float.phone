@@ -1036,8 +1036,12 @@
   padding: 20px 0 36px;
 }
 
-/* 窄屏统一采用流式尺寸，不为单一设计稿宽度建立专用断点。 */
-@media (max-width: 500px) and (hover: none) and (pointer: coarse) {
+/* 窄屏统一采用流式尺寸，不为单一设计稿宽度建立专用断点。
+   注意：这里刻意不写 (hover: none) / (pointer: coarse)。安卓壳 WebView 里
+   这两个媒体特性并不稳定（部分内核报 hover: hover、pointer: fine），带上它们
+   会让整段手机端布局在 APK 内失效，退回桌面「手机样机」形态：界面缩在中间、
+   四周露出黑边。宽度断点已足以判定窄屏，故只用 max-width。 */
+@media (max-width: 500px) {
   .icon-grid,
   .dock {
     --slot-size: clamp(48px, calc((100vw - 96px) / 4), 66px);
@@ -1055,7 +1059,10 @@
 
 /* ── Mobile responsive ── */
 
-@media (max-width: 500px) and (hover: none) and (pointer: coarse) {
+/* 同样不附加 (hover: none) / (pointer: coarse)：APK（安卓壳 WebView）里这两项
+   可能判定为 hover: hover / pointer: fine，一旦如此，整段移动端布局规则全部失效，
+   虚拟手机不再铺满屏幕，而是退回带金属边框的「样机」外观并缩在屏幕中央。 */
+@media (max-width: 500px) {
 
   /* 用户在设置里显式开启「显示系统状态栏」且运行时不在全屏时，控制器才会挂
      data-pwa-display-mode 标记（见 pwa-manifest-injector）：此时所有 App 共用系统
