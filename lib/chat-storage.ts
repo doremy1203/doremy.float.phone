@@ -26,6 +26,43 @@ export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
 export const CHAT_INITIAL_VISIBLE_MESSAGE_COUNT = 50;
 export const CHAT_LOAD_MORE_MESSAGE_COUNT = 30;
 
+export const CHAT_TONE_OPTIONS = [
+    { id: "short_replies", label: "短回复与留气口", description: "留气口，别一轮说满", prompt: "回复简短，别把一轮话说满，给用户留出自然接话的空间。" },
+    { id: "older", label: "年上 / 关系位置", description: "更年长或自认更懂", prompt: "以相对年长或自认更懂的关系位置表达，成熟但不居高临下。" },
+    { id: "younger", label: "年下 / 关系位置", description: "更年轻或更后一步", prompt: "以相对年轻或慢半拍靠近的关系位置表达，自然而不刻意卖萌。" },
+    { id: "internet_savvy", label: "网感好", description: "懂梗但不刷屏", prompt: "能自然理解和使用网络梗，但不堆梗、不刷屏。" },
+    { id: "internet_naive", label: "网感较差", description: "慢半拍地理解", prompt: "对网络梗和新潮表达慢半拍，按角色自己的方式理解，不假装精通。" },
+    { id: "reciprocal", label: "你来我往", description: "回应，再递回去", prompt: "先回应用户表达的内容，再自然递回话题，形成有来有往的交流。" },
+    { id: "proactive", label: "主动型", description: "主动表达，尊重反馈", prompt: "主动表达想法和感受、推进交流，同时尊重用户的反馈与边界。" },
+    { id: "guiding", label: "引导型", description: "给路标，不替人做主", prompt: "通过提示和提问给用户提供方向，不替用户做决定。" },
+    { id: "terse", label: "话少 / 精准", description: "短，但不空", prompt: "用词少而准确，句子短但信息不空，不为了简短而敷衍。" },
+    { id: "gentle", label: "温柔 / 柔和", description: "照顾情绪但不客服", prompt: "表达温柔柔和、照顾情绪，但不使用客套客服式话术。" },
+    { id: "teasing", label: "损友 / 轻微互怼", description: "顺手开玩笑", prompt: "像熟悉的损友一样顺手开轻微玩笑，不刻薄、不贬低用户。" },
+] as const;
+
+export type ChatToneStyle = typeof CHAT_TONE_OPTIONS[number]["id"];
+
+export function normalizeChatToneStyles(value: unknown): ChatToneStyle[] {
+    if (!Array.isArray(value)) return [];
+    const selected = new Set(value.filter((id): id is ChatToneStyle =>
+        typeof id === "string" && CHAT_TONE_OPTIONS.some(option => option.id === id),
+    ));
+    return CHAT_TONE_OPTIONS.filter(option => selected.has(option.id)).map(option => option.id);
+}
+
+export function buildChatTonePrompt(value: unknown): string {
+    const selectedIds = new Set(normalizeChatToneStyles(value));
+    if (selectedIds.size === 0) return "";
+    const rules = CHAT_TONE_OPTIONS
+        .filter(option => selectedIds.has(option.id))
+        .map(option => `- ${option.label}：${option.prompt}`);
+    return [
+        "【角色口吻方式】",
+        "在不改变角色人设、事实与当前输出格式的前提下，每轮都稳定遵守以下表达规则：",
+        ...rules,
+    ].join("\n");
+}
+
 export function normalizeVisionImagePromptLimit(value: unknown): number {
     if (value === undefined || value === null || value === "") return DEFAULT_VISION_IMAGE_PROMPT_LIMIT;
     const parsed = typeof value === "number" ? value : Number(value);
@@ -74,6 +111,8 @@ export type ChatSession = {
     discardInvalidStickers?: boolean;
     bilingualTranslationPrompt?: string;
     offlineBilingualTranslationPrompt?: string;
+    /** 私聊角色口吻；每轮生成时注入，空数组表示不额外约束。 */
+    characterToneStyles?: ChatToneStyle[];
     nativeExpandedToolSourceIds?: string[];
     visionImagePromptLimit?: number;
     /** false 表示当前私聊明确覆盖全局最近图片数量；旧会话默认跟随已设置的全局值 */

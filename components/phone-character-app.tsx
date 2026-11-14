@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { Character } from "@/lib/character-types";
+import type { Character, CharacterLanguage } from "@/lib/character-types";
+import { CHARACTER_LANGUAGE_OPTIONS, getCharacterLanguageOption, normalizeCharacterLanguage } from "@/lib/character-types";
 import {
   createCharacter,
   exportCharacterAsJson,
@@ -1883,6 +1884,9 @@ function CharArchiveView({
   const [name, setName] = useState(char.name || "");
   const [persona, setPersona] = useState(char.persona || "");
   const [personality, setPersonality] = useState(char.personality || "");
+  const [language, setLanguage] = useState<CharacterLanguage>(() => normalizeCharacterLanguage(char.language));
+  const [showLanguagePicker, setShowLanguagePicker] = useState(false);
+  const [languageSearch, setLanguageSearch] = useState("");
   const [briefPersona, setBriefPersona] = useState(char.briefPersona || "");
   const [briefBusy, setBriefBusy] = useState(false);
   const [briefError, setBriefError] = useState("");
@@ -1943,10 +1947,11 @@ function CharArchiveView({
         name,
         persona,
         personality,
+        language,
         timeZone,
       },
     });
-  }, [isEditing, name, persona, personality, timeZone, char.id]);
+  }, [isEditing, name, persona, personality, language, timeZone, char.id]);
 
   // Listen for mascot fill events (unified)
   useEffect(() => {
@@ -1955,6 +1960,7 @@ function CharArchiveView({
       if (field === "name") setName(value);
       else if (field === "persona") setPersona(value);
       else if (field === "personality") setPersonality(value);
+      else if (field === "language") setLanguage(normalizeCharacterLanguage(value));
       else if (field === "timeZone") {
         setTimeZone(value);
         setTimeZoneSearch(value);
@@ -1977,6 +1983,7 @@ function CharArchiveView({
     if (name !== (char.name || "")) return true;
     if (persona !== (char.persona || "")) return true;
     if (personality !== (char.personality || "")) return true;
+    if (language !== normalizeCharacterLanguage(char.language)) return true;
     if (briefPersona !== (char.briefPersona || "")) return true;
     if (timeZone !== (char.timeZone || "")) return true;
     if (avatar !== (char.avatar || null)) return true;
@@ -2003,6 +2010,9 @@ function CharArchiveView({
       setName(char.name || "");
       setPersona(char.persona || "");
       setPersonality(char.personality || "");
+      setLanguage(normalizeCharacterLanguage(char.language));
+      setLanguageSearch("");
+      setShowLanguagePicker(false);
       setBriefPersona(char.briefPersona || "");
       setBriefError("");
       setTimeZone(char.timeZone || "");
@@ -2067,6 +2077,7 @@ function CharArchiveView({
         name: name.trim() || char.name || "UNNAMED",
         persona,
         personality: personality.trim() || undefined,
+        language,
         briefPersona: trimmedBrief || undefined,
         // 简介变动才刷新时间戳；未动则保留原值（供「设定已更新」过期提示判断）
         briefPersonaUpdatedAt: trimmedBrief
@@ -2131,6 +2142,22 @@ function CharArchiveView({
     : timeZoneOptions;
   const filteredTimeZoneOptions = matchedTimeZoneOptions.slice(0, 80);
   const hasMoreTimeZoneOptions = matchedTimeZoneOptions.length > filteredTimeZoneOptions.length;
+  const selectedLanguageOption = getCharacterLanguageOption(language);
+  const languageQuery = languageSearch.trim().toLowerCase();
+  const filteredLanguageOptions = CHARACTER_LANGUAGE_OPTIONS.filter(option =>
+    !languageQuery || `${option.label} ${option.nativeLabel} ${option.keywords}`.toLowerCase().includes(languageQuery)
+  );
+
+  function openLanguagePicker() {
+    setLanguageSearch("");
+    setShowLanguagePicker(true);
+  }
+
+  function selectLanguage(option: CharacterLanguage) {
+    setLanguage(option);
+    setLanguageSearch("");
+    setShowLanguagePicker(false);
+  }
 
   function openTimeZonePicker() {
     setTimeZoneSearch(timeZone);
@@ -2381,6 +2408,23 @@ function CharArchiveView({
               </div>
             ) : (
               <span className="char-archive-val">{timeZone || "SYSTEM"}</span>
+            )}
+          </div>
+          <div className="char-archive-cell" style={{ flex: 1.2 }}>
+            <span className="char-archive-label">使用语言</span>
+            {isEditing ? (
+              <div className="char-timezone-picker">
+                <button
+                  type="button"
+                  className="char-timezone-trigger"
+                  onClick={openLanguagePicker}
+                  aria-haspopup="dialog"
+                >
+                  {selectedLanguageOption.label} / {selectedLanguageOption.nativeLabel}
+                </button>
+              </div>
+            ) : (
+              <span className="char-archive-val">{selectedLanguageOption.label} / {selectedLanguageOption.nativeLabel}</span>
             )}
           </div>
         </div>
@@ -2817,7 +2861,59 @@ function CharArchiveView({
         </div>
       )}
 
-
+      {isEditing && showLanguagePicker && (
+        <div
+          className="char-timezone-sheet-backdrop char-language-sheet-backdrop"
+          onPointerDown={event => {
+            if (event.target === event.currentTarget) setShowLanguagePicker(false);
+          }}
+        >
+          <div className="char-timezone-sheet char-language-sheet" role="dialog" aria-modal="true" aria-labelledby="character-language-title">
+            <div className="char-timezone-sheet-header">
+              <div>
+                <span id="character-language-title">角色使用语言</span>
+                <p>聊天时每轮提醒角色使用所选语言</p>
+              </div>
+              <button type="button" onClick={() => setShowLanguagePicker(false)}>关闭</button>
+            </div>
+            <input
+              className="char-timezone-search"
+              value={languageSearch}
+              onChange={event => setLanguageSearch(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === "Escape") {
+                  setShowLanguagePicker(false);
+                } else if (event.key === "Enter") {
+                  event.preventDefault();
+                  if (filteredLanguageOptions[0]) selectLanguage(filteredLanguageOptions[0].value);
+                }
+              }}
+              placeholder="搜索中文、English、한국어、日本語"
+              aria-label="搜索角色使用语言"
+              spellCheck={false}
+              autoFocus
+            />
+            <div className="char-timezone-options char-language-options" role="listbox" aria-label="语言选项">
+              {filteredLanguageOptions.length > 0 ? filteredLanguageOptions.map(option => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className="char-timezone-option char-language-option"
+                  onClick={() => selectLanguage(option.value)}
+                  role="option"
+                  aria-selected={option.value === language}
+                >
+                  <strong>{option.label}</strong>
+                  <span>{option.nativeLabel}</span>
+                  {option.value === language && <small>当前</small>}
+                </button>
+              )) : (
+                <div className="char-timezone-empty">没有匹配的语言</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Unsaved changes confirmation dialog */}
       {showUnsavedConfirm && (

@@ -36,6 +36,173 @@
   isolation: isolate;
 }
 
+/* 私聊角色口吻：底部抽屉，双列多选卡片。 */
+.chat-tone-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10020;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(20, 20, 20, 0.28);
+  backdrop-filter: blur(3px);
+}
+
+.chat-tone-sheet {
+  width: min(680px, 100%);
+  max-height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--c-card-border);
+  border-radius: 24px;
+  background: var(--c-card-bg);
+  color: var(--c-text-title);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
+  animation: chat-tone-sheet-in 180ms ease-out;
+}
+
+.chat-tone-sheet-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 24px 18px;
+}
+
+.chat-tone-sheet-header h2 {
+  margin: 0;
+  font-size: calc(23px * var(--app-text-scale, 1));
+  line-height: 1.25;
+}
+
+.chat-tone-sheet-header p {
+  margin: 8px 0 0;
+  color: var(--c-text);
+  font-size: calc(14px * var(--app-text-scale, 1));
+}
+
+.chat-tone-sheet-close {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--c-input);
+  color: var(--c-text);
+  cursor: pointer;
+}
+
+.chat-tone-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  overflow-y: auto;
+  padding: 4px 24px 22px;
+  overscroll-behavior: contain;
+}
+
+.chat-tone-option {
+  min-width: 0;
+  min-height: 92px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 17px 15px;
+  border: 1px dashed color-mix(in srgb, var(--c-card-border) 82%, var(--c-text));
+  border-radius: 16px;
+  background: transparent;
+  color: var(--c-text-title);
+  text-align: left;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.chat-tone-option:hover,
+.chat-tone-option.is-selected {
+  border-style: solid;
+  border-color: var(--c-icon-active);
+  background: color-mix(in srgb, var(--c-icon-active) 8%, transparent);
+}
+
+.chat-tone-checkbox {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  margin-top: 1px;
+  border: 1.5px solid var(--c-icon);
+  border-radius: 4px;
+  color: var(--c-icon-active);
+}
+
+.chat-tone-option.is-selected .chat-tone-checkbox {
+  border-color: var(--c-icon-active);
+  background: color-mix(in srgb, var(--c-icon-active) 10%, transparent);
+}
+
+.chat-tone-option-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.chat-tone-option-copy strong {
+  font-size: calc(15px * var(--app-text-scale, 1));
+  line-height: 1.35;
+}
+
+.chat-tone-option-copy > span {
+  color: var(--c-text);
+  font-size: calc(12.5px * var(--app-text-scale, 1));
+  line-height: 1.4;
+}
+
+.chat-tone-sheet-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px max(14px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--c-card-border);
+  color: var(--c-text);
+  font-size: calc(12px * var(--app-text-scale, 1));
+}
+
+.chat-tone-sheet-footer .ui-btn {
+  flex: 0 0 auto;
+  min-width: 84px;
+}
+
+@keyframes chat-tone-sheet-in {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 520px) {
+  .chat-tone-sheet-backdrop { padding: 0; }
+  .chat-tone-sheet {
+    max-height: 88dvh;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 22px 22px 0 0;
+  }
+  .chat-tone-sheet-header { padding: 20px 18px 15px; }
+  .chat-tone-grid { gap: 10px; padding: 4px 14px 18px; }
+  .chat-tone-option { min-height: 94px; gap: 9px; padding: 14px 10px; }
+  .chat-tone-checkbox { flex-basis: 20px; width: 20px; height: 20px; }
+  .chat-tone-option-copy strong { font-size: calc(13.5px * var(--app-text-scale, 1)); }
+  .chat-tone-option-copy > span { font-size: calc(11.5px * var(--app-text-scale, 1)); }
+  .chat-tone-sheet-footer { padding-right: 18px; padding-left: 18px; }
+}
+
 
 .chat-app .page-shell > .page-body {
   padding-bottom: 120px;

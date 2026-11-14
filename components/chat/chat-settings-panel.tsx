@@ -5,7 +5,10 @@ import {
     CHAT_INITIAL_VISIBLE_MESSAGE_COUNT,
     CHAT_LOAD_MORE_MESSAGE_COUNT,
     CHAT_REQUEST_REPLY_EVENT,
+    CHAT_TONE_OPTIONS,
     ChatSession,
+    normalizeChatToneStyles,
+    type ChatToneStyle,
     clearChatSessionMessages,
     clearChatSessionToolHistory,
     saveChatSessions,
@@ -51,7 +54,7 @@ import { getSchemes, saveScheme, deleteScheme, type CSSScheme } from "@/lib/css-
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
 import { KeyboardAutoSendDebounceItem } from "@/components/chat/keyboard-auto-send-debounce-item";
 import { SessionChatSoundsSection } from "@/components/chat/session-chat-sounds";
-import { ChevronRight, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, Ban, MessageSquare, Search, AlertCircle, Code, Laptop, Trash2, Smile, Sparkles, X, Play, Upload, Download, Save, FolderOpen, Camera, RefreshCw, type LucideIcon } from "lucide-react";
+import { ChevronRight, Check, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, Ban, MessageSquare, Search, AlertCircle, Code, Laptop, Trash2, Smile, Sparkles, X, Play, Upload, Download, Save, FolderOpen, Camera, RefreshCw, type LucideIcon } from "lucide-react";
 import { BINDING_ACCENTS, CONTENT_APP_ACCENTS } from "@/lib/ui-accent-colors";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
 import { ConfirmDialog } from "@/components/ui/modal";
@@ -325,6 +328,8 @@ export function ChatSettingsPanel({
 }: ChatSettingsPanelProps) {
     const [backgroundImage, setBackgroundImage] = useState<string>(session.backgroundImage || "");
     const [alias, setAlias] = useState<string>(session.alias || "");
+    const [characterToneStyles, setCharacterToneStyles] = useState<ChatToneStyle[]>(() => normalizeChatToneStyles(session.characterToneStyles));
+    const [showTonePicker, setShowTonePicker] = useState(false);
     const [characterRemarkForUser, setCharacterRemarkForUser] = useState<string>(session.characterRemarkForUser || "");
     const [notifyAliasChange, setNotifyAliasChange] = useState(session.notifyCharacterOnAliasChange === true);
     const [refreshingCharacterRemark, setRefreshingCharacterRemark] = useState(false);
@@ -778,6 +783,14 @@ export function ChatSettingsPanel({
         }
     };
 
+    const toggleCharacterTone = (tone: ChatToneStyle) => {
+        const next = characterToneStyles.includes(tone)
+            ? characterToneStyles.filter(item => item !== tone)
+            : normalizeChatToneStyles([...characterToneStyles, tone]);
+        setCharacterToneStyles(next);
+        updateSession({ characterToneStyles: next });
+    };
+
     const requestCharacterRemark = async () => {
         if (refreshingCharacterRemark || session.isGroup) return;
         setRefreshingCharacterRemark(true);
@@ -1124,6 +1137,19 @@ export function ChatSettingsPanel({
                         <div className="menu-label-group"><span className="menu-label">查找聊天记录</span></div>
                         <div className="menu-right"><ChevronRight size={16} /></div>
                     </button>
+                    {!session.isGroup && (
+                        <button className="menu-item" onClick={() => setShowTonePicker(true)}>
+                            <ChatInfoIcon icon={Sparkles} color={BINDING_ACCENTS.preset} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">角色口吻方式</span>
+                                <span className="menu-desc">规则写短，例子写具体；每轮聊天自动生效</span>
+                            </div>
+                            <div className="menu-right">
+                                <span className="menu-desc mr-1">{characterToneStyles.length > 0 ? `已选 ${characterToneStyles.length} 项` : "未设置"}</span>
+                                <ChevronRight size={16} />
+                            </div>
+                        </button>
+                    )}
                     {!session.isGroup && isAgentComputerConfigured() && (
                         <button className="menu-item" onClick={() => setShowComputer(true)}>
                             <ChatInfoIcon icon={Laptop} color={BINDING_ACCENTS.memory} />
@@ -1723,6 +1749,54 @@ export function ChatSettingsPanel({
                         )}
                         <button className="ui-btn ui-btn-ghost w-full" onClick={() => setShowInvitePicker(false)}>取消</button>
                     </div>
+                </div>
+            )}
+
+            {/* Drawer: Character tone */}
+            {showTonePicker && !session.isGroup && (
+                <div
+                    className="chat-tone-sheet-backdrop"
+                    onPointerDown={event => {
+                        if (event.target === event.currentTarget) setShowTonePicker(false);
+                    }}
+                >
+                    <section className="chat-tone-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-tone-sheet-title">
+                        <div className="chat-tone-sheet-header">
+                            <div>
+                                <h2 id="chat-tone-sheet-title">口吻与语料</h2>
+                                <p>规则写短，例子写具体</p>
+                            </div>
+                            <button type="button" className="chat-tone-sheet-close" onClick={() => setShowTonePicker(false)} aria-label="关闭角色口吻设置">
+                                <X size={20} />
+                            </button>
+                        </div>
+                        <div className="chat-tone-grid" role="group" aria-label="角色口吻方式，可多选">
+                            {CHAT_TONE_OPTIONS.map(option => {
+                                const selected = characterToneStyles.includes(option.id);
+                                return (
+                                    <button
+                                        key={option.id}
+                                        type="button"
+                                        className={`chat-tone-option ${selected ? "is-selected" : ""}`}
+                                        aria-pressed={selected}
+                                        onClick={() => toggleCharacterTone(option.id)}
+                                    >
+                                        <span className="chat-tone-checkbox" aria-hidden="true">
+                                            {selected && <Check size={16} strokeWidth={2.5} />}
+                                        </span>
+                                        <span className="chat-tone-option-copy">
+                                            <strong>{option.label}</strong>
+                                            <span>{option.description}</span>
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        <div className="chat-tone-sheet-footer">
+                            <span>{characterToneStyles.length > 0 ? `已选 ${characterToneStyles.length} 项，将注入每轮提示词` : "可多选，所选项将注入每轮提示词"}</span>
+                            <button type="button" className="ui-btn ui-btn-success" onClick={() => setShowTonePicker(false)}>完成</button>
+                        </div>
+                    </section>
                 </div>
             )}
 

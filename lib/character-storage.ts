@@ -1,4 +1,5 @@
 import type { Character, CanvasBgItem } from "./character-types";
+import { normalizeCharacterLanguage } from "./character-types";
 import { normalizeTimeZone } from "./character-time";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 
@@ -52,6 +53,11 @@ export function loadCharacters(): Character[] {
       }
       if (!char.wechatID) {
         char.wechatID = generateWechatID();
+        needsSave = true;
+      }
+      const normalizedLanguage = normalizeCharacterLanguage(char.language);
+      if (char.language !== normalizedLanguage) {
+        char.language = normalizedLanguage;
         needsSave = true;
       }
       const normalizedTimeZone = normalizeTimeZone(char.timeZone);
@@ -131,6 +137,7 @@ export function createCharacter(
     ...data,
     id: `char_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     wechatID: data.wechatID || generateWechatID(),
+    language: normalizeCharacterLanguage(data.language),
     tags: data.tags || [],
     createdAt: now,
     updatedAt: now,
@@ -150,6 +157,7 @@ export function exportCharacterAsJson(char: Character): void {
     tags: char.tags || [],
     wechatID: char.wechatID || "",
     timeZone: char.timeZone || "",
+    language: normalizeCharacterLanguage(char.language),
     polaroidStyle: char.polaroidStyle ?? 0,
     polaroidSize: char.polaroidSize || "random",
     polaroidImageX: char.polaroidImageX ?? 50,
@@ -214,6 +222,7 @@ export function parseCharacterFromJson(
       tags: Array.isArray(src.tags) ? src.tags.map(String) : [],
       wechatID: typeof src.wechatID === "string" && src.wechatID.trim() ? src.wechatID : undefined,
       timeZone: normalizeTimeZone(src.timeZone ?? src.timezone ?? src.time_zone),
+      language: normalizeCharacterLanguage(src.language),
       polaroidStyle,
       polaroidSize,
       polaroidImageX,
@@ -436,6 +445,7 @@ export async function exportCharacterAsPng(char: Character): Promise<void> {
     tags: char.tags || [],
     wechatID: char.wechatID || "",
     timeZone: char.timeZone || "",
+    language: normalizeCharacterLanguage(char.language),
   };
   const jsonStr = JSON.stringify(payload);
   const base64 = btoa(unescape(encodeURIComponent(jsonStr)));
