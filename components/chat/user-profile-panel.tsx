@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef, type CSSProperties } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, type CSSProperties } from "react";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
 import {
     loadFollowUpConfig,
@@ -32,6 +32,14 @@ import type { Character } from "@/lib/character-types";
 import { requestNotificationPermission } from "@/lib/browser-notification";
 import { disableOfflinePush, enableOfflinePush, getOfflinePushState, isShellEnvironment, loadPushQuietHours, savePushQuietHours, sendTestOfflinePush, type OfflinePushState } from "@/lib/push-client";
 import { isPersonalPushCloudActive, setPersonalPushCloudScheduled } from "@/lib/personal-push-cloud";
+import {
+    clearWxPusherSpt,
+    connectWxPusher,
+    isValidWxPusherSpt,
+    loadWxPusherSpt,
+    saveWxPusherSpt,
+    sendWxPusherTest,
+} from "@/lib/wxpusher-client";
 import { loadPushCloudScheduled, savePushCloudScheduled } from "@/lib/cloud-deploy-status";
 import { armIdleReconnectBailout, armTimedWakeBailout, cancelBailoutKey, cancelBailoutPrefix } from "@/lib/push-bailout-client";
 import { loadTimedWakeSchedules, makeTimedWakeId, removeTimedWakeSchedule, saveTimedWakeSchedule, type TimedWakeSchedule } from "@/lib/timed-wake-storage";
@@ -1243,6 +1251,70 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
     const [pushCloudScheduled, setPushCloudScheduled] = useState(() => loadPushCloudScheduled());
     const [pushScheduleBusy, setPushScheduleBusy] = useState(false);
     const [pushScheduleHint, setPushScheduleHint] = useState("");
+    const [wxSpt, setWxSpt] = useState(() => loadWxPusherSpt());
+    const [wxSavedSpt, setWxSavedSpt] = useState(() => loadWxPusherSpt());
+    const [wxBusy, setWxBusy] = useState(false);
+    const [wxHint, setWxHint] = useState("");
+    const wxAttemptRef = useRef("");
+
+    const wxConnected = Boolean(wxSavedSpt) && wxSpt.trim() === wxSavedSpt;
+
+    const runWxConnect = useCallback(async (raw: string) => {
+        const spt = raw.trim();
+        if (!isValidWxPusherSpt(spt) || wxAttemptRef.current === spt) return;
+        wxAttemptRef.current = spt;
+        setWxBusy(true);
+        setWxHint("正在连接 WxPusher…");
+        const result = await connectWxPusher(spt);
+        if (result.ok) {
+            saveWxPusherSpt(spt);
+            setWxSavedSpt(spt);
+            setWxHint("已连接，SPT 已保存到本机。");
+        } else {
+            setWxHint(result.error || "连接失败。");
+        }
+        setWxBusy(false);
+    }, []);
+
+    // 填写完整 SPT 后停顿片刻自动连接（发送一条连接确认，同时校验 SPT）。
+    useEffect(() => {
+        const spt = wxSpt.trim();
+        if (!spt || spt === wxSavedSpt) return;
+        if (!isValidWxPusherSpt(spt)) {
+            const timer = window.setTimeout(() => setWxHint("SPT 格式不正确，应以 SPT_ 开头。"), 900);
+            return () => window.clearTimeout(timer);
+        }
+        if (wxAttemptRef.current === spt) return;
+        const timer = window.setTimeout(() => void runWxConnect(spt), 900);
+        return () => window.clearTimeout(timer);
+    }, [wxSpt, wxSavedSpt, runWxConnect]);
+
+    const handleWxTest = async () => {
+        const spt = wxSpt.trim();
+        if (!isValidWxPusherSpt(spt)) {
+            setWxHint("请先填写有效的 SPT（以 SPT_ 开头）。");
+            return;
+        }
+        setWxBusy(true);
+        setWxHint("正在发送测试通知…");
+        const result = await sendWxPusherTest(spt);
+        if (result.ok) {
+            saveWxPusherSpt(spt);
+            setWxSavedSpt(spt);
+            setWxHint("测试通知已发送，请到 WxPusher 客户端查看。");
+        } else {
+            setWxHint(result.error || "测试通知发送失败。");
+        }
+        setWxBusy(false);
+    };
+
+    const handleWxDisconnect = () => {
+        clearWxPusherSpt();
+        setWxSavedSpt("");
+        setWxSpt("");
+        wxAttemptRef.current = "";
+        setWxHint("已断开并清除本机 SPT。");
+    };
 
     const handleTogglePushCloudSchedule = async (enabled: boolean) => {
         if (pushScheduleBusy) return;
@@ -1523,6 +1595,63 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                                 ? "App 版自带推送通道，已自动接管离线推送；保持系统通知权限开启即可，可点「测试」验证。"
                                 : offlinePushState === "unsupported" ? "当前环境不支持。iOS 请先添加到主屏幕，从主屏幕打开后再开启。" : "")}
                         </p>
+                        <p className="menu-group-desc mx-2">WxPusher 微信推送</p>
+                        <div className="menu-group">
+                            <div className="menu-item" style={{ alignItems: "stretch", flexDirection: "column", gap: 10 }}>
+                                <div className="flex items-start gap-3">
+                                    <ProfileSettingsIcon icon={MessageSquare} color={CONTENT_APP_ACCENTS.chat} />
+                                    <div className="menu-label-group">
+                                        <span className="menu-label">WxPusher</span>
+                                        <span className="menu-desc">填写 SPT 后自动连接；SPT 仅保存在本机</span>
+                                    </div>
+                                    <div className="menu-right flex items-center gap-2">
+                                        {wxBusy
+                                            ? <Loader2 size={16} className="animate-spin" />
+                                            : <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${wxConnected ? "bg-green-500" : "bg-black/20"}`} />}
+                                    </div>
+                                </div>
+                                <input
+                                    className="ui-input"
+                                    type="text"
+                                    value={wxSpt}
+                                    onChange={e => setWxSpt(e.target.value)}
+                                    placeholder="SPT_xxxxxxxxxxxxxxxx"
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    disabled={wxBusy}
+                                />
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        className="ui-btn ui-btn-outline py-1 px-2 ts-11"
+                                        onClick={() => void handleWxTest()}
+                                        disabled={wxBusy || !wxSpt.trim()}
+                                    >
+                                        测试通知
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="ui-btn ui-btn-outline py-1 px-2 ts-11"
+                                        onClick={() => { wxAttemptRef.current = ""; void runWxConnect(wxSpt); }}
+                                        disabled={wxBusy || wxConnected || !isValidWxPusherSpt(wxSpt.trim())}
+                                    >
+                                        {wxConnected ? "已连接" : "连接"}
+                                    </button>
+                                    {Boolean(wxSavedSpt) && (
+                                        <button
+                                            type="button"
+                                            className="ui-btn ui-btn-outline py-1 px-2 ts-11"
+                                            onClick={handleWxDisconnect}
+                                            disabled={wxBusy}
+                                        >
+                                            断开
+                                        </button>
+                                    )}
+                                    <span className="ml-auto ts-11 opacity-60">{wxConnected ? "已连接" : "未连接"}</span>
+                                </div>
+                                {wxHint && <span className="menu-desc !mt-0">{wxHint}</span>}
+                            </div>
+                        </div>
                     </>
                 )}
                 <p className="menu-group-desc mx-2">定时主动消息</p>
