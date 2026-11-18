@@ -39,6 +39,7 @@ import {
     loadWxPusherSpt,
     saveWxPusherSpt,
     sendWxPusherTest,
+    syncWxPusherSptToServer,
 } from "@/lib/wxpusher-client";
 import { loadPushCloudScheduled, savePushCloudScheduled } from "@/lib/cloud-deploy-status";
 import { armIdleReconnectBailout, armTimedWakeBailout, cancelBailoutKey, cancelBailoutPrefix } from "@/lib/push-bailout-client";
@@ -1270,6 +1271,7 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
             saveWxPusherSpt(spt);
             setWxSavedSpt(spt);
             setWxHint("已连接，SPT 已保存到本机。");
+            void syncWxPusherSptToServer(spt);
         } else {
             setWxHint(result.error || "连接失败。");
         }
@@ -1302,6 +1304,7 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
             saveWxPusherSpt(spt);
             setWxSavedSpt(spt);
             setWxHint("测试通知已发送，请到 WxPusher 客户端查看。");
+            void syncWxPusherSptToServer(spt);
         } else {
             setWxHint(result.error || "测试通知发送失败。");
         }
@@ -1314,6 +1317,7 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
         setWxSpt("");
         wxAttemptRef.current = "";
         setWxHint("已断开并清除本机 SPT。");
+        void syncWxPusherSptToServer(null);
     };
 
     const handleTogglePushCloudSchedule = async (enabled: boolean) => {

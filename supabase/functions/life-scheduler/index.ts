@@ -301,6 +301,21 @@ Deno.serve(async (req: Request) => {
         } catch { /* notification failure remains visible in the cloud diagnostic panel */ }
       }
     }
+    // WxPusher：有 SPT 就多发一份到 WxPusher 客户端。
+    try {
+      const sptResponse = await rest(`push_channel_spt?user_id=eq.${encodeURIComponent(userId)}&select=spt&limit=1`);
+      if (sptResponse.ok) {
+        const sptRows = await sptResponse.json() as { spt: string }[];
+        const spt = sptRows[0]?.spt;
+        if (spt) {
+          await fetch("https://wxpusher.zjiecode.com/api/send/message/simple-push", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ spt, summary: "生活系统 · 云端诊断", content: notificationBody, contentType: 1, url: "/life" }),
+          }).catch(() => undefined);
+        }
+      }
+    } catch { /* 表不存在或网络异常，静默跳过 */ }
   };
   const configResponse = await rest("push_server_config?id=eq.main&select=cron_secret,payload_key,vapid_public_key,vapid_private_key,site_origin&limit=1");
   if (!configResponse.ok) return new Response("config lookup failed", { status: 502 });

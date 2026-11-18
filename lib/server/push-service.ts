@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import webpush from "web-push";
 
 import { encodeSupabaseFilter, getSupabaseServerConfig, supabaseRestFetch } from "./supabase-rest";
+import { sendWxPusherMessage } from "./wxpusher";
 
 type VapidKeys = { publicKey: string; privateKey: string };
 
@@ -194,6 +195,20 @@ export async function sendPushToUser(
     },
   });
   const result: PushSendResult = { sent: 0, total: subs.data.length, errors: [] };
+
+  // 尽力走一条 WxPusher 极简推送：有 SPT 就多发一份，不影响原有 Web Push。
+  try {
+    const sptRows = await supabaseRestFetch<{ spt: string }[]>(
+      `push_channel_spt?user_id=eq.${encodeSupabaseFilter(userId)}&select=spt&limit=1`,
+    );
+    if (sptRows.ok && sptRows.data[0]?.spt) {
+      await sendWxPusherMessage(sptRows.data[0].spt, { summary: message.title, content: message.body, url: navigate })
+        .then(() => { result.sent += 1; })
+        .catch(err => { /* WxPusher 尽力而为，失败不打断主通道 */ result.errors.push("wxpusher: " + (err instanceof Error ? err.message : String(err)).slice(0, 80)); });
+    }
+  } catch {
+    // 表可能不存在（老库未跑迁移），静默跳过即可
+  }
 
   const shellSubs = subs.data.filter(sub => sub.endpoint.startsWith(SHELL_ENDPOINT_PREFIX));
   const webSubs = subs.data.filter(sub => !sub.endpoint.startsWith(SHELL_ENDPOINT_PREFIX));

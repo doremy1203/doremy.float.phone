@@ -51,3 +51,20 @@ export function connectWxPusher(spt: string): Promise<WxPusherApiResult> {
 export function sendWxPusherTest(spt: string): Promise<WxPusherApiResult> {
     return postWxPusher("/api/push/wxpusher/test", spt);
 }
+
+/** 连接成功后调用，把 SPT 同步到服务端数据库；断开时传 null 清除。 */
+export async function syncWxPusherSptToServer(spt: string | null): Promise<WxPusherApiResult> {
+    try {
+        const response = await fetch("/api/push/wxpusher/sync", {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(spt ? { spt } : { action: "clear" }),
+        });
+        const data = await response.json().catch(() => ({})) as WxPusherApiResult;
+        if (!response.ok || !data.ok) return { ok: false, error: data.error || `同步失败（HTTP ${response.status}）` };
+        return { ok: true, message: data.message };
+    } catch {
+        return { ok: false, error: "网络异常，服务端可能未同步。" };
+    }
+}
