@@ -1667,6 +1667,23 @@ Deno.serve(async (req: Request) => {
       return;
     }
 
+    // WxPusher 极简推送：有 SPT 就多发一份到 WxPusher 客户端（尽力而为，不影响 Web Push）。
+    try {
+      const sptResponse = await rest(`push_channel_spt?user_id=eq.${encodeURIComponent(job.user_id)}&select=spt&limit=1`);
+      if (sptResponse.ok) {
+        const sptRows = await sptResponse.json() as { spt: string }[];
+        const spt = sptRows[0]?.spt;
+        if (spt) {
+          const bodyText = parts.map(p => p.slice(0, 200)).join("\n\n");
+          await fetch("https://wxpusher.zjiecode.com/api/send/message/simple-push", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ spt, summary: (deliverAsCall ? `📞 ${title}` : title).slice(0, 100), content: bodyText.slice(0, 40000), contentType: 1, url: targetUrl }),
+          }).catch(() => undefined);
+        }
+      }
+    } catch { /* 表不存在或网络异常，静默跳过 */ }
+
     for (let index = 0; index < parts.length; index += 1) {
       if (index > 0) await sleep(500);
       // 单条截断从 80 放宽到 200：分条规则与聊天记录同口径（都按双空行拆），
