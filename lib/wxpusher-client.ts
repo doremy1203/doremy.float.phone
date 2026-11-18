@@ -68,3 +68,30 @@ export async function syncWxPusherSptToServer(spt: string | null): Promise<WxPus
         return { ok: false, error: "网络异常，服务端可能未同步。" };
     }
 }
+
+/**
+ * 后台/离线场景下给已连接的 SPT 发一条消息。
+ * 只从本机 KV 读 SPT，不做连接校验——后台回复的 SPT 连接已经过。
+ * 返回 true 表示消息已提交到 WxPusher（不保证送达）。
+ */
+export async function sendWxPusherMessageIfConnected(
+    title: string,
+    body: string,
+    url?: string,
+): Promise<boolean> {
+    if (typeof window === "undefined") return false;
+    const spt = loadWxPusherSpt();
+    if (!spt) return false;
+    try {
+        const response = await fetch("/api/push/wxpusher/test", {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ spt, title, content: body, url }),
+        });
+        const data = await response.json().catch(() => ({})) as { ok?: boolean };
+        return response.ok && data.ok === true;
+    } catch {
+        return false;
+    }
+}
