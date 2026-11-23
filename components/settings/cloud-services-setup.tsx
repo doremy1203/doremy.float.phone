@@ -240,7 +240,7 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
             });
             done.push("数据库表已创建");
 
-            // 4. 部署 Worker
+            // 4. 部署 Worker（同时绑定 D1 和环境变量）
             setProgress("部署 Worker…");
             const workerRes = await fetch("/ai-phone-worker/worker.js");
             const workerCode = await workerRes.text();
@@ -250,23 +250,13 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                 accountId: cfAccountId,
                 workerName: cfWorkerName,
                 code: workerCode,
+                d1DatabaseId: databaseId,
                 wxpusherSpt: cfSpt,
                 siteOrigin: window.location.origin,
             });
-            done.push(`Worker: ${cfWorkerName}`);
+            done.push(`Worker: ${cfWorkerName}（D1 已绑定，环境变量已设置）`);
 
-            // 5. 绑定 D1
-            setProgress("绑定 D1 到 Worker…");
-            await callCloudflareAdmin({
-                action: "bind_d1",
-                token: cfToken,
-                accountId: cfAccountId,
-                workerName: cfWorkerName,
-                d1DatabaseId: databaseId,
-            });
-            done.push("D1 绑定完成");
-
-            // 6. 设置 Cron
+            // 5. 设置 Cron
             setProgress("设置 Cron 触发器…");
             await callCloudflareAdmin({
                 action: "set_cron",

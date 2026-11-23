@@ -115,17 +115,52 @@ async function handleAccounts(token: string): Promise<NextResponse> {
   return NextResponse.json({ ok: true, accounts });
 }
 
-// 创建 D1 数据库
+// 创建 D1 数据库（如果已存在则返回现有的）
 async function handleCreateD1(token: string, accountId: string, name: string): Promise<NextResponse> {
+  // 先尝试创建
   const response = await cloudflareFetch(token, `/accounts/${accountId}/d1/database`, {
     method: "POST",
     body: JSON.stringify({ name }),
   });
-  if (!response.ok) {
-    return NextResponse.json({ ok: false, error: await upstreamMessage(response, "创建 D1 数据库") }, { status: response.status });
+
+  // 先读取 body（只能读一次）
+  const responseText = await response.text();
+
+  if (response.ok) {
+    try {
+      const data = JSON.parse(responseText) as { result?: { uuid?: string; name?: string } };
+      return NextResponse.json({ ok: true, databaseId: data.result?.uuid, databaseName: data.result?.name });
+    } catch {
+      return NextResponse.json({ ok: false, error: "创建 D1 数据库返回了无效的响应" }, { status: 502 });
+    }
   }
-  const data = await response.json() as { result?: { uuid?: string; name?: string } };
-  return NextResponse.json({ ok: true, databaseId: data.result?.uuid, databaseName: data.result?.name });
+
+  // 如果创建失败，检查是否因为数据库已存在
+  if (responseText.includes("already exists") || responseText.includes("duplicate")) {
+    // 查询现有数据库列表，找到同名的
+    const listResponse = await cloudflareFetch(token, `/accounts/${accountId}/d1/database`);
+    if (listResponse.ok) {
+      const listData = await listResponse.json() as { result?: Array<{ uuid?: string; name?: string }> };
+      const existing = (listData.result || []).find(db => db.name === name);
+      if (existing?.uuid) {
+        return NextResponse.json({ ok: true, databaseId: existing.uuid, databaseName: existing.name, reused: true });
+      }
+    }
+  }
+
+  // 构建错误信息
+  let detail = "";
+  try {
+    const errorData = JSON.parse(responseText) as { errors?: Array<{ message?: string }> };
+    detail = errorData.errors?.[0]?.message || "";
+  } catch {
+    detail = responseText.slice(0, 300);
+  }
+
+  return NextResponse.json({
+    ok: false,
+    error: `创建 D1 数据库失败（HTTP ${response.status}）${detail ? `：${detail}` : ""}`,
+  }, { status: response.status });
 }
 
 // 执行 D1 SQL
@@ -141,55 +176,67 @@ async function handleD1Query(token: string, accountId: string, databaseId: strin
   return NextResponse.json({ ok: true, result: data.result });
 }
 
-// 部署 Worker
+// 部署 Worker（ES Module 格式，同时绑定 D1 和环境变量）
 async function handleDeployWorker(
   token: string,
   accountId: string,
   workerName: string,
   code: string,
-  bindings: Record<string, unknown>
+  options: {
+    d1DatabaseId?: string;
+    wxpusherSpt?: string;
+    siteOrigin?: string;
+  }
 ): Promise<NextResponse> {
-  // 先上传 Worker 脚本
-  const uploadResponse = await cloudflareFetch(token, `/accounts/${accountId}/workers/scripts/${workerName}`, {
+  const bindings: Array<Record<string, unknown>> = [];
+
+  // D1 绑定
+  if (options.d1DatabaseId) {
+    bindings.push({
+      name: "DB",
+      type: "d1",
+      id: options.d1DatabaseId,
+    });
+  }
+
+  // 环境变量（secrets）
+  if (options.wxpusherSpt) {
+    bindings.push({
+      name: "WXPUSHER_SPT",
+      type: "secret_text",
+      text: options.wxpusherSpt,
+    });
+  }
+  if (options.siteOrigin) {
+    bindings.push({
+      name: "SITE_ORIGIN",
+      type: "plain_text",
+      text: options.siteOrigin,
+    });
+  }
+
+  // 使用 multipart/form-data 上传 ES Module Worker
+  const formData = new FormData();
+  formData.append("metadata", JSON.stringify({
+    main_module: "worker.js",
+    bindings,
+    compatibility_date: "2024-01-01",
+  }));
+  formData.append("worker.js", new Blob([code], { type: "application/javascript+module" }), "worker.js");
+
+  const uploadResponse = await fetch(`${CLOUDFLARE_API}/accounts/${accountId}/workers/scripts/${workerName}`, {
     method: "PUT",
     headers: {
-      "Content-Type": "application/javascript",
+      Authorization: `Bearer ${token}`,
     },
-    body: code,
+    body: formData,
   });
+
   if (!uploadResponse.ok) {
     return NextResponse.json({ ok: false, error: await upstreamMessage(uploadResponse, "上传 Worker 脚本") }, { status: uploadResponse.status });
   }
 
-  // 设置环境变量（secrets）
-  for (const [key, value] of Object.entries(bindings)) {
-    if (key === "DB") continue; // D1 绑定单独处理
-    const secretResponse = await cloudflareFetch(token, `/accounts/${accountId}/workers/scripts/${workerName}/secrets`, {
-      method: "PUT",
-      body: JSON.stringify({ name: key, text: String(value), type: "secret_text" }),
-    });
-    if (!secretResponse.ok) {
-      console.warn(`设置环境变量 ${key} 失败:`, await secretResponse.text());
-    }
-  }
-
   return NextResponse.json({ ok: true, workerName });
-}
-
-// 绑定 D1 到 Worker
-async function handleBindD1(token: string, accountId: string, workerName: string, databaseId: string): Promise<NextResponse> {
-  const response = await cloudflareFetch(token, `/accounts/${accountId}/workers/scripts/${workerName}/bindings`, {
-    method: "PUT",
-    body: JSON.stringify({
-      name: "DB",
-      type: "d1",
-      d1_database_id: databaseId,
-    }),
-  });
-  if (!response.ok) {
-    return NextResponse.json({ ok: false, error: await upstreamMessage(response, "绑定 D1 数据库") }, { status: response.status });
-  }
-  return NextResponse.json({ ok: true });
 }
 
 // 设置 Cron 触发器
@@ -242,18 +289,12 @@ export async function POST(request: Request): Promise<NextResponse> {
       if (!code || code.length > 500_000) return NextResponse.json({ ok: false, error: "Worker 代码无效。" }, { status: 400 });
       const wxpusherSpt = cleanSpt(payload.wxpusherSpt);
       const siteOrigin = typeof payload.siteOrigin === "string" ? payload.siteOrigin.trim() : "";
+      const d1DatabaseId = typeof payload.d1DatabaseId === "string" ? payload.d1DatabaseId.trim() : "";
       return await handleDeployWorker(token, accountId, workerName, code, {
-        WXPUSHER_SPT: wxpusherSpt,
-        SITE_ORIGIN: siteOrigin,
+        d1DatabaseId,
+        wxpusherSpt,
+        siteOrigin,
       });
-    }
-
-    if (payload.action === "bind_d1") {
-      const workerName = cleanWorkerName(payload.workerName);
-      if (!workerName) return NextResponse.json({ ok: false, error: "Worker 名称不合法。" }, { status: 400 });
-      const databaseId = typeof payload.d1DatabaseId === "string" ? payload.d1DatabaseId.trim() : "";
-      if (!databaseId) return NextResponse.json({ ok: false, error: "数据库 ID 不合法。" }, { status: 400 });
-      return await handleBindD1(token, accountId, workerName, databaseId);
     }
 
     if (payload.action === "set_cron") {

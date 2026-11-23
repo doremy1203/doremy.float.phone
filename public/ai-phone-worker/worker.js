@@ -1,58 +1,29 @@
 // AI Phone Cloudflare Worker - 离线推送与主动消息
 // 部署到用户自己的 Cloudflare 账户，替代 Supabase Edge Functions
 
-interface Env {
-  DB: D1Database;
-  WXPUSHER_SPT?: string;
-  SITE_ORIGIN?: string;
-}
-
-interface PushMessage {
-  id?: string;
-  user_id: string;
-  title: string;
-  content: string;
-  url?: string;
-  session_id?: string;
-  character_name?: string;
-  created_at?: string;
-  delivered?: boolean;
-}
-
-interface ScheduledMessage {
-  id?: string;
-  user_id: string;
-  title: string;
-  content: string;
-  url?: string;
-  scheduled_for: string;
-  created_at?: string;
-  sent?: boolean;
-}
-
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "content-type, x-ai-phone-service-key, x-ai-phone-origin",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
 };
 
-function json(data: unknown, status = 200): Response {
+function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: { ...CORS_HEADERS, "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
 }
 
-function cleanText(value: unknown, max: number): string {
+function cleanText(value, max) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
-function generateId(): string {
+function generateId() {
   return crypto.randomUUID();
 }
 
 // WxPusher 推送
-async function sendWxPusher(env: Env, title: string, content: string, url?: string): Promise<{ ok: boolean; error?: string }> {
+async function sendWxPusher(env, title, content, url) {
   const spt = env.WXPUSHER_SPT;
   if (!spt) return { ok: false, error: "未配置 WxPusher SPT" };
 
@@ -67,7 +38,7 @@ async function sendWxPusher(env: Env, title: string, content: string, url?: stri
         url: url || env.SITE_ORIGIN || undefined,
       }),
     });
-    const data = await response.json() as { code?: number; msg?: string };
+    const data = await response.json();
     if (data.code === 1000) return { ok: true };
     return { ok: false, error: data.msg || "WxPusher 推送失败" };
   } catch (err) {
@@ -76,7 +47,7 @@ async function sendWxPusher(env: Env, title: string, content: string, url?: stri
 }
 
 // 保存消息到 D1
-async function saveMessage(env: Env, msg: PushMessage): Promise<void> {
+async function saveMessage(env, msg) {
   const id = msg.id || generateId();
   const now = new Date().toISOString();
   await env.DB.prepare(
@@ -96,7 +67,7 @@ async function saveMessage(env: Env, msg: PushMessage): Promise<void> {
 }
 
 // 保存定时消息
-async function saveScheduledMessage(env: Env, msg: ScheduledMessage): Promise<void> {
+async function saveScheduledMessage(env, msg) {
   const id = msg.id || generateId();
   const now = new Date().toISOString();
   await env.DB.prepare(
@@ -115,11 +86,11 @@ async function saveScheduledMessage(env: Env, msg: ScheduledMessage): Promise<vo
 }
 
 // 处理待发送的定时消息（由 Cron 触发）
-async function processScheduledMessages(env: Env): Promise<void> {
+async function processScheduledMessages(env) {
   const now = new Date().toISOString();
   const { results } = await env.DB.prepare(
     `SELECT * FROM scheduled_messages WHERE sent = 0 AND scheduled_for <= ? LIMIT 10`
-  ).bind(now).all<ScheduledMessage & { id: string }>();
+  ).bind(now).all();
 
   for (const msg of results || []) {
     const pushResult = await sendWxPusher(env, msg.title, msg.content, msg.url);
@@ -132,7 +103,7 @@ async function processScheduledMessages(env: Env): Promise<void> {
 }
 
 // 健康检查
-async function handleHealth(env: Env): Promise<Response> {
+async function handleHealth(env) {
   try {
     await env.DB.prepare("SELECT 1").first();
     return json({
@@ -148,16 +119,9 @@ async function handleHealth(env: Env): Promise<Response> {
 }
 
 // 发送即时推送
-async function handleSend(env: Env, request: Request): Promise<Response> {
+async function handleSend(env, request) {
   try {
-    const body = await request.json() as {
-      user_id?: string;
-      title?: string;
-      content?: string;
-      url?: string;
-      session_id?: string;
-      character_name?: string;
-    };
+    const body = await request.json();
 
     const title = cleanText(body.title, 100);
     const content = cleanText(body.content, 500);
@@ -165,7 +129,7 @@ async function handleSend(env: Env, request: Request): Promise<Response> {
       return json({ ok: false, error: "标题和内容不能为空" }, 400);
     }
 
-    const msg: PushMessage = {
+    const msg = {
       user_id: cleanText(body.user_id, 64) || "owner",
       title,
       content,
@@ -190,15 +154,9 @@ async function handleSend(env: Env, request: Request): Promise<Response> {
 }
 
 // 预约定时推送
-async function handleSchedule(env: Env, request: Request): Promise<Response> {
+async function handleSchedule(env, request) {
   try {
-    const body = await request.json() as {
-      user_id?: string;
-      title?: string;
-      content?: string;
-      url?: string;
-      scheduled_for?: string;
-    };
+    const body = await request.json();
 
     const title = cleanText(body.title, 100);
     const content = cleanText(body.content, 500);
@@ -214,7 +172,7 @@ async function handleSchedule(env: Env, request: Request): Promise<Response> {
       return json({ ok: false, error: "预约时间格式无效" }, 400);
     }
 
-    const msg: ScheduledMessage = {
+    const msg = {
       user_id: cleanText(body.user_id, 64) || "owner",
       title,
       content,
@@ -230,7 +188,7 @@ async function handleSchedule(env: Env, request: Request): Promise<Response> {
 }
 
 // 获取消息历史
-async function handleHistory(env: Env, request: Request): Promise<Response> {
+async function handleHistory(env, request) {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 100);
   const offset = Math.max(parseInt(url.searchParams.get("offset") || "0", 10), 0);
@@ -238,7 +196,7 @@ async function handleHistory(env: Env, request: Request): Promise<Response> {
   try {
     const { results } = await env.DB.prepare(
       `SELECT * FROM messages ORDER BY created_at DESC LIMIT ? OFFSET ?`
-    ).bind(limit, offset).all<PushMessage>();
+    ).bind(limit, offset).all();
 
     return json({ ok: true, messages: results || [], limit, offset });
   } catch (err) {
@@ -248,7 +206,7 @@ async function handleHistory(env: Env, request: Request): Promise<Response> {
 
 // 主请求处理
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request, env, ctx) {
     // CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: CORS_HEADERS });
@@ -296,7 +254,7 @@ export default {
   },
 
   // Cron 触发器：每分钟检查定时消息
-  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event, env, ctx) {
     ctx.waitUntil(processScheduledMessages(env));
   },
 };
