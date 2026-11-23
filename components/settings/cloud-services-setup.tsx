@@ -8,7 +8,7 @@
 // Token 与取回的 key 经站点代理透传，不存储不记录。
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import { Check, CloudUpload, ExternalLink, Loader2, MessageSquare, Satellite } from "lucide-react";
+import { Check, CloudUpload, ExternalLink, Loader2, MessageSquare, Satellite, Zap } from "lucide-react";
 import {
     isCloudBackupConfigured,
     loadCloudBackupConfig,
@@ -32,6 +32,7 @@ import { getWeixinCloudDeployedAt, markWeixinCloudDeployed, savePushCloudSchedul
 import { Input, Select } from "@/components/ui/form";
 
 const SUPABASE_TOKENS_URL = "https://supabase.com/dashboard/account/tokens";
+const CLOUDFLARE_TOKENS_URL = "https://dash.cloudflare.com/profile/api-tokens";
 
 /** 设置页「云服务部署」独立条目的整页形态。 */
 export function CloudServicesPage() {
@@ -163,11 +164,22 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
     // 清空存量预约：规则删了还在发消息时的唯一解（存量任务散落在多种前缀下，逐条列举必漏）
     const [purgeOpen, setPurgeOpen] = useState(false);
     const [purging, setPurging] = useState(false);
+    // Cloudflare Worker 部署
+    const [cfToken, setCfToken] = useState("");
+    const [cfAccountId, setCfAccountId] = useState("");
+    const [cfWorkerName, setCfWorkerName] = useState("ai-phone-push");
+    const [cfSpt, setCfSpt] = useState("");
+    const [cfDeploying, setCfDeploying] = useState(false);
+    const [cfDeployed, setCfDeployed] = useState(false);
+    const [cfDialogOpen, setCfDialogOpen] = useState(false);
 
     useEffect(() => {
         setCloudReady(isCloudBackupConfigured(loadCloudBackupConfig()));
         setPushActive(isPersonalPushCloudActive());
         setWeixinDeployed(Boolean(getWeixinCloudDeployedAt()));
+        // 检查 Cloudflare 是否已部署
+        const cfState = localStorage.getItem("cf_worker_deployed");
+        setCfDeployed(cfState === "true");
     }, []);
 
     const configuredUrl = normalizeBackupUrl(loadCloudBackupConfig().url);
@@ -177,6 +189,115 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
         setPushActive(isPersonalPushCloudActive());
         setWeixinDeployed(Boolean(getWeixinCloudDeployedAt()));
         onConfigChanged?.();
+    };
+
+    // Cloudflare Worker 部署
+    const callCloudflareAdmin = async <T,>(payload: Record<string, unknown>): Promise<T> => {
+        const res = await fetch("/api/cloudflare-admin", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json() as T & { ok?: boolean; error?: string };
+        if (!res.ok || !data.ok) {
+            throw new Error(data.error || `Cloudflare API 错误 (HTTP ${res.status})`);
+        }
+        return data;
+    };
+
+    const runCloudflareDeploy = async () => {
+        if (cfDeploying || !cfToken.trim() || !cfAccountId.trim() || !cfSpt.trim()) return;
+        setCfDeploying(true);
+        setResultDialog(null);
+        const done: string[] = [];
+        try {
+            // 1. 验证 Token
+            setProgress("验证 Cloudflare Token…");
+            await callCloudflareAdmin({ action: "verify_token", token: cfToken });
+            done.push("Token 验证通过");
+
+            // 2. 创建 D1 数据库
+            setProgress("创建 D1 数据库…");
+            const d1Result = await callCloudflareAdmin<{ databaseId: string; databaseName: string }>({
+                action: "create_d1",
+                token: cfToken,
+                accountId: cfAccountId,
+                workerName: cfWorkerName,
+            });
+            done.push(`D1 数据库: ${d1Result.databaseName}`);
+            const databaseId = d1Result.databaseId;
+
+            // 3. 初始化数据库表
+            setProgress("初始化数据库表…");
+            const schemaRes = await fetch("/ai-phone-worker/schema.sql");
+            const schemaSql = await schemaRes.text();
+            await callCloudflareAdmin({
+                action: "d1_query",
+                token: cfToken,
+                accountId: cfAccountId,
+                d1DatabaseId: databaseId,
+                sql: schemaSql,
+            });
+            done.push("数据库表已创建");
+
+            // 4. 部署 Worker
+            setProgress("部署 Worker…");
+            const workerRes = await fetch("/ai-phone-worker/worker.js");
+            const workerCode = await workerRes.text();
+            await callCloudflareAdmin({
+                action: "deploy_worker",
+                token: cfToken,
+                accountId: cfAccountId,
+                workerName: cfWorkerName,
+                code: workerCode,
+                wxpusherSpt: cfSpt,
+                siteOrigin: window.location.origin,
+            });
+            done.push(`Worker: ${cfWorkerName}`);
+
+            // 5. 绑定 D1
+            setProgress("绑定 D1 到 Worker…");
+            await callCloudflareAdmin({
+                action: "bind_d1",
+                token: cfToken,
+                accountId: cfAccountId,
+                workerName: cfWorkerName,
+                d1DatabaseId: databaseId,
+            });
+            done.push("D1 绑定完成");
+
+            // 6. 设置 Cron
+            setProgress("设置 Cron 触发器…");
+            await callCloudflareAdmin({
+                action: "set_cron",
+                token: cfToken,
+                accountId: cfAccountId,
+                workerName: cfWorkerName,
+                cron: "* * * * *",
+            });
+            done.push("Cron: 每分钟检查定时消息");
+
+            // 保存部署状态
+            localStorage.setItem("cf_worker_deployed", "true");
+            localStorage.setItem("cf_worker_name", cfWorkerName);
+            localStorage.setItem("cf_account_id", cfAccountId);
+            localStorage.setItem("cf_d1_id", databaseId);
+            setCfDeployed(true);
+            setCfDialogOpen(false);
+            setResultDialog({
+                title: "Cloudflare Worker 部署完成",
+                text: `${done.join("\n")}\n\nWorker 地址: https://${cfWorkerName}.${cfAccountId}.workers.dev\n\n请记存 D1 数据库 ID: ${databaseId}`,
+            });
+        } catch (err) {
+            setCfDialogOpen(false);
+            setResultDialog({
+                title: "Cloudflare 部署失败",
+                text: err instanceof Error ? err.message : String(err),
+            });
+        } finally {
+            setProgress("");
+            setCfDeploying(false);
+        }
     };
 
     const openScopeDialog = async () => {
@@ -614,6 +735,95 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                 {statusCard(<Satellite size={17} strokeWidth={1.9} />, "离线推送", pushActive, "已部署到你的 Supabase")}
             </div>
 
+            {/* Cloudflare Worker 部署（替代方案） */}
+            <div className="mt-4 border-t border-gray-200 pt-4">
+                <div className="mb-3 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-gray-700">或使用 Cloudflare Worker</h3>
+                    {cfDeployed && <span className="text-[11px] font-semibold text-green-600">已部署</span>}
+                </div>
+
+                {/* Cloudflare 令牌页按钮 */}
+                <div className="flex flex-col items-center justify-center gap-2">
+                    <button
+                        type="button"
+                        className="inline-flex items-center justify-center gap-1.5 rounded-[20px] bg-orange-500 px-6 py-2.5 text-sm font-bold text-white shadow-sm transition-all hover:bg-orange-600 hover:shadow-md active:scale-95 focus:outline-none"
+                        onClick={() => window.open(CLOUDFLARE_TOKENS_URL, "_blank", "noopener")}
+                    >
+                        <ExternalLink size={15} strokeWidth={1.8} />
+                        打开 Cloudflare 令牌页
+                    </button>
+                    <p className="text-center text-[calc(11px*var(--app-text-scale,1))] font-medium leading-relaxed text-gray-400">
+                        需要权限: D1 Edit、Worker Script Edit、Account Setting Read<br />
+                        创建 Token 后复制粘贴到下方
+                    </p>
+                </div>
+
+                {/* Cloudflare 部署表单 */}
+                {!cfDeployed ? (
+                    <div className="mt-3 flex flex-col gap-2">
+                        <Input
+                            type="password"
+                            value={cfToken}
+                            onChange={(e) => setCfToken(e.target.value)}
+                            placeholder="Cloudflare API Token"
+                            spellCheck={false}
+                        />
+                        <Input
+                            type="text"
+                            value={cfAccountId}
+                            onChange={(e) => setCfAccountId(e.target.value)}
+                            placeholder="Account ID (32位十六进制)"
+                            spellCheck={false}
+                        />
+                        <Input
+                            type="text"
+                            value={cfWorkerName}
+                            onChange={(e) => setCfWorkerName(e.target.value)}
+                            placeholder="Worker 名称 (如: ai-phone-push)"
+                            spellCheck={false}
+                        />
+                        <Input
+                            type="password"
+                            value={cfSpt}
+                            onChange={(e) => setCfSpt(e.target.value)}
+                            placeholder="WxPusher SPT (SPT_...)"
+                            spellCheck={false}
+                        />
+                        <button
+                            type="button"
+                            className="mt-2 inline-flex items-center justify-center gap-1.5 rounded-[16px] bg-black px-6 py-2.5 text-sm font-bold text-white shadow-sm transition-all hover:bg-gray-800 hover:shadow-md active:scale-95 focus:outline-none disabled:opacity-40"
+                            onClick={() => setCfDialogOpen(true)}
+                            disabled={!cfToken.trim() || !cfAccountId.trim() || !cfSpt.trim() || cfDeploying}
+                        >
+                            {cfDeploying ? <Loader2 size={15} className="animate-spin" /> : <Zap size={15} strokeWidth={1.8} />}
+                            {cfDeploying ? "部署中…" : "一键部署到 Cloudflare"}
+                        </button>
+                    </div>
+                ) : (
+                    <div className="mt-3 rounded-[14px] bg-green-50 p-3">
+                        <p className="text-sm text-green-700">
+                            ✓ Worker 已部署: {localStorage.getItem("cf_worker_name") || "ai-phone-push"}<br />
+                            ✓ D1 数据库已绑定<br />
+                            ✓ Cron 定时任务已启用<br />
+                            ✓ WxPusher 推送已配置
+                        </p>
+                        <button
+                            type="button"
+                            className="mt-2 text-xs text-green-600 underline"
+                            onClick={() => {
+                                localStorage.removeItem("cf_worker_deployed");
+                                localStorage.removeItem("cf_worker_name");
+                                localStorage.removeItem("cf_account_id");
+                                localStorage.removeItem("cf_d1_id");
+                                setCfDeployed(false);
+                            }}
+                        >
+                            重新部署
+                        </button>
+                    </div>
+                )}
+            </div>
+
             {/* 排期管理：把服务端的主动消息摊开，按角色看清并逐条删。
                 刻意**不**用 pushActive 门控——原实现只在已部署时渲染，于是没部署的人
                 根本不知道有这个功能，用户报「找不到入口」时也无从判断是「没部署」
@@ -708,6 +918,57 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                                 disabled={purging}
                             >
                                 {purging ? <><Loader2 size={15} className="animate-spin" /> 清空中…</> : "确认清空"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Cloudflare 部署确认弹窗 */}
+            {cfDialogOpen && (
+                <div className="modal-overlay" data-ui="modal" onClick={() => { if (!cfDeploying) setCfDialogOpen(false); }}>
+                    <div
+                        className="modal-dialog"
+                        role="alertdialog"
+                        aria-modal="true"
+                        aria-label="部署 Cloudflare Worker"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="modal-body flex flex-col gap-3">
+                            <h3 className="modal-title">部署 Cloudflare Worker</h3>
+                            <div className="menu-desc !mt-0 rounded-[14px] bg-orange-50 px-3 py-2.5">
+                                <p className="text-orange-800">
+                                    将在你的 Cloudflare 账户中创建：<br />
+                                    • Worker: {cfWorkerName}<br />
+                                    • D1 数据库: {cfWorkerName}-db<br />
+                                    • Cron 触发器: 每分钟检查定时消息<br />
+                                    • 环境变量: WxPusher SPT<br /><br />
+                                    <strong>注意：</strong>此操作会消耗 Cloudflare 免费额度（每天 10 万次请求）。
+                                </p>
+                            </div>
+                            {progress && (
+                                <div className="rounded-[14px] bg-black/[0.03] px-3 py-2.5 text-sm">
+                                    <Loader2 size={14} className="mr-2 inline animate-spin" />
+                                    {progress}
+                                </div>
+                            )}
+                        </div>
+                        <div className="modal-footer">
+                            <button
+                                type="button"
+                                className="ui-btn ui-btn-outline"
+                                onClick={() => setCfDialogOpen(false)}
+                                disabled={cfDeploying}
+                            >
+                                取消
+                            </button>
+                            <button
+                                type="button"
+                                className={`ui-btn ui-btn-primary ${cfDeploying ? "is-busy" : ""}`}
+                                onClick={() => void runCloudflareDeploy()}
+                                disabled={cfDeploying}
+                            >
+                                {cfDeploying ? <><Loader2 size={15} className="animate-spin" /> 部署中…</> : "确认部署"}
                             </button>
                         </div>
                     </div>
