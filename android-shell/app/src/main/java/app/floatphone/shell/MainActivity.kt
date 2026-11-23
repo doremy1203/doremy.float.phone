@@ -1097,33 +1097,29 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         // 首帧主动请求一次 insets，确保启动即拿到状态栏高度（部分机型不会自动派发首次回调）。
         ViewCompat.requestApplyInsets(rootContainer)
 
-        webView.settings.apply {
+                webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
-            useWideViewPort = false
-            loadWithOverviewMode = false
-            setSupportZoom(false)
             builtInZoomControls = false
             displayZoomControls = false
-        }
-        webView.overScrollMode = View.OVER_SCROLL_NEVER
-        webView.isVerticalScrollBarEnabled = false
-        webView.isHorizontalScrollBarEnabled = false
-        webView.setInitialScale(100)
+            setSupportZoom(false)
+            textZoom = 100
             // 一起看本地解析服务通常是 http://127.0.0.1:8765；页面是 https，
             // WebView 默认会把这种混合内容拦掉，导致本地解析永远走不到。
             mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             allowFileAccess = false
             userAgentString = "$userAgentString FloatShell/$VERSION"
         }
+        webView.overScrollMode = View.OVER_SCROLL_NEVER
+        webView.isVerticalScrollBarEnabled = false
+        webView.isHorizontalScrollBarEnabled = false
         CookieManager.getInstance().setAcceptCookie(true)
         // The app embeds cross-site video players (notably Bilibili's official iframe).
         // Third-party cookies must be permitted for those embeds to retain supported session state.
         // This does not bypass platform login/permission checks; it only removes our WebView-level block.
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
-
         
             // 一起看本地解析服务通常是 http://127.0.0.1:8765；页面是 https，
             // WebView 默认会把这种混合内容拦掉，导致本地解析永远走不到。
