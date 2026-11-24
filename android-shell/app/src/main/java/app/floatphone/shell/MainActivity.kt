@@ -1102,10 +1102,6 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
             domStorageEnabled = true
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
-            builtInZoomControls = false
-            displayZoomControls = false
-            setSupportZoom(false)
-            textZoom = 100
             // 一起看本地解析服务通常是 http://127.0.0.1:8765；页面是 https，
             // WebView 默认会把这种混合内容拦掉，导致本地解析永远走不到。
             mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
