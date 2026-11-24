@@ -1108,9 +1108,6 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
             allowFileAccess = false
             userAgentString = "$userAgentString FloatShell/$VERSION"
         }
-        webView.overScrollMode = View.OVER_SCROLL_NEVER
-        webView.isVerticalScrollBarEnabled = false
-        webView.isHorizontalScrollBarEnabled = false
         CookieManager.getInstance().setAcceptCookie(true)
         // The app embeds cross-site video players (notably Bilibili's official iframe).
         // Third-party cookies must be permitted for those embeds to retain supported session state.
