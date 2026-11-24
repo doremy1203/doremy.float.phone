@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const read = path => readFile(new URL(path, import.meta.url), "utf8");
-const [app, runtime, observation, cloud, coordinator, scheduler, bailout, reply, queue, push, chatStorage, nativeBridge, nativeReceiver, chatRoom, mainApp, splashAnimation, builtinPrompts, debugPromptRegistry, debugPromptPanel, watchApp, moduleDiagnostics, runtimeDiagnostics, debugStore, checkinEngine, followUpService, shortTermAssembler] = await Promise.all([
+const [app, runtime, observation, cloud, coordinator, scheduler, bailout, reply, queue, push, chatStorage, nativeBridge, nativeReceiver, chatRoom, mainApp, builtinPrompts, debugPromptRegistry, debugPromptPanel, watchApp, moduleDiagnostics, runtimeDiagnostics, debugStore, checkinEngine, followUpService, shortTermAssembler] = await Promise.all([
   read("../components/life/life-engine-app.tsx"),
   read("../lib/life/life-runtime.ts"),
   read("../components/life/life-observation.tsx"),
@@ -18,7 +18,6 @@ const [app, runtime, observation, cloud, coordinator, scheduler, bailout, reply,
   read("../android-shell/app/src/main/java/app/floatphone/shell/NotificationReplyReceiver.kt"),
   read("../components/chat/chat-room.tsx"),
   read("../components/main-app.tsx"),
-  read("../components/splash-animation.tsx"),
   read("../lib/builtin-app-prompts.ts"),
   read("../components/debug-prompt-registry.ts"),
   read("../components/debug-prompt-panel.tsx"),
@@ -36,9 +35,8 @@ assert.match(app, /if \(liveSettings\.autoGenerateWeeklyPlans\)/);
 assert.match(app, /<LifeDiagnosticsPanel\s*\/>/);
 assert.match(mainApp, /installLifeScheduleProactiveScheduler/);
 assert.match(mainApp, /<LifeScheduleScheduler\s*\/>/);
-assert.match(mainApp, /className="app-root splash-root" onClick=\{ready \? onEnter : undefined\}/);
-assert.doesNotMatch(mainApp, /phone-shell splash-phone-screen" onClick=/);
-assert.match(splashAnimation, /splash-animation-stage/);
+assert.doesNotMatch(mainApp, /SplashAnimation/);
+assert.doesNotMatch(mainApp, /splash-root/);
 assert.match(scheduler, /if \(timer\) return \(\) => undefined/);
 assert.doesNotMatch(app, /splitLifeReplySegments/);
 assert.match(app, /preserveLifeDialogueSegments\(parsed\.dialogues\)/);

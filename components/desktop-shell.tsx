@@ -154,6 +154,8 @@ import { sendBrowserNotification } from "@/lib/browser-notification";
 import { canSendShellNotification, sendShellNotification } from "@/lib/shell-notify";
 import type { ChatSharePayload } from "@/lib/chat-share";
 import { completePendingMcpOAuthCallback } from "@/lib/tool-executor";
+import { isLockScreenActive, loadLockScreenConfig, LOCK_SCREEN_CONFIG_UPDATED_EVENT, LOCK_SCREEN_LOCK_NOW_EVENT, type LockScreenConfig } from "@/lib/lock-screen-storage";
+import { LockScreen } from "./lock-screen";
 import { LayoutGrid, LoaderCircle, RefreshCw } from "lucide-react";
 
 const EMOJI_FONTS = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla"';
@@ -1213,6 +1215,27 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [desktopReady, setDesktopReady] = useState(false);
   const [glassPaintPass, setGlassPaintPass] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
+  const [lockConfig, setLockConfig] = useState<LockScreenConfig>(() => loadLockScreenConfig());
+  const [locked, setLocked] = useState<boolean>(() => isLockScreenActive(loadLockScreenConfig()));
+  useEffect(() => {
+    const syncLockConfig = () => setLockConfig(loadLockScreenConfig());
+    const lockNow = () => setLocked(true);
+    window.addEventListener(LOCK_SCREEN_CONFIG_UPDATED_EVENT, syncLockConfig);
+    window.addEventListener(LOCK_SCREEN_LOCK_NOW_EVENT, lockNow);
+    const onVisibilityChange = () => {
+      const config = loadLockScreenConfig();
+      setLockConfig(config);
+      if (document.visibilityState === "hidden" && isLockScreenActive(config)) {
+        setLocked(true);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener(LOCK_SCREEN_CONFIG_UPDATED_EVENT, syncLockConfig);
+      window.removeEventListener(LOCK_SCREEN_LOCK_NOW_EVENT, lockNow);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
   const [activeApp, setActiveApp] = useState<DesktopIconId | null>(null);
   const [lifeFocusCharacterId, setLifeFocusCharacterId] = useState<string | null>(null);
   const [customApps, setCustomApps] = useState<InstalledCustomApp[]>([]);
@@ -5488,6 +5511,15 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                   clone keeps theme variables + glass effect selectors
                   (.phone-shell[data-icon-effect] etc.); follows pointer via ref */}
               <div ref={ghostRef} className="drag-ghost" />
+
+              {/* 锁屏：覆盖整个虚拟手机（含状态栏与已打开的应用） */}
+              {locked && (
+                <LockScreen
+                  config={lockConfig}
+                  fallbackBackground={wallpaperStyle}
+                  onUnlock={() => setLocked(false)}
+                />
+              )}
             </div>
           </div>
         </div>

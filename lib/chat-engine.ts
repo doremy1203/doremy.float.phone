@@ -29,7 +29,6 @@ import {
     isSessionStreamingEnabled,
     resolveMeetingInviteCardConfig,
     resolveSessionCharacterId,
-    buildChatTonePrompt,
 } from "./chat-storage";
 import { extractTextToolDirectiveText, stripMalformedTextToolDirectives, stripTextToolDirectives } from "./text-tool-protocol";
 import { applyWithProtectedAvatarDecisionMarkers, findUserAvatarChangeIntent } from "./chat-avatar-intent";
@@ -2047,10 +2046,9 @@ export async function buildChatPromptMessages(
 
     const languageOption = getCharacterLanguageOption(character.language);
     const languagePrompt = `【角色使用语言】${character.name}的聊天语言是${languageOption.label}（${languageOption.nativeLabel}）。每轮回复中的角色台词、动作与内心表达默认使用该语言并保持一致；用户明确要求切换语言时以用户要求为准，已有双语输出规则不受影响。`;
-    const characterTonePrompt = !session.isGroup ? buildChatTonePrompt(session.characterToneStyles) : "";
     llmMessages.push({
         role: "system",
-        content: [languagePrompt, characterTonePrompt].filter(Boolean).join("\n\n"),
+        content: languagePrompt,
     });
 
     // Tool-use policy: keep the model proactive for real app actions without forcing tools on ordinary conversation.
