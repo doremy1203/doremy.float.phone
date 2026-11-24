@@ -1942,6 +1942,108 @@
     color: var(--c-music-accent);
 }
 
+/* ── Import Playlist ── */
+.music-import-dialog {
+    max-width: 340px;
+}
+
+.music-import-qr-section {
+    align-items: center;
+    border-top: 1px solid var(--c-music-surface-solid);
+    padding-top: 16px;
+}
+
+.music-import-qr-wrap {
+    display: flex;
+    justify-content: center;
+    margin: 4px 0;
+}
+
+.music-import-qr-wrap img {
+    width: 168px;
+    height: 168px;
+    border-radius: 8px;
+    background: var(--c-music-white);
+}
+
+.music-import-link {
+    width: 100%;
+    text-align: center;
+    word-break: break-all;
+    user-select: text;
+    font-size: calc(9.5px*var(--app-text-scale,1));
+    color: var(--c-music-accent);
+    opacity: 0.7;
+}
+
+.music-import-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.music-import-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px;
+    border-radius: 10px;
+    background: var(--c-music-surface);
+}
+
+.music-import-item-cover {
+    flex: 0 0 38px;
+    width: 38px;
+    height: 38px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--c-music-surface-solid);
+}
+
+.music-import-item-cover img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.music-import-item-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.music-import-item-info b {
+    font-size: calc(11px*var(--app-text-scale,1));
+    font-weight: 500;
+    color: var(--c-music-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.music-import-item-info span {
+    font-size: calc(9.5px*var(--app-text-scale,1));
+    color: var(--c-music-accent);
+    opacity: 0.7;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.music-import-item > button {
+    flex-shrink: 0;
+    padding: 4px 6px;
+    border: none;
+    background: none;
+    color: var(--c-music-liked);
+    font-family: inherit;
+    font-size: calc(10px*var(--app-text-scale,1));
+    cursor: pointer;
+}
+
 /* ── QR Login ── */
 .music-qr-section {
     border-top: 1px solid var(--c-music-surface-solid);
@@ -4747,6 +4849,30 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.music-mine-cover-card.music-mine-import-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    border: 1px dashed var(--c-music-accent-dim);
+    background: var(--c-music-surface);
+}
+
+.music-mine-cover-card.music-mine-import-card span {
+    position: static;
+    padding: 0;
+    background: none;
+    color: var(--c-music-accent);
+    max-width: 100%;
+}
+
+.music-mine-import-plus {
+    font-size: calc(20px*var(--app-text-scale,1));
+    line-height: 1;
+    opacity: 0.65;
 }
 
 .music-mine-tabs {

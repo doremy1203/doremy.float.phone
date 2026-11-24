@@ -583,6 +583,71 @@ export async function getPlaylistDetail(playlistId: number): Promise<NeteasePlay
     } catch { return null; }
 }
 
+// ── Imported playlists (local cache) ──
+
+const IMPORTED_PLAYLISTS_KEY = "ai_phone_music_imported_playlists_v1";
+registerKvMigration(IMPORTED_PLAYLISTS_KEY);
+
+/** Accept a Netease playlist link or bare ID; returns the numeric playlist id. */
+export function parseNeteasePlaylistId(input: string): number | null {
+    const text = input.trim();
+    if (!text) return null;
+    if (/^\d+$/.test(text)) return Number(text);
+    const byQuery = text.match(/[?&#]id=(\d+)/);
+    if (byQuery) return Number(byQuery[1]);
+    const byPath = text.match(/\/playlist\/(\d+)/);
+    if (byPath) return Number(byPath[1]);
+    return null;
+}
+
+/** Canonical share link for a playlist (what the QR code encodes). */
+export function neteasePlaylistShareUrl(playlistId: number): string {
+    return `https://music.163.com/playlist?id=${playlistId}`;
+}
+
+function isImportedPlaylist(x: unknown): x is NeteasePlaylist {
+    if (!x || typeof x !== "object") return false;
+    const p = x as NeteasePlaylist;
+    return typeof p.id === "number" && Number.isFinite(p.id) && typeof p.name === "string";
+}
+
+export function loadImportedPlaylists(): NeteasePlaylist[] {
+    try {
+        const raw = kvGet(IMPORTED_PLAYLISTS_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw) as unknown;
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter(isImportedPlaylist).map(p => ({
+            id: p.id,
+            name: p.name,
+            coverUrl: typeof p.coverUrl === "string" ? p.coverUrl : "",
+            trackCount: typeof p.trackCount === "number" ? p.trackCount : 0,
+            creator: typeof p.creator === "string" ? p.creator : "",
+            playCount: typeof p.playCount === "number" ? p.playCount : undefined,
+            subscribed: true,
+        }));
+    } catch {
+        return [];
+    }
+}
+
+export function saveImportedPlaylists(playlists: NeteasePlaylist[]): void {
+    kvSet(IMPORTED_PLAYLISTS_KEY, JSON.stringify(playlists));
+}
+
+/** Add or replace an imported playlist, newest first. */
+export function upsertImportedPlaylist(playlist: NeteasePlaylist): NeteasePlaylist[] {
+    const next = [playlist, ...loadImportedPlaylists().filter(p => p.id !== playlist.id)];
+    saveImportedPlaylists(next);
+    return next;
+}
+
+export function removeImportedPlaylist(playlistId: number): NeteasePlaylist[] {
+    const next = loadImportedPlaylists().filter(p => p.id !== playlistId);
+    saveImportedPlaylists(next);
+    return next;
+}
+
 function mapComment(c: NeteaseApiRecord): NeteaseComment {
     return {
         id: c.commentId ?? c.id ?? 0,

@@ -2,6 +2,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
+import QRCode from "qrcode";
 import {
     loadAllTracks, saveTrack, deleteTrack,
     generateTrackId, parseFilename, getAudioDuration,
@@ -17,6 +18,8 @@ import {
     getDailyRecommendSongs, getHotSearchDetail, getPersonalizedPlaylists,
     getRecommendResource, getToplists, getUserRecordWithCounts,
     getPlaylistDetail, getUserDetail, subscribePlaylist,
+    parseNeteasePlaylistId, neteasePlaylistShareUrl,
+    loadImportedPlaylists, upsertImportedPlaylist, removeImportedPlaylist,
     getDjSublist, getDjPrograms, getAlbumSublist, getAlbumTracks,
     getUserEvents, getRecentSongs, getIntelligenceList,
     type NeteaseHotSearch, type NeteaseSearchResult,
@@ -46,6 +49,16 @@ export default function MusicApp({ onClose }: Props) {
     const [dailyView, setDailyView] = useState<NeteaseSearchResult[] | null>(null);
     const [playlists, setPlaylists] = useState<NeteasePlaylist[]>([]);
     const [playlistsLoading, setPlaylistsLoading] = useState(true);
+    const [importedPlaylists, setImportedPlaylists] = useState<NeteasePlaylist[]>(() => loadImportedPlaylists());
+    const [showImport, setShowImport] = useState(false);
+
+    useEffect(() => {
+        let alive = true;
+        hydrateKvDb()
+            .then(() => { if (alive) setImportedPlaylists(loadImportedPlaylists()); })
+            .catch(() => undefined);
+        return () => { alive = false; };
+    }, []);
     const [musicToast, setMusicToast] = useState<string | null>(null);
     const [pendingPlayTrackId, setPendingPlayTrackId] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -277,6 +290,25 @@ export default function MusicApp({ onClose }: Props) {
         }
     };
 
+    // Imported playlists stay visible even when the account has none / is logged out.
+    const visiblePlaylists = (() => {
+        const apiIds = new Set(playlists.map(pl => pl.id));
+        const imported = importedPlaylists.filter(pl => !apiIds.has(pl.id));
+        return imported.length > 0 ? [...imported, ...playlists] : playlists;
+    })();
+
+    const handleImportPlaylist = (pl: NeteasePlaylist) => {
+        setImportedPlaylists(upsertImportedPlaylist(pl));
+        setTab("mine");
+        setActivePlaylist(pl);
+    };
+
+    const handleRemoveImportedPlaylist = (pl: NeteasePlaylist) => {
+        setImportedPlaylists(removeImportedPlaylist(pl.id));
+        if (activePlaylist?.id === pl.id) setActivePlaylist(null);
+        showMusicToast(`已移除《${pl.name}》`);
+    };
+
     return (
         <div className="music-app" style={appBgStyle(bgCfg)} {...(player.currentTrack ? { "data-nowbar": "" } : {})}>
             {customCss && <SessionCustomCSS css={customCss} scope=".music-app" />}
@@ -335,7 +367,7 @@ export default function MusicApp({ onClose }: Props) {
                     onPlayAll={handlePlayAllNetease}
                     activePlaylist={activePlaylist}
                     setActivePlaylist={setActivePlaylist}
-                    playlists={playlists}
+                    playlists={visiblePlaylists}
                     loading={playlistsLoading}
                     onToast={showMusicToast}
                 />
@@ -358,11 +390,12 @@ export default function MusicApp({ onClose }: Props) {
                     onPlayAll={handlePlayAllNetease}
                     activePlaylist={activePlaylist}
                     setActivePlaylist={setActivePlaylist}
-                    playlists={playlists}
+                    playlists={visiblePlaylists}
                     loading={playlistsLoading}
                     onToast={showMusicToast}
                     onGoLocal={() => setTab("local")}
                     onOpenSettings={() => setShowSettings(true)}
+                    onOpenImport={() => setShowImport(true)}
                 />
             )}
 
@@ -491,6 +524,17 @@ export default function MusicApp({ onClose }: Props) {
                         <MusicSettingsTab onBack={() => setShowSettings(false)} onSaved={onSettingsSaved} />
                     </div>
                 </div>
+            )}
+
+            {/* Import Playlist Modal */}
+            {showImport && (
+                <PlaylistImportSheet
+                    imported={importedPlaylists}
+                    onClose={() => setShowImport(false)}
+                    onImported={handleImportPlaylist}
+                    onRemove={handleRemoveImportedPlaylist}
+                    onToast={showMusicToast}
+                />
             )}
 
             {/* CSS Editor Modal */}
@@ -715,7 +759,7 @@ function DailySongsPage({ songs, player, formatTime, onPlayNetease, onPlayAll }:
 }
 
 // ── Mine Tab（网易云「我的」页式排版：全部真数据，拿不到的板块直接隐藏） ──
-function MineTab({ player, formatTime, onPlayNetease, onPlayAll, activePlaylist, setActivePlaylist, playlists, loading, onToast, onGoLocal, onOpenSettings }: {
+function MineTab({ player, formatTime, onPlayNetease, onPlayAll, activePlaylist, setActivePlaylist, playlists, loading, onToast, onGoLocal, onOpenSettings, onOpenImport }: {
     player: MusicControlsValue;
     formatTime: (s: number) => string;
     onPlayNetease: (r: NeteaseSearchResult) => void;
@@ -727,6 +771,7 @@ function MineTab({ player, formatTime, onPlayNetease, onPlayAll, activePlaylist,
     onToast: (text: string) => void;
     onGoLocal: () => void;
     onOpenSettings: () => void;
+    onOpenImport: () => void;
 }) {
     const [weekRecords, setWeekRecords] = useState<NeteasePlayRecord[]>(() => readMusicCache("music-user-week-records", []));
     const [userDetail, setUserDetail] = useState<NeteaseUserDetail | null>(() => readMusicCache("music-user-detail", null));
@@ -898,16 +943,18 @@ function MineTab({ player, formatTime, onPlayNetease, onPlayAll, activePlaylist,
             </div>
 
             {/* 歌单封面横滑 */}
-            {playlists.length > 0 && (
-                <div className="music-mine-covers">
-                    {playlists.slice(0, 10).map(pl => (
-                        <div key={pl.id} className="music-mine-cover-card" onClick={() => setActivePlaylist(pl)}>
-                            {pl.coverUrl && <img src={pl.coverUrl} alt="" />}
-                            <span>{pl.name}</span>
-                        </div>
-                    ))}
+            <div className="music-mine-covers">
+                <div className="music-mine-cover-card music-mine-import-card" onClick={onOpenImport}>
+                    <span className="music-mine-import-plus">＋</span>
+                    <span>导入歌单</span>
                 </div>
-            )}
+                {playlists.slice(0, 10).map(pl => (
+                    <div key={pl.id} className="music-mine-cover-card" onClick={() => setActivePlaylist(pl)}>
+                        {pl.coverUrl && <img src={pl.coverUrl} alt="" />}
+                        <span>{pl.name}</span>
+                    </div>
+                ))}
+            </div>
 
             {/* 顶层 tabs：播客/笔记拿不到内容就不出现 */}
             {(djRadios.length > 0 || userEvents.length > 0) && (
@@ -1069,7 +1116,7 @@ function MineTab({ player, formatTime, onPlayNetease, onPlayAll, activePlaylist,
             )}
 
             {playlists.length === 0 && !loading && (
-                <div className="music-empty"><div className="music-empty-text">没有云端歌单，请先在设置中登录网易云账号</div></div>
+                <div className="music-empty"><div className="music-empty-text">还没有歌单，可以先导入，或在设置中登录网易云账号</div></div>
             )}
         </div>
     );
@@ -1476,7 +1523,7 @@ function PlaylistsTab({ player, formatTime, onPlayNetease, onPlayAll, activePlay
                         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round"><rect x="2" y="3" width="20" height="18" rx="2" /><path d="M8 12h8M8 16h5" /></svg>
                     </div>
                     <div className="music-empty-text">没有歌单</div>
-                    <div className="music-empty-text" style={{ fontSize: "calc(11px*var(--app-text-scale,1))", opacity: 0.5 }}>请先在设置中登录网易云账号</div>
+                    <div className="music-empty-text" style={{ fontSize: "calc(11px*var(--app-text-scale,1))", opacity: 0.5 }}>可导入网易云歌单，或在设置中登录账号</div>
                 </div>
             ) : (
                 <div className="music-playlist-grid">
@@ -1495,7 +1542,141 @@ function PlaylistsTab({ player, formatTime, onPlayNetease, onPlayAll, activePlay
     );
 }
 
-// ── Settings Tab ──
+// ── Import Playlist Sheet ──
+function PlaylistImportSheet({ imported, onClose, onImported, onRemove, onToast }: {
+    imported: NeteasePlaylist[];
+    onClose: () => void;
+    onImported: (pl: NeteasePlaylist) => void;
+    onRemove: (pl: NeteasePlaylist) => void;
+    onToast: (text: string) => void;
+}) {
+    const [draft, setDraft] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState("");
+    const [qr, setQr] = useState<string | null>(null);
+    const playlistId = parseNeteasePlaylistId(draft);
+    const shareUrl = playlistId ? neteasePlaylistShareUrl(playlistId) : "";
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!shareUrl) {
+            setQr(null);
+            return;
+        }
+        QRCode.toDataURL(shareUrl, { width: 240, margin: 2 })
+            .then(url => { if (!cancelled) setQr(url); })
+            .catch(() => { if (!cancelled) setQr(null); });
+        return () => { cancelled = true; };
+    }, [shareUrl]);
+
+    const handleImport = async () => {
+        if (!playlistId) {
+            setError("请输入正确的歌单链接或 ID");
+            return;
+        }
+        setBusy(true);
+        setError("");
+        try {
+            const detail = await getPlaylistDetail(playlistId);
+            if (!detail) {
+                setError("读取歌单失败，请检查链接或 API 地址");
+                return;
+            }
+            onImported({
+                id: detail.id,
+                name: detail.name,
+                coverUrl: detail.coverUrl,
+                trackCount: detail.trackCount,
+                creator: detail.creator,
+                playCount: detail.playCount,
+                subscribed: true,
+            });
+            onToast(`已导入《${detail.name}》`);
+            onClose();
+        } catch {
+            setError("读取歌单失败，请稍后重试");
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const copyShareUrl = async () => {
+        if (!shareUrl) return;
+        try {
+            await navigator.clipboard.writeText(shareUrl);
+            onToast("链接已复制");
+        } catch {
+            onToast(shareUrl);
+        }
+    };
+
+    return (
+        <div className="music-settings-modal-overlay" onClick={onClose}>
+            <div className="music-settings-modal-dialog music-import-dialog" onClick={(e) => e.stopPropagation()}>
+                <div className="music-settings-header">
+                    <h2>导入歌单</h2>
+                    <button className="music-settings-close" onClick={onClose} aria-label="关闭">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                    </button>
+                </div>
+                <div className="music-settings-body">
+                    <div className="music-settings-section">
+                        <div className="music-settings-label">网易云歌单链接或 ID</div>
+                        <div className="music-settings-hint">在网易云打开歌单 → 分享 → 复制链接，粘贴到这里</div>
+                        <input
+                            className="music-settings-input"
+                            placeholder="https://music.163.com/playlist?id=… 或 123456"
+                            value={draft}
+                            onChange={(e) => { setDraft(e.target.value); setError(""); }}
+                            onKeyDown={(e) => { if (e.key === "Enter") void handleImport(); }}
+                        />
+                    </div>
+
+                    {error && <div className="music-settings-result music-settings-result-err">{error}</div>}
+
+                    <div className="music-settings-actions">
+                        <button
+                            className="music-settings-btn music-settings-btn-primary"
+                            onClick={() => void handleImport()}
+                            disabled={busy || !playlistId}
+                        >
+                            {busy ? "读取中..." : "导入到我的歌单"}
+                        </button>
+                    </div>
+
+                    {qr && (
+                        <div className="music-settings-section music-import-qr-section">
+                            <div className="music-settings-label">歌单二维码</div>
+                            <div className="music-settings-hint">用网易云音乐扫一扫，会在网易云里打开并收藏该歌单</div>
+                            <div className="music-import-qr-wrap"><img src={qr} alt="歌单二维码" /></div>
+                            <div className="music-import-link">{shareUrl}</div>
+                            <button className="music-settings-btn" onClick={() => void copyShareUrl()}>复制链接</button>
+                        </div>
+                    )}
+
+                    {imported.length > 0 && (
+                        <div className="music-settings-section">
+                            <div className="music-settings-label">已导入 {imported.length} 个歌单</div>
+                            <div className="music-import-list">
+                                {imported.map(pl => (
+                                    <div key={pl.id} className="music-import-item">
+                                        <div className="music-import-item-cover">{pl.coverUrl && <img src={pl.coverUrl} alt="" />}</div>
+                                        <div className="music-import-item-info">
+                                            <b>{pl.name}</b>
+                                            <span>{pl.trackCount} 首{pl.creator ? ` · ${pl.creator}` : ""}</span>
+                                        </div>
+                                        <button onClick={() => onRemove(pl)}>移除</button>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+}
+
 function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: () => void }) {
     const [config, setConfig] = useState<MusicApiConfig>(() => loadMusicApiConfig());
     const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -1875,7 +2056,7 @@ function formatMusicCount(value: number): string {
 // ── CSS Editor ──
 import { MUSIC_CSS_EXAMPLE } from "@/lib/css-examples";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
-import { kvGet, kvSet, kvRemove } from "@/lib/kv-db";
+import { kvGet, kvSet, kvRemove, hydrateKvDb } from "@/lib/kv-db";
 
 function MusicCssEditor({ onClose, onSave }: { onClose: () => void; onSave: (css: string) => void }) {
     const [css, setCss] = useState(() => kvGet("music-custom-css") || "");

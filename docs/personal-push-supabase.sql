@@ -245,6 +245,16 @@ create index if not exists life_schedule_diagnostic_events_user_time_idx
 -- 屏幕速聊现在只是小手机唯一聊天窗口的远程入口，因此升级时移除这份临时缓存。
 drop table if exists public.push_screen_sessions;
 
+-- WxPusher 极简推送 SPT：每个用户一行。Edge Functions 查这里，尽力把通知多发一份到 WxPusher 客户端。
+create table if not exists public.push_channel_spt (
+  user_id text primary key,
+  channel text not null default 'wxpusher',
+  spt text not null,
+  updated_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  constraint push_channel_spt_channel_check check (channel in ('wxpusher'))
+);
+
 create table if not exists public.push_screen_threads (
   user_id text not null,
   character_id text not null,
@@ -383,6 +393,7 @@ alter table public.life_schedule_runtime enable row level security;
 alter table public.life_schedule_diagnostics enable row level security;
 alter table public.life_schedule_diagnostic_events enable row level security;
 alter table public.push_screen_threads enable row level security;
+alter table public.push_channel_spt enable row level security;
 
 -- 屏幕速聊表和 RPC 只由 Edge Function 的 service_role 使用；客户端角色没有表级权限。
 revoke all on table public.push_screen_threads from public, anon, authenticated;
@@ -403,7 +414,8 @@ grant select, insert, update, delete on table
   public.life_schedule_runtime,
   public.life_schedule_diagnostics,
   public.life_schedule_diagnostic_events,
-  public.push_screen_threads
+  public.push_screen_threads,
+  public.push_channel_spt
 to service_role;
 
 revoke all on function public.ai_phone_screen_chat_begin(text, text, text, text, integer) from public, anon, authenticated;

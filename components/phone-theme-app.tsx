@@ -9,6 +9,7 @@ import {
   Code2,
   Download,
   LayoutGrid,
+  Lock,
   PaintBucket,
   Plus,
   RotateCcw,
@@ -46,6 +47,7 @@ import {
   saveDIYTemplates,
 } from "@/lib/widget-storage";
 import { WidgetRenderer } from "@/components/widgets/widget-renderer";
+import { LockScreenSettingsPage } from "@/components/settings/lock-screen-settings";
 import { IconGlyph } from "@/components/icon-glyph";
 import {
   saveThemeAssetFromBlob,
@@ -78,6 +80,7 @@ type ThemeSection =
   | "icons"
   | "widgets"
   | "case"
+  | "lock"
   | "text"
   | "css";
 
@@ -135,6 +138,10 @@ function IconText() {
   return <Type size={22} strokeWidth={1.75} />;
 }
 
+function IconLock() {
+  return <Lock size={22} strokeWidth={1.75} />;
+}
+
 function IconCode() {
   return <Code2 size={22} strokeWidth={1.75} />;
 }
@@ -166,6 +173,7 @@ const MENU_ITEMS: Array<{
   { section: "icons", icon: IconGrid, label: "图标", desc: "应用图标", color: BINDING_ACCENTS.regex, glow: `color-mix(in srgb, ${BINDING_ACCENTS.regex} 35%, transparent)`, glass: "icons" },
   { section: "widgets", icon: IconWidgets, label: "桌面组件", desc: "小组件", color: BINDING_ACCENTS.voice, glow: `color-mix(in srgb, ${BINDING_ACCENTS.voice} 35%, transparent)`, glass: "widgets" },
   { section: "case", icon: IconCase, label: "状态栏", color: BINDING_ACCENTS.memory, glass: "status-bar" },
+  { section: "lock", icon: IconLock, label: "锁屏", desc: "开关、密码与壁纸", color: BINDING_ACCENTS.identity, glow: `color-mix(in srgb, ${BINDING_ACCENTS.identity} 35%, transparent)`, glass: "text" },
   { section: "text", icon: IconText, label: "文字", color: BINDING_ACCENTS.identity, glow: `color-mix(in srgb, ${BINDING_ACCENTS.identity} 35%, transparent)`, glass: "text" },
   { section: "css", icon: IconCode, label: "CSS 变量", desc: "自定义全局样式变量", color: BINDING_ACCENTS.embedding, glow: `color-mix(in srgb, ${BINDING_ACCENTS.embedding} 35%, transparent)`, glass: "css" },
   { section: "presets", icon: IconPresets, label: "主题预设", desc: "保存、切换与管理", color: BINDING_ACCENTS.preset, glow: `color-mix(in srgb, ${BINDING_ACCENTS.preset} 35%, transparent)`, glass: "theme-transfer" },
@@ -183,11 +191,12 @@ const SECTION_TITLES: Record<Exclude<ThemeSection, "menu">, string> = {
   icons: "\u56FE\u6807",
   widgets: "\u684C\u9762\u7EC4\u4EF6",
   case: "\u624B\u673A\u58F3",
+  lock: "\u9501\u5C4F",
   text: "\u6587\u5B57",
   css: "CSS \u53D8\u91CF",
 };
 
-const THEME_SECTIONS = new Set<string>(["menu", "palette", "wallpaper", "icons", "widgets", "case", "text", "css"]);
+const THEME_SECTIONS = new Set<string>(["menu", "palette", "wallpaper", "icons", "widgets", "case", "lock", "text", "css"]);
 
 function isThemeSection(value: string): value is ThemeSection {
   return THEME_SECTIONS.has(value);
@@ -442,6 +451,25 @@ export function PhoneThemeApp({
                     </span>
                   </button>
                 ))}
+                {(() => {
+                  const lockItem = MENU_ITEMS.find(i => i.section === "lock")!;
+                  return (
+                    <button
+                      key={lockItem.section}
+                      className="menu-item"
+                      type="button"
+                      onClick={() => setSection("lock")}
+                    >
+                      <span className="card-icon card-icon-glass">
+                        <GlassIcon name={lockItem.glass} />
+                      </span>
+                      <span className="menu-label appearance-menu-item-label">{lockItem.label}</span>
+                      <span className="menu-right">
+                        <IconChevronRight />
+                      </span>
+                    </button>
+                  );
+                })()}
               </div>
             </div>
 
@@ -530,6 +558,8 @@ export function PhoneThemeApp({
             onApply={onApply}
             onNotice={onNotice}
           />
+        ) : section === "lock" ? (
+          <LockScreenSettingsPage onNotice={onNotice} />
         ) : section === "widgets" ? (
           <WidgetManagerPage
             widgets={widgets}

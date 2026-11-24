@@ -576,7 +576,30 @@ Deno.serve(async (req: Request) => {
       : null;
     const pushErrors: string[] = [];
 
+    // WxPusher SPT 闭包缓存：避免 sendPush 每次都查表。
+    let wxpusherSpt: string | null | undefined = undefined;
+    const sendWxPusherBestEffort = async (title: string, bodyText: string) => {
+      try {
+        if (wxpusherSpt === undefined) {
+          const sptResponse = await rest(`push_channel_spt?user_id=eq.${encodeURIComponent(job.user_id)}&select=spt&limit=1`);
+          if (sptResponse.ok) {
+            const sptRows = await sptResponse.json() as { spt: string }[];
+            wxpusherSpt = sptRows[0]?.spt || null;
+          } else {
+            wxpusherSpt = null;
+          }
+        }
+        if (!wxpusherSpt) return;
+        await fetch("https://wxpusher.zjiecode.com/api/send/message/simple-push", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ spt: wxpusherSpt, summary: title.slice(0, 100), content: bodyText.slice(0, 40000), contentType: 1, url: "/" }),
+        }).catch(() => undefined);
+      } catch { /* 表不存在或网络异常，静默跳过 */ }
+    };
+
     const sendPush = async (title: string, bodyText: string, tag: string) => {
+      await sendWxPusherBestEffort(title, bodyText);
       if (!vapid || subs.length === 0) return;
       const message = JSON.stringify({ title, body: bodyText.slice(0, 80), tag, url: "/" });
       for (const sub of subs) {

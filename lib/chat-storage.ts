@@ -1703,6 +1703,34 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     }
     emitChatPluginEvent("message.persisted", { message: newMsg });
 
+    // App 在后台时，assistant 回复同时发一份 WxPusher 通知。
+    // 用 setTimeout 让出主线程，完全不阻塞聊天落库。
+    if (
+        typeof window !== "undefined"
+        && typeof document !== "undefined"
+        && newMsg.role === "assistant"
+        && !newMsg.origin?.startsWith("life_")
+        && !newMsg.origin?.startsWith("system")
+        && document.visibilityState !== "visible"
+        && _activeChatSessionId !== newMsg.sessionId
+    ) {
+        window.setTimeout(async () => {
+            try {
+                const { sendWxPusherMessageIfConnected } = await import("./wxpusher-client");
+                if (!sendWxPusherMessageIfConnected) return;
+                const sess = _sessionsCache.find(s => s.id === newMsg.sessionId);
+                const characterId = sess ? resolveSessionCharacterId(sess) : null;
+                const character = characterId ? loadCharacters().find(c => c.id === characterId) : null;
+                const rawContent = typeof newMsg.content === "string" ? newMsg.content : String(newMsg.content ?? "");
+                await sendWxPusherMessageIfConnected(
+                    (character?.name || sess?.alias || sess?.contactId || "小手机").slice(0, 40),
+                    rawContent.replace(/[！!]{3,}/g, "!").trim().slice(0, 200),
+                    `/?session=${encodeURIComponent(newMsg.sessionId)}`,
+                );
+            } catch { /* 静默，WxPusher 是锦上添花 */ }
+        }, 120);
+    }
+
     // Keep a lightweight cross-app breadcrumb in the Life timeline. Do not copy full
     // chat history into Life; the canonical message remains in Chat storage.
     // Defer this secondary write until the browser yields so it cannot delay the

@@ -25,6 +25,7 @@ export function resolveVoiceConfig(characterId: string, appId?: ContentAppId): V
  * Supported providers:
  * - Minimax: REST API → hex-encoded mp3
  * - OpenAI: REST API → binary audio blob
+ * - FishAudio: REST API → binary audio blob
  */
 export async function synthesizeSpeech(
     text: string,
@@ -41,6 +42,10 @@ export async function synthesizeSpeech(
 
     if (provider === "OpenAI") {
         return synthesizeOpenAI(text, voiceConfig);
+    }
+
+    if (provider === "FishAudio") {
+        return synthesizeFishAudio(text, voiceConfig);
     }
 
     return null;
@@ -171,6 +176,42 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
     if (!response.ok) {
         const errText = await response.text().catch(() => "");
         throw new Error(`OpenAI TTS 请求失败 (${response.status}): ${errText}`);
+    }
+
+    const blob = await response.blob();
+    return new Blob([await blob.arrayBuffer()], { type: "audio/mpeg" });
+}
+
+// ── Fish Audio (鱼声) TTS ─────────────────────────────────
+
+async function synthesizeFishAudio(text: string, config: VoiceApiConfig): Promise<Blob | null> {
+    if (!config.apiKey) throw new Error("Fish Audio API Key 未配置");
+
+    const referenceId = (config.defaultVoice || "").trim();
+    if (!referenceId) throw new Error("Fish Audio 音色 ID（reference_id）未配置");
+
+    // Fish Audio 的 TTS 端点不支持浏览器 CORS，直连会被同源策略拦截，
+    // 因此改走本地服务端代理 /api/voice/fish-audio-tts，由服务端转发到 Fish Audio。
+    const response = await fetchWithTimeout("/api/voice/fish-audio-tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            apiKey: config.apiKey,
+            baseUrl: config.baseUrl || "https://api.fish.audio/v1",
+            model: (config.model || "").trim(),
+            referenceId,
+            text,
+            speed: config.speechSpeed,
+        }),
+    });
+
+    if (!response.ok) {
+        let message = `Fish Audio 请求失败 (${response.status})`;
+        try {
+            const data = await response.json() as { message?: string; error?: string };
+            message = data.message || data.error || message;
+        } catch { /* ignore */ }
+        throw new Error(message.slice(0, 500));
     }
 
     const blob = await response.blob();

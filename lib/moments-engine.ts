@@ -329,6 +329,18 @@ async function triggerAIPost(characterId: string): Promise<void> {
                 .catch(err => console.warn("[Moments] Action dispatch failed:", err));
         }
 
+        // 双写入库防护：模型本轮已经用 [朋友圈]…[/朋友圈] 动作块产出帖子时，
+        // dispatchActions 已经存过一次了（见 action-parser 的 dispatchMomentsPost）。
+        // 这里若再按正文存一次，同一条动态就会出现两遍（且其中一份常夹带思维链）。
+        // 直接短路，把这一轮的产出完全交给动作派发路径。
+        if (actions.some(action => action.type === "朋友圈")) {
+            console.log(`[Moments] post already dispatched via action tag from ${character.name}, skip direct save`);
+            incrementEventCounter(characterId);
+            maybeRunSummarization(characterId, character.name)
+                .catch(err => console.warn("[Moments] Summarization check failed:", err));
+            return;
+        }
+
         const parsed = parseMomentPostResponse(postText);
         if (!parsed) return;
 
@@ -1145,6 +1157,18 @@ export function onUserComment(postId: string): void {
 
 // ── Response Parser ──
 
+export function stripMomentThinkingBlocks(rawText: string): string {
+    // 朋友圈正文是纯文本字段，没有聊天侧「reasoning 单独通道」，模型把思考过程
+    // 一并写进正文时会原样入库并被同世界角色看到。这里统一剥掉常见的思维链标签，
+    // 与聊天/群聊侧的标签解析保持同样的语义（默认标签同时兼容 thought / think）。
+    return rawText
+        .replace(/<(thinking|thought|think)>[\s\S]*?<\/\1>/gi, "")
+        .replace(/<analysis>[\s\S]*?<\/analysis>/gi, "")
+        .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}
+
 export function parseMomentPostResponse(rawText: string): {
     content: string;
     photoDescription?: string;
@@ -1164,12 +1188,16 @@ export function parseMomentPostResponse(rawText: string): {
             ? (/(?:自拍|对镜拍|selfie)/i.test(photoDescription || "") ? true : undefined)
             : undefined;
 
-    const content = text
+    // 先剥掉思维链标签，再清照片标签：顺序无关，但思维链里常夹带 [照片:…] 幻觉，
+    // 先剥能避免把思考过程中提到照片描述当成真实配图要求。
+    const content = stripMomentThinkingBlocks(text)
         .replace(/\[照片[:：]\s*(?:使用参考图|不使用参考图)\s*[:：]\s*[\s\S]*?\]/g, "")
         .replace(/\[照片[:：]\s*[\s\S]*?\]/g, "")
         .replace(/\[朋友圈\]|\[\/朋友圈\]/g, "")
         .trim();
 
+    // 正文只剩思考过程时（整条都是 <thinking>…）视为没有产出内容，直接丢弃，
+    // 否则会存出一条「只有思维链」的空动态。
     if (!content) return null;
 
     return { content, photoDescription, photoUseReferenceImage };

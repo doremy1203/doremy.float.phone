@@ -73,6 +73,11 @@ let turnSequence = 0;
 
 // A character is one person across channels. Key by character rather than session so
 // a life-scene turn cannot race the same character's direct-chat turn in another session.
+/**
+ * 互斥键：一般是 Character.id（一个角色跨渠道只有一个人）。
+ * 群聊没有单一角色，beginTurn 会传 `session:<sessionId>` 进来，
+ * 于是同一群的生成天然按会话互斥，且不会和各成员的私聊 turn 互相抢锁。
+ */
 function characterKey(characterId: string): string {
     return characterId;
 }
@@ -96,8 +101,12 @@ export function beginTurn(input: {
     observeOnly?: boolean;
 }): TurnHandle | null {
     const { kind, characterId, sessionId, observeOnly = false } = input;
-    if (!characterId || !sessionId) return null;
-    const key = characterKey(characterId);
+    // 群聊没有单一 characterId（一个群 = 多个角色共用一轮回复），调用方传空串。
+    // 此时以会话为互斥键：同一群同一时刻只允许一轮生成，避免重复触发；
+    // 直接 return null 会把群聊的「请求回复」整条链路静默吞掉。
+    const ownerKey = characterId || (sessionId ? `session:${sessionId}` : "");
+    if (!ownerKey || !sessionId) return null;
+    const key = characterKey(ownerKey);
     const priority = TURN_PRIORITY[kind];
     const current = activeByCharacter.get(key);
 
