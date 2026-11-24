@@ -1037,7 +1037,14 @@
 }
 
 /* 窄屏统一采用流式尺寸，不为单一设计稿宽度建立专用断点。 */
-@media (max-width: 500px) and (hover: none) and (pointer: coarse) {
+/* 只按宽度判断手机形态：部分安卓 WebView（华为自带浏览器、夸克、APK 内
+   WebView）会把 hover/pointer 上报成 hover:hover、pointer:fine，导致原来的
+   `and (hover: none) and (pointer: coarse)` 不匹配，整段窄屏全屏布局
+   （尺寸跟随视口、禁止页面滚动、去掉外壳边框、键盘避让、状态栏上移）全部
+   失效，表现为：整块画面比屏幕大、可上下左右拖动、四周白边、键盘跑到屏外。
+   实测相关设备视口宽度为 372/373，宽度条件成立，问题出在 hover/pointer。
+   桌面端视口宽度远超 500px，去掉这两项不改变桌面端行为。 */
+@media (max-width: 500px) {
   .icon-grid,
   .dock {
     --slot-size: clamp(48px, calc((100vw - 96px) / 4), 66px);
@@ -1055,7 +1062,14 @@
 
 /* ── Mobile responsive ── */
 
-@media (max-width: 500px) and (hover: none) and (pointer: coarse) {
+/* 只按宽度判断手机形态：部分安卓 WebView（华为自带浏览器、夸克、APK 内
+   WebView）会把 hover/pointer 上报成 hover:hover、pointer:fine，导致原来的
+   `and (hover: none) and (pointer: coarse)` 不匹配，整段窄屏全屏布局
+   （尺寸跟随视口、禁止页面滚动、去掉外壳边框、键盘避让、状态栏上移）全部
+   失效，表现为：整块画面比屏幕大、可上下左右拖动、四周白边、键盘跑到屏外。
+   实测相关设备视口宽度为 372/373，宽度条件成立，问题出在 hover/pointer。
+   桌面端视口宽度远超 500px，去掉这两项不改变桌面端行为。 */
+@media (max-width: 500px) {
 
   /* 用户在设置里显式开启「显示系统状态栏」且运行时不在全屏时，控制器才会挂
      data-pwa-display-mode 标记（见 pwa-manifest-injector）：此时所有 App 共用系统

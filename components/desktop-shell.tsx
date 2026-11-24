@@ -987,7 +987,7 @@ function useAndroidCaretKeyboardLift() {
       return;
     }
 
-    const mobileMq = window.matchMedia("(max-width: 500px) and (hover: none) and (pointer: coarse)");
+    const mobileMq = window.matchMedia("(max-width: 500px)");
     const viewport = window.visualViewport;
     let focusedElement: HTMLElement | null = null;
     let raf = 0;
@@ -1099,7 +1099,7 @@ function useAndroidNativeKeyboardViewport() {
     if (!/Android/i.test(navigator.userAgent)) {
       return;
     }
-    const mobileMq = window.matchMedia("(max-width: 500px) and (hover: none) and (pointer: coarse)");
+    const mobileMq = window.matchMedia("(max-width: 500px)");
     if (!mobileMq.matches) {
       return;
     }
