@@ -243,7 +243,7 @@ async function handleDeployWorker(
 async function handleSetCron(token: string, accountId: string, workerName: string, cron: string): Promise<NextResponse> {
   const response = await cloudflareFetch(token, `/accounts/${accountId}/workers/scripts/${workerName}/schedules`, {
     method: "PUT",
-    body: JSON.stringify({ schedules: [{ cron }] }),
+    body: JSON.stringify([{ cron }]),
   });
   if (!response.ok) {
     return NextResponse.json({ ok: false, error: await upstreamMessage(response, "设置 Cron 触发器") }, { status: response.status });
