@@ -221,6 +221,9 @@ class CheckInService : Service() {
     companion object {
         private const val CH = "shell_check_in"
         private const val NOTIF_ID = 4
+        private const val PREFS_LIFECYCLE = "check_in_lifecycle"
+        private const val KEY_BACKGROUND_STARTED_AT = "background_started_at"
+        private const val KEY_BACKGROUND_TOTAL_MS = "background_total_ms"
 
         private const val ACTION_PREPARE = "app.floatphone.shell.CHECKIN_PREPARE"
         private const val ACTION_SHOW = "app.floatphone.shell.CHECKIN_SHOW"
@@ -230,6 +233,12 @@ class CheckInService : Service() {
         private const val EXTRA_NAME = "name"
         private const val EXTRA_AVATAR = "avatar"
         private const val EXTRA_SOURCE = "source"
+        private const val EXTRA_PASS_ID = "pass_id"
+        private const val EXTRA_PASS_APP = "pass_app"
+
+        /** 专注通行证查岗的待取结果（WebView 可能不在，先落盘）。 */
+        private const val PREFS_FOCUS_PASS = "focus_pass_checkin_prefs"
+        private const val KEY_FOCUS_PASS_PENDING = "pending_result"
 
         /** 分享目标清单的落盘位置（网页推过来的，服务被系统重启也要还在）。 */
         private const val PREFS_SHARE = "screenshot_share_prefs"
@@ -240,6 +249,8 @@ class CheckInService : Service() {
         const val SOURCE_CHECK_IN = "checkIn"
         /** 用户发起：你自己点悬浮球截的。 */
         const val SOURCE_USER = "user"
+        /** 专注 App 的通行证查岗：原生闹钟到点直接弹，不要求网页活着。 */
+        const val SOURCE_FOCUS_PASS = "focusPass"
 
         /** 浮层晾着多久没处理就算「不给」。 */
         private const val AUTO_DISMISS_MS = 90_000L
@@ -303,12 +314,15 @@ class CheckInService : Service() {
          * 超时后给一句笼统的「没回应」，用户和排查的人都无从下手。
          * 走的是与正常结果同一条事件通道，网页侧不必额外长一套心智。
          */
-        private fun fail(context: Context, characterId: String, reason: String) {
+        private fun fail(context: Context, characterId: String, reason: String, passId: String = "", passApp: String = "") {
             recordError("show", reason)
             val payload = JSONObject()
                 .put("characterId", characterId)
                 .put("accepted", false)
                 .put("reason", reason)
+                .put("passId", passId)
+                .put("app", passApp)
+            if (passId.isNotEmpty()) persistFocusPassResult(context, payload)
             ShellBus.dispatchOverlayEvent("checkIn", payload)
         }
 
@@ -370,15 +384,108 @@ class CheckInService : Service() {
             }
         }
 
-        /** 宿主 Activity 进后台。 */
-        fun onHostBackground() {
+        /**
+         * 原生闹钟到点直接弹（专注通行证查岗）。
+         *
+         * 与 [show] 的区别：此时网页/Activity 可能已经被杀，必须走
+         * startForegroundService；Android 对精确闹钟唤醒的场景允许这样做。
+         */
+        fun showFromAlarm(
+            context: Context,
+            characterId: String,
+            name: String,
+            avatar: String,
+            passId: String,
+            passApp: String,
+        ): Boolean {
+            val instance = liveInstance
+            if (instance != null) {
+                instance.main.post { instance.showCheckIn(characterId, name, avatar, SOURCE_FOCUS_PASS, passId, passApp) }
+                return true
+            }
+            if (!canDraw(context)) {
+                persistFocusPassResult(context, JSONObject()
+                    .put("passId", passId).put("app", passApp)
+                    .put("characterId", characterId).put("accepted", false)
+                    .put("reason", "没有「显示在其他应用上层」权限，浮层弹不出来"))
+                return false
+            }
+            return runCatching {
+                val intent = Intent(context, CheckInService::class.java).apply {
+                    action = ACTION_SHOW
+                    putExtra(EXTRA_CHARACTER_ID, characterId)
+                    putExtra(EXTRA_NAME, name)
+                    putExtra(EXTRA_AVATAR, avatar)
+                    putExtra(EXTRA_SOURCE, SOURCE_FOCUS_PASS)
+                    putExtra(EXTRA_PASS_ID, passId)
+                    putExtra(EXTRA_PASS_APP, passApp)
+                }
+                if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+                else context.startService(intent)
+                true
+            }.getOrElse {
+                persistFocusPassResult(context, JSONObject()
+                    .put("passId", passId).put("app", passApp)
+                    .put("characterId", characterId).put("accepted", false)
+                    .put("reason", "查岗浮层启动失败"))
+                false
+            }
+        }
+
+        /** 读取并清空专注通行证查岗的待取结果。 */
+        fun consumePendingFocusPassCheckIn(context: Context): String {
+            val prefs = context.getSharedPreferences(PREFS_FOCUS_PASS, Context.MODE_PRIVATE)
+            val raw = prefs.getString(KEY_FOCUS_PASS_PENDING, "").orEmpty()
+            if (raw.isNotEmpty()) prefs.edit().putString(KEY_FOCUS_PASS_PENDING, "").apply()
+            return raw
+        }
+
+        private fun persistFocusPassResult(context: Context, payload: JSONObject) {
+            runCatching {
+                context.getSharedPreferences(PREFS_FOCUS_PASS, Context.MODE_PRIVATE).edit()
+                    .putString(KEY_FOCUS_PASS_PENDING, payload.toString())
+                    .apply()
+            }
+        }
+
+        /** 宿主 Activity 进后台。持久化累计计时起点，供后台查岗使用。 */
+        fun onHostBackground(context: Context) {
+            val prefs = context.getSharedPreferences(PREFS_LIFECYCLE, Context.MODE_PRIVATE)
+            if (prefs.getLong(KEY_BACKGROUND_STARTED_AT, 0L) <= 0L) {
+                prefs.edit()
+                    .putLong(KEY_BACKGROUND_STARTED_AT, System.currentTimeMillis())
+                    .commit()
+            }
             hostInForeground = false
         }
 
-        /** 宿主 Activity 回前台。 */
-        fun onHostForeground() {
+        /** 宿主 Activity 回前台：结算刚结束的后台时段。 */
+        fun onHostForeground(context: Context) {
+            val prefs = context.getSharedPreferences(PREFS_LIFECYCLE, Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            val startedAt = prefs.getLong(KEY_BACKGROUND_STARTED_AT, 0L)
+            val elapsed = if (startedAt > 0L) (now - startedAt).coerceAtLeast(0L) else 0L
+            val total = prefs.getLong(KEY_BACKGROUND_TOTAL_MS, 0L)
+            prefs.edit()
+                .putLong(KEY_BACKGROUND_TOTAL_MS, total + elapsed)
+                .putLong(KEY_BACKGROUND_STARTED_AT, 0L)
+                .commit()
             hostInForeground = true
         }
+
+        /** 原生生命周期快照；backgroundElapsedMs 是跨多次前后台切换累计的后台时长。 */
+        fun appLifecycleJson(context: Context): String = runCatching {
+            val prefs = context.getSharedPreferences(PREFS_LIFECYCLE, Context.MODE_PRIVATE)
+            val total = prefs.getLong(KEY_BACKGROUND_TOTAL_MS, 0L)
+            val startedAt = prefs.getLong(KEY_BACKGROUND_STARTED_AT, 0L)
+            val activeBackground = if (!hostInForeground && startedAt > 0L)
+                (System.currentTimeMillis() - startedAt).coerceAtLeast(0L) else 0L
+            JSONObject()
+                .put("available", true)
+                .put("foreground", hostInForeground)
+                .put("backgroundElapsedMs", total + activeBackground)
+                .toString()
+        }.getOrDefault("{\"available\":false,\"foreground\":true,\"backgroundElapsedMs\":0}")
 
         /** 服务是否在运行（设置面板显示「查岗待命中」用）。 */
         fun isRunning(): Boolean = running
@@ -604,6 +711,8 @@ class CheckInService : Service() {
 
     /** 当前这一张的上下文；用户点按钮时要用它回传与关窗。 */
     private var pendingCharacterId = ""
+    private var pendingPassId = ""
+    private var pendingPassApp = ""
     private var pendingBitmap: Bitmap? = null
     private var dismissRunnable: Runnable? = null
 
@@ -631,7 +740,9 @@ class CheckInService : Service() {
                 val name = intent.getStringExtra(EXTRA_NAME).orEmpty()
                 val avatar = intent.getStringExtra(EXTRA_AVATAR).orEmpty()
                 val source = intent.getStringExtra(EXTRA_SOURCE).orEmpty().ifBlank { SOURCE_CHECK_IN }
-                main.post { showCheckIn(characterId, name, avatar, source) }
+                val passId = intent.getStringExtra(EXTRA_PASS_ID).orEmpty()
+                val passApp = intent.getStringExtra(EXTRA_PASS_APP).orEmpty()
+                main.post { showCheckIn(characterId, name, avatar, source, passId, passApp) }
             }
             ACTION_STOP -> {
                 teardown()
@@ -663,11 +774,15 @@ class CheckInService : Service() {
         name: String,
         avatar: String,
         source: String = SOURCE_CHECK_IN,
+        passId: String = "",
+        passApp: String = "",
     ) {
         lastShowAt = System.currentTimeMillis()
         showCount += 1
         captureSource = source
         pendingCharacterId = characterId
+        pendingPassId = passId
+        pendingPassApp = passApp
         pendingBitmap?.recycle()
         pendingBitmap = null
 
@@ -688,7 +803,7 @@ class CheckInService : Service() {
         // 窗口没挂上就别往下走了：截了图也显示不出来，用户只会觉得
         // 「点了没反应」。如实回一条失败，网页立刻能给他一句人话。
         if (!showWindow(true)) {
-            fail(this, characterId, "浮层没能显示出来（多半是缺「显示在其他应用上层」权限）")
+            fail(this, characterId, "浮层没能显示出来（多半是缺「显示在其他应用上层」权限）", pendingPassId, pendingPassApp)
             discardPending()
             return
         }
@@ -847,13 +962,20 @@ class CheckInService : Service() {
                 .put("width", bitmap.width)
                 .put("height", bitmap.height)
                 .put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                .put("passId", pendingPassId)
+                .put("app", pendingPassApp)
                 .also { if (reply.isNotEmpty()) it.put("reply", reply) }
         }.getOrElse {
             JSONObject()
                 .put("characterId", characterId)
                 .put("accepted", false)
                 .put("reason", "这张图没能处理成功")
+                .put("passId", pendingPassId)
+                .put("app", pendingPassApp)
                 .also { if (reply.isNotEmpty()) it.put("reply", reply) }
+        }
+        if (captureSource == SOURCE_FOCUS_PASS) {
+            persistFocusPassResult(this, payload)
         }
         // 用户主动截的（悬浮球）另存一份再推事件：
         // 此刻网页可能已被回收，事件会落空，图就丢了。查岗不需要这一步——
@@ -908,6 +1030,8 @@ class CheckInService : Service() {
         pendingBitmap?.let { runCatching { it.recycle() } }
         pendingBitmap = null
         pendingCharacterId = ""
+        pendingPassId = ""
+        pendingPassApp = ""
         selectedTargetId = ""
         targetRow?.visibility = View.GONE
         targetList?.removeAllViews()
@@ -922,8 +1046,13 @@ class CheckInService : Service() {
         val payload = JSONObject()
             .put("characterId", target)
             .put("accepted", accepted)
+            .put("passId", pendingPassId)
+            .put("app", pendingPassApp)
         if (!accepted && !reason.isNullOrBlank()) payload.put("reason", reason)
         if (reply.isNotEmpty()) payload.put("reply", reply)
+        if (captureSource == SOURCE_FOCUS_PASS) {
+            persistFocusPassResult(this, payload)
+        }
         ShellBus.dispatchOverlayEvent("checkIn", payload)
     }
 

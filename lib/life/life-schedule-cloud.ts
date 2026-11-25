@@ -7,6 +7,7 @@ import { recordLifeDiagnostic } from "./life-diagnostics";
 import { readLifeSceneForegroundLease, readOnlineChatForegroundLease } from "./life-scheduler-coordinator";
 import { isPersonalPushCloudActive, loadPersonalPushCloudState, personalPushFetch } from "@/lib/personal-push-cloud";
 import { isShellEnvironment } from "@/lib/shell-detect";
+import { cloudBreakerPaused, noteCloudFailure, noteCloudSuccess } from "@/lib/cloud-circuit-breaker";
 
 const PLAYER_ID = "player";
 const SNAPSHOT_RULE_ID = "life-schedule";
@@ -86,7 +87,7 @@ export async function syncLifeScheduleSnapshot(force = false): Promise<boolean> 
     const scheduleSettings = {
       enabled: state.settings.enabled,
       autonomyEnabled: state.settings.enableCharacterAutonomy,
-      proactiveEnabled: false,
+      proactiveEnabled: state.settings.enableProactiveSceneMessages !== false,
       proactiveIntervalMin: state.settings.proactiveSceneIntervalMinutes ?? 5,
       proactiveIntervalMax: state.settings.proactiveSceneIntervalMaxMinutes ?? 15,
       scheduleVersion,
@@ -94,6 +95,11 @@ export async function syncLifeScheduleSnapshot(force = false): Promise<boolean> 
     const fingerprint = JSON.stringify({ version: 5, playerLocationId, scenes, characterLocations, scheduleSlots, actorStates, scheduleSettings, ...foregroundLease, ...onlineChatLeaseSnapshot });
     if (!force && fingerprint === lastJson && Date.now() - lastSyncedAt < MAX_SNAPSHOT_AGE_MS) return true;
     const payload = { version: 5, updatedAt: new Date().toISOString(), playerLocationId, scenes, characterLocations, scheduleSlots, actorStates, ...scheduleSettings, ...foregroundLease, ...onlineChatLeaseSnapshot };
+    /* 连续失败已熔断：直接短路，别再打云端（省额度，等用户手动重试） */
+    if (cloudBreakerPaused("life-snapshot")) {
+      recordLifeDiagnostic({ source: "云端快照", event: "日程位置同步", status: "error", detail: "云端连续失败已暂停自动同步，可在诊断页手动重试。", meta: { playerLocationId } });
+      return false;
+    }
     const requestInit: RequestInit = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -110,12 +116,15 @@ export async function syncLifeScheduleSnapshot(force = false): Promise<boolean> 
     if (response.ok) {
       lastJson = fingerprint;
       lastSyncedAt = Date.now();
+      noteCloudSuccess("life-snapshot");
       recordLifeDiagnostic({ source: "云端快照", event: "日程位置同步", status: "ok", detail: "玩家地点与 " + Object.keys(characterLocations).length + " 个角色地点已同步。", meta: { sceneCount: scenes.length, playerLocationId } });
       return true;
     }
+    noteCloudFailure("life-snapshot", "HTTP " + response.status);
     recordLifeDiagnostic({ source: "云端快照", event: "日程位置同步", status: "error", detail: "快照接口返回 HTTP " + response.status, meta: { playerLocationId } });
     return false;
   } catch (error) {
+    noteCloudFailure("life-snapshot", error instanceof Error ? error.message : String(error));
     recordLifeDiagnostic({ source: "云端快照", event: "日程位置同步", status: "error", detail: error instanceof Error ? error.message : String(error) });
     return false;
   }

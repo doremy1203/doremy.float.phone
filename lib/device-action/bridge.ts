@@ -25,6 +25,24 @@ type DeviceActionBridgeLike = {
   mediaControl?: (action: string) => string;
   openWebUrl?: (url: string) => string;
   hasUsageStatsAccess?: () => boolean;
+  listInstalledApps?: () => string;
+  focusLockStart?: (packagesJson: string, untilEpochMs: number) => string;
+  focusLockUpdate?: (packagesJson: string, untilEpochMs: number) => string;
+  focusLockStop?: () => string;
+  focusLockStatus?: () => string;
+  scheduleFocusPassCheckIn?: (json: string) => string;
+  cancelFocusPassCheckIn?: (passId: string) => boolean;
+  consumePendingFocusPassCheckIn?: () => string;
+  focusWidgetUpdate?: (json: string) => string;
+  focusWidgetPin?: () => string;
+  focusWidgetRemove?: () => string;
+  focusLockTaLine?: (taLine: string, charName: string) => string;
+  isDeviceAdminActive?: () => boolean;
+  requestDeviceAdmin?: () => boolean;
+  requestFocusCheckIn?: (characterId: string, name: string, avatar: string) => void;
+  canDrawOverlay?: () => boolean;
+  focusLockPendingApply?: () => string;
+  requestOverlayPermission?: () => void;
   getDeviceActionCapabilities?: () => string;
   openSystemSettings?: (which: string) => boolean;
 };
@@ -114,6 +132,188 @@ export function setDnd(on: boolean): DeviceActionResult {
     return parseResult(raw, "勿扰模式未能切换");
   } catch {
     return { ok: false, reason: "勿扰模式调用失败" };
+  }
+}
+
+/** 已安装可启动应用清单（白名单选择器数据源；非壳环境返回 ok:false）。 */
+export function listInstalledApps(): { ok: boolean; apps: Array<{ package: string; label: string }>; reason?: string } {
+  try {
+    const raw = bridge()?.listInstalledApps?.();
+    if (raw === undefined) return { ok: false, apps: [], reason: "当前 App 版本不支持应用列表" };
+    const parsed = JSON.parse(raw) as { ok?: boolean; apps?: Array<{ package: string; label: string }>; reason?: string };
+    if (parsed && parsed.ok === true) return { ok: true, apps: parsed.apps || [] };
+    return { ok: false, apps: [], reason: (parsed && parsed.reason) || "无法列出应用" };
+  } catch {
+    return { ok: false, apps: [], reason: "应用列表调用失败" };
+  }
+}
+
+/** L2 看守锁：启动壳侧轮询封锁（packages=锁机名单包名数组，until=截止毫秒）。 */
+export function focusLockStart(packages: string[], untilEpochMs: number): DeviceActionResult {
+  try {
+    const raw = bridge()?.focusLockStart?.(JSON.stringify(packages), untilEpochMs);
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持看守锁" };
+    return parseResult(raw, "看守锁未能启动");
+  } catch {
+    return { ok: false, reason: "看守锁调用失败" };
+  }
+}
+
+/** L2 看守锁：仅更新白名单/截止时间，不重置计时基准。 */
+export function focusLockUpdate(packages: string[], untilEpochMs: number): DeviceActionResult {
+  try {
+    const raw = bridge()?.focusLockUpdate?.(JSON.stringify(packages), untilEpochMs);
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持即时更新看守锁" };
+    return parseResult(raw, "看守锁名单未能更新");
+  } catch {
+    return { ok: false, reason: "看守锁更新失败" };
+  }
+}
+
+/** L2 看守锁：停止。 */
+export function focusLockStop(): DeviceActionResult {
+  try {
+    const raw = bridge()?.focusLockStop?.();
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持看守锁" };
+    return parseResult(raw, "看守锁未能停止");
+  } catch {
+    return { ok: false, reason: "看守锁调用失败" };
+  }
+}
+
+/** L2 看守锁：状态查询。 */
+export function focusLockStatus(): { ok: boolean; running: boolean; until: number; packages: string; reason?: string } {
+  try {
+    const raw = bridge()?.focusLockStatus?.();
+    if (raw === undefined) return { ok: false, running: false, until: 0, packages: "[]", reason: "当前 App 版本不支持看守锁" };
+    const parsed = JSON.parse(raw) as { ok?: boolean; running?: boolean; until?: number; packages?: string };
+    return { ok: parsed?.ok === true, running: parsed?.running === true, until: parsed?.until || 0, packages: parsed?.packages || "[]" };
+  } catch {
+    return { ok: false, running: false, until: 0, packages: "[]", reason: "看守锁状态调用失败" };
+  }
+}
+
+/** 专注通行证查岗：排一个原生闹钟，到点直接拉起查岗浮层。 */
+export function scheduleFocusPassCheckIn(payload: Record<string, unknown>): DeviceActionResult {
+  try {
+    const raw = bridge()?.scheduleFocusPassCheckIn?.(JSON.stringify(payload));
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持原生定时查岗" };
+    return parseResult(raw, "原生查岗闹钟排程失败");
+  } catch {
+    return { ok: false, reason: "原生查岗闹钟排程失败" };
+  }
+}
+
+export function cancelFocusPassCheckIn(passId: string): DeviceActionResult {
+  try {
+    const raw = bridge()?.cancelFocusPassCheckIn?.(passId);
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持原生定时查岗" };
+    return raw ? { ok: true } : { ok: false, reason: "没有找到对应的查岗闹钟" };
+  } catch {
+    return { ok: false, reason: "取消原生查岗闹钟失败" };
+  }
+}
+
+/** 读取原生定时查岗结果（base64 截图）；空串 = 没有待取结果。 */
+export function consumePendingFocusPassCheckIn(): string {
+  try {
+    return bridge()?.consumePendingFocusPassCheckIn?.() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** 专注倒计时桌面组件：推一份会话状态（Chronometer 原生走表，无需每秒推送）。 */
+export function focusWidgetUpdate(json: string): DeviceActionResult {
+  try {
+    const raw = bridge()?.focusWidgetUpdate?.(json);
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持专注组件" };
+    return parseResult(raw, "专注组件更新失败");
+  } catch {
+    return { ok: false, reason: "专注组件调用失败" };
+  }
+}
+
+/** 专注倒计时桌面组件：拉起系统「添加到桌面」引导。 */
+export function focusWidgetPin(): DeviceActionResult {
+  try {
+    const raw = bridge()?.focusWidgetPin?.();
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持添加组件" };
+    return parseResult(raw, "添加组件未成功");
+  } catch {
+    return { ok: false, reason: "添加组件调用失败" };
+  }
+}
+
+/** 看守锁覆盖页：设置 TA 提醒线。 */
+export function focusLockTaLine(taLine: string, charName: string): DeviceActionResult {
+  try {
+    const raw = bridge()?.focusLockTaLine?.(taLine, charName);
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持" };
+    return parseResult(raw, "设置失败");
+  } catch {
+    return { ok: false, reason: "调用失败" };
+  }
+}
+
+/** L3：设备管理员是否已激活。 */
+export function isDeviceAdminActive(): boolean {
+  try {
+    return bridge()?.isDeviceAdminActive?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+/** L3：引导激活设备管理员（跳系统确认页）。 */
+export function requestDeviceAdmin(): DeviceActionResult {
+  try {
+    const ok = bridge()?.requestDeviceAdmin?.() === true;
+    return ok ? { ok: true } : { ok: false, reason: "无法跳转系统页" };
+  } catch {
+    return { ok: false, reason: "调用失败" };
+  }
+}
+
+/** 查岗 v2：壳侧截屏（复用既有查岗授权链，结果经 checkIn 事件回推）。 */
+export function requestFocusCheckIn(characterId: string, name: string, avatar: string): DeviceActionResult {
+  try {
+    bridge()?.requestFocusCheckIn?.(characterId, name, avatar);
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: "调用失败" };
+  }
+}
+
+/** 拦截页「申请用一会儿」留下的待处理申请（取一次即清）。 */
+export type FocusPendingApply = { pkg: string; label: string };
+export function focusLockPendingApply(): FocusPendingApply | null {
+  try {
+    const raw = bridge()?.focusLockPendingApply?.();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { pkg?: string; label?: string };
+    if (!parsed || !parsed.pkg) return null;
+    return { pkg: parsed.pkg, label: parsed.label || parsed.pkg };
+  } catch {
+    return null;
+  }
+}
+
+/** 悬浮窗权限是否已授予（L2/L3 全屏封锁页在 Android 14 需要它才能后台弹出）。 */
+export function canDrawOverlay(): boolean {
+  try {
+    return bridge()?.canDrawOverlay?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+/** 拉起系统「显示在其他应用上层」授权页。 */
+export function requestOverlayPermission(): void {
+  try {
+    bridge()?.requestOverlayPermission?.();
+  } catch {
+    /* 忽略 */
   }
 }
 

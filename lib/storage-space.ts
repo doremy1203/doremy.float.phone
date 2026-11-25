@@ -27,6 +27,8 @@ import { deleteTrack, getAudioBlob, loadAllTracks } from "./music-storage";
 import { loadPhotoWallState, savePhotoWallState } from "./photo-wall-storage";
 import { deleteRawFile, hydrateReadingStorage, listRawFileSummaries, loadBooks } from "./reading-storage";
 import { loadXiaohongshuState, saveXiaohongshuState } from "./xiaohongshu-storage";
+import { loadAllCustomApps } from "./builtin-apps/registry";
+import { kvGet, kvKeysWithPrefix, kvRemove } from "./kv-db";
 
 /**
  * 「存储空间」引擎：把本机占用按用户能看懂的内容类别统计出来，并支持
@@ -51,6 +53,7 @@ export type StorageCategoryId =
   | "dwelling_images"
   | "theme_assets"
   | "reading_raw_files"
+  | "orphan_app_data"
   | "orphan_media";
 
 export type StorageCategoryStat = {
@@ -121,6 +124,11 @@ const CATEGORY_META: Record<StorageCategoryId, { label: string; description: str
   reading_raw_files: {
     label: "阅读原始文件",
     description: "TXT/EPUB 导入后的原始文件（章节已单独入库，删除不影响阅读）。PDF 需要原文才能阅读，会自动保留。",
+    supportsKeepDays: false,
+  },
+  orphan_app_data: {
+    label: "未安装 APP 残留",
+    description: "已卸载或重置后仍留在本地的自定义 APP 私有数据、时间线和宿主通知残留。清理不影响已安装的 APP。",
     supportsKeepDays: false,
   },
   orphan_media: {
@@ -199,6 +207,39 @@ async function collectOrphanMedia(): Promise<Array<{ id: string; bytes: number }
   return summaries
     .filter((item) => item.retainedBy.length === 0 && !referenced.has(item.id) && now - item.createdAt >= ORPHAN_GRACE_MS)
     .map((item) => ({ id: item.id, bytes: item.bytes }));
+}
+
+// ── 未安装 APP 的残留数据 ──
+const CUSTOM_APP_DATA_PREFIX = "ai_phone_custom_app_data_v1:";
+const CUSTOM_APP_TIMELINE_PREFIX = "ai_phone_custom_app_timeline_v1:";
+
+function customAppIdFromKey(key: string): string | null {
+  if (key.startsWith(CUSTOM_APP_DATA_PREFIX)) {
+    const rest = key.slice(CUSTOM_APP_DATA_PREFIX.length);
+    const slash = rest.indexOf("/");
+    return (slash >= 0 ? rest.slice(0, slash) : rest) || null;
+  }
+  if (key.startsWith(CUSTOM_APP_TIMELINE_PREFIX)) {
+    return key.slice(CUSTOM_APP_TIMELINE_PREFIX.length) || null;
+  }
+  return null;
+}
+
+function collectOrphanCustomAppData(): { keys: string[]; bytes: number } {
+  const installed = new Set(loadAllCustomApps().map(app => app.id));
+  const keys = [
+    ...kvKeysWithPrefix(CUSTOM_APP_DATA_PREFIX),
+    ...kvKeysWithPrefix(CUSTOM_APP_TIMELINE_PREFIX),
+  ];
+  const orphanKeys: string[] = [];
+  let bytes = 0;
+  for (const key of keys) {
+    const appId = customAppIdFromKey(key);
+    if (!appId || installed.has(appId)) continue;
+    orphanKeys.push(key);
+    bytes += (kvGet(key) || "").length;
+  }
+  return { keys: orphanKeys, bytes };
 }
 
 // ── 扫描 ──
@@ -309,6 +350,10 @@ export async function scanStorageSpace(onProgress?: (detail: string) => void): P
     deletableRawFiles.reduce((sum, item) => sum + item.bytes, 0),
     deletableRawFiles.length,
   ));
+
+  onProgress?.("扫描未安装 APP 残留…");
+  const orphanAppData = collectOrphanCustomAppData();
+  stats.push(makeStat("orphan_app_data", orphanAppData.bytes, orphanAppData.keys.length));
 
   onProgress?.("扫描残留媒体（全库引用检查，需要一点时间）…");
   const orphans = await collectOrphanMedia().catch(() => []);
@@ -578,6 +623,11 @@ export async function clearStorageCategory(
       return { cleared: result.deletedAssets, freedBytes: result.freedBytes };
     }
     case "reading_raw_files": return clearReadingRawFiles();
+    case "orphan_app_data": {
+      const orphan = collectOrphanCustomAppData();
+      for (const key of orphan.keys) kvRemove(key);
+      return { cleared: orphan.keys.length, freedBytes: orphan.bytes };
+    }
     case "orphan_media": return clearOrphanMedia();
   }
 }

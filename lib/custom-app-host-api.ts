@@ -3,13 +3,27 @@
 import type { CustomAppPermission, CustomAppPromptProfile, InstalledCustomApp } from "./custom-app-types";
 import {
   appendCustomAppTimelineEntry,
+  clearCustomAppData,
   deleteCustomAppTimelineEntries,
-  loadInstalledCustomApps,
   readCustomAppCollection,
   writeCustomAppCollection,
 } from "./custom-app-storage";
+import { loadAllCustomApps } from "./builtin-apps/registry";
 import { buildCustomAppChatTags } from "./custom-app-tags";
 import { hydrateKvDb } from "./kv-db";
+import { sendShellNotification } from "./shell-notify";
+import { captureScreenshot } from "./screenshot/bridge";
+import { requestCheckIn } from "./screenshot/checkin";
+import { storeMediaBase64 } from "./media-cache-storage";
+import { requestBackgroundChatReply } from "./follow-up-service";
+import { setAlarm as shellSetAlarm, setBrightness as shellSetBrightness, setDnd as shellSetDnd,
+  listInstalledApps, focusLockStart as shellFocusLockStart, focusLockUpdate as shellFocusLockUpdate, focusLockStop as shellFocusLockStop, focusLockStatus as shellFocusLockStatus,
+  focusWidgetUpdate as shellFocusWidgetUpdate, focusWidgetPin as shellFocusWidgetPin,
+  focusLockTaLine as shellFocusLockTaLine, isDeviceAdminActive as shellIsDeviceAdminActive,
+  requestDeviceAdmin as shellRequestDeviceAdmin,
+  focusLockPendingApply as shellFocusLockPendingApply,
+  scheduleFocusPassCheckIn as shellScheduleFocusPassCheckIn, cancelFocusPassCheckIn as shellCancelFocusPassCheckIn,
+  canDrawOverlay as shellCanDrawOverlay, requestOverlayPermission as shellRequestOverlayPermission } from "./device-action/bridge";
 import { loadCharacters } from "./character-storage";
 import {
   addChatContact,
@@ -91,6 +105,20 @@ const CUSTOM_APP_WORLD_ACTIVATIONS_KEY = "ai_phone_custom_app_world_activations_
 const CUSTOM_APP_SUGGESTIONS_KEY = "ai_phone_custom_app_suggestions_v1";
 
 export const CUSTOM_APP_HOST_STATE_UPDATED_EVENT = "ai-phone-custom-app-host-state-updated";
+/** 自定义 APP 正在后台等待的生图任务数变化。桌面据此暂缓卸载 iframe。 */
+export const CUSTOM_APP_IMAGE_JOB_EVENT = "ai-phone-custom-app-image-job";
+const _customAppImageJobs = new Map<string, number>();
+export function getCustomAppActiveImageJobs(appId: string): number {
+  return _customAppImageJobs.get(appId) ?? 0;
+}
+function updateCustomAppImageJob(appId: string, delta: number): void {
+  const next = Math.max(0, (_customAppImageJobs.get(appId) ?? 0) + delta);
+  if (next > 0) _customAppImageJobs.set(appId, next);
+  else _customAppImageJobs.delete(appId);
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(CUSTOM_APP_IMAGE_JOB_EVENT, { detail: { appId, count: next } }));
+  }
+}
 
 registerKvMigration(CUSTOM_APP_NOTIFICATIONS_KEY);
 registerKvMigration(CUSTOM_APP_BADGES_KEY);
@@ -159,6 +187,7 @@ const HOST_ACTION_PERMISSIONS: Record<string, CustomAppPermission[]> = {
   "notifications.badge": ["notifications.write"],
   "db.update": ["app.data.write"],
   "app.data.update": ["app.data.write"],
+  "app.clearData": ["app.data.write"],
   "chat.card": ["chat.sendCard"],
   "chat.history": ["chat.write", "chat.sendMessage"],
   "chat.message": ["chat.write", "chat.sendMessage"],
@@ -177,6 +206,27 @@ const HOST_ACTION_PERMISSIONS: Record<string, CustomAppPermission[]> = {
   "world.write": ["world.write"],
   "world.activate": ["world.activate"],
   "bridge.send": ["bridge.send"],
+  "shell.notify": ["notifications.write"],
+  "device.alarm.set": ["device.alarm.set"],
+  "device.dnd.set": ["device.assist"],
+  "device.brightness.set": ["device.assist"],
+  "device.apps.list": ["device.assist"],
+  "device.lock.start": ["device.assist"],
+  "device.lock.update": ["device.assist"],
+  "device.lock.stop": ["device.assist"],
+  "device.lock.status": ["device.assist"],
+  "device.focusWidget.update": ["device.assist"],
+  "device.focusWidget.pin": ["device.assist"],
+  "device.lock.taLine": ["device.assist"],
+  "device.admin.status": ["device.assist"],
+  "device.admin.request": ["device.assist"],
+  "device.checkin.request": ["device.assist"],
+  "device.checkin.schedule": ["device.assist"],
+  "device.checkin.cancel": ["device.assist"],
+  "device.overlay.status": ["device.assist"],
+  "device.overlay.request": ["device.assist"],
+  "device.lock.pendingApply": ["device.assist"],
+  "device.screenshot": ["device.screenshot"],
 };
 
 function emitHostStateUpdated(): void {
@@ -1373,24 +1423,30 @@ export async function generateCustomAppImage(app: InstalledCustomApp, record: Re
   const characterId = cleanText(record.characterId, 160) || undefined;
   const useReferenceImage = record.useReferenceImage === true;
   const timeoutMs = optionalCustomAppTimeoutMs(record.timeoutMs);
-  const result = await withOptionalCustomAppTimeout(timeoutMs, "ai.generateImage", signal => (
-    generateImageFromConfiguredApi({
-      description,
-      characterId,
-      appId: `custom_app:${app.id}`,
-      useReferenceImage,
-      signal,
-    })
-  ));
-  if (!result) throw new Error("生图功能未配置或未启用，请先在小手机设置里配置生图 API。");
-  return {
-    ok: true,
-    dataUrl: result.dataUrl,
-    mimeType: result.mimeType,
-    prompt: result.prompt,
-    revisedPrompt: result.revisedPrompt,
-    usedReferenceImage: result.usedReferenceImage,
-  };
+  updateCustomAppImageJob(app.id, 1);
+  try {
+    const result = await withOptionalCustomAppTimeout(timeoutMs, "ai.generateImage", signal => (
+      generateImageFromConfiguredApi({
+        description,
+        characterId,
+        appId: `custom_app:${app.id}`,
+        useReferenceImage,
+        signal,
+      })
+    ));
+    if (!result) throw new Error("生图功能未配置或未启用，请先在小手机设置里配置生图 API。");
+    return {
+      ok: true,
+      dataUrl: result.dataUrl,
+      mimeType: result.mimeType,
+      prompt: result.prompt,
+      revisedPrompt: result.revisedPrompt,
+      usedReferenceImage: result.usedReferenceImage,
+    };
+  } finally {
+    // 结果先交回 iframe；给它几秒把图片写进自己的数据库，再允许桌面卸载后台 APP。
+    window.setTimeout(() => updateCustomAppImageJob(app.id, -1), 5000);
+  }
 }
 
 export function readCustomAppCharacterState(record: Record<string, unknown>): Record<string, unknown> {
@@ -1555,6 +1611,54 @@ export async function fetchCustomAppNetwork(app: InstalledCustomApp, record: Rec
 export function loadCustomAppTasks(appId?: string): CustomAppScheduledTask[] {
   const items = loadJsonArray<CustomAppScheduledTask>(CUSTOM_APP_TASKS_KEY);
   return appId ? items.filter(item => item.appId === appId) : items;
+}
+
+function removeAppFromJsonArrayKey(key: string, appId: string): number {
+  try {
+    const items = JSON.parse(kvGet(key) || "[]") as unknown;
+    if (!Array.isArray(items)) return 0;
+    const next = items.filter(item => asRecord(item).appId !== appId);
+    if (next.length === items.length) return 0;
+    kvSet(key, JSON.stringify(next));
+    return items.length - next.length;
+  } catch {
+    return 0;
+  }
+}
+
+/** 卸载/清空 APP 时一起清掉宿主侧残留：通知、红点、定时任务、世界激活、建议。 */
+export function removeCustomAppHostResidue(appId: string): { removed: number } {
+  const id = cleanId(appId);
+  let removed = 0;
+  const notifications = loadCustomAppNotifications();
+  const nextNotifications = notifications.filter(item => item.appId !== id);
+  if (nextNotifications.length !== notifications.length) {
+    removed += notifications.length - nextNotifications.length;
+    saveNotifications(nextNotifications);
+  }
+  const tasks = loadCustomAppTasks();
+  const nextTasks = tasks.filter(item => item.appId !== id);
+  if (nextTasks.length !== tasks.length) {
+    removed += tasks.length - nextTasks.length;
+    saveTasks(nextTasks);
+  }
+  const badges = loadBadgeMap();
+  if (badges[id]) {
+    delete badges[id];
+    saveBadgeMap(badges);
+    removed += 1;
+  }
+  removed += removeAppFromJsonArrayKey(CUSTOM_APP_WORLD_ACTIVATIONS_KEY, id);
+  removed += removeAppFromJsonArrayKey(CUSTOM_APP_SUGGESTIONS_KEY, id);
+  emitHostStateUpdated();
+  return { removed };
+}
+
+/** 清空单个 APP 的私有数据（保留安装记录）：数据集合、时间线、独占媒体和宿主残留。 */
+export function runCustomAppHostClearData(app: InstalledCustomApp): Record<string, unknown> {
+  const data = clearCustomAppData(app.id);
+  const residue = removeCustomAppHostResidue(app.id);
+  return { ok: true, removedMedia: data.removedMedia, removedResidue: residue.removed };
 }
 
 function normalizeHostActions(value: unknown, fieldName: string, required: true): CustomAppHostAction | CustomAppHostAction[];
@@ -2338,6 +2442,251 @@ export async function readCustomAppBridgeState(record: Record<string, unknown>):
   return readAllBridgeStateSnapshots(config, limit);
 }
 
+/**
+ * 借壳的设备动作设一个系统闹钟（ACTION_SET_ALARM，会打开系统时钟 App 让用户确认一次）。
+ * 这是当前唯一「小手机页面被冻结/杀掉也能响」的预约提醒通道；网页/无壳环境返回 ok:false 由调用方降级。
+ */
+export function runCustomAppDeviceAlarmSet(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const hour = Number(record.hour);
+  const minute = Number(record.minute);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23 || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+    throw new Error("device.alarm.set 需要 hour(0-23) 与 minute(0-59)。");
+  }
+  const message = cleanText(record.message, 60) || "专注开始";
+  const result = shellSetAlarm(hour, minute, message);
+  return result.ok
+    ? { ok: true }
+    : { ok: false, reason: result.reason || "当前环境无法设置系统闹钟", needPermission: result.needPermission };
+}
+
+/**
+ * 落一条真正的系统通知（APK 通知栏/锁屏可见）。与 notifications.create 的分工：
+ * 后者只进小手机应用内通知中心，页面冻结时用户根本看不到；本动作经壳原生渠道发出，
+ * 是「预约到点/催促」这类强提醒的可靠路径。网页/无壳环境静默 no-op（ok:false）。
+ */
+export function runCustomAppShellNotify(record: Record<string, unknown>): Record<string, unknown> {
+  const title = cleanText(record.title, 80) || "小手机";
+  const body = cleanText(record.body ?? record.message, 300);
+  const sessionId = cleanText(record.sessionId, 120) || undefined;
+  const avatar = typeof record.avatarUrl === "string" ? record.avatarUrl : undefined;
+  const sent = sendShellNotification(title, body, avatar, sessionId);
+  return { ok: sent, channel: "shell" };
+}
+
+/** L1 提醒锁：切勿扰（壳 ACTION setDnd）。网页/无壳返回 ok:false 由调用方降级。 */
+export function runCustomAppDeviceDnd(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const result = shellSetDnd(record.on !== false);
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "当前环境不支持勿扰切换", needPermission: result.needPermission };
+}
+
+/** L1 提醒锁：调屏幕亮度（0-255）。预留接口，锁机里程碑按需使用。 */
+export function runCustomAppDeviceBrightness(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const level = Math.max(0, Math.min(255, Math.round(Number(record.level) || 0)));
+  const result = shellSetBrightness(level);
+  return result.ok ? { ok: true, level } : { ok: false, reason: result.reason || "当前环境不支持亮度调节", needPermission: result.needPermission };
+}
+
+/** L2 看守锁：已安装应用清单（白名单选择器）。 */
+export function runCustomAppDeviceAppsList(_app: InstalledCustomApp, record: Record<string, unknown> = {}): Record<string, unknown> {
+  void record;
+  const result = listInstalledApps();
+  return result.ok ? { ok: true, apps: result.apps } : { ok: false, apps: [], reason: result.reason || "当前环境不支持应用列表" };
+}
+
+/** L2 看守锁：启动壳侧轮询封锁。 */
+export function runCustomAppDeviceLockStart(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  let packages: string[] = [];
+  try {
+    const raw = record.packages;
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (Array.isArray(arr)) packages = arr.map(item => cleanText(item, 160)).filter(Boolean);
+  } catch { }
+  const until = Number(record.until) || (Date.now() + 2 * 3600_000);
+  const result = shellFocusLockStart(packages, until);
+  return result.ok ? { ok: true, until } : { ok: false, reason: result.reason || "当前环境不支持看守锁" };
+}
+
+/** L2 看守锁：更新白名单/截止时间，不重置本轮倒计时。 */
+export function runCustomAppDeviceLockUpdate(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  let packages: string[] = [];
+  try {
+    const raw = record.packages;
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (Array.isArray(arr)) packages = arr.map(item => cleanText(item, 160)).filter(Boolean);
+  } catch { }
+  const until = Number(record.until) || (Date.now() + 2 * 3600_000);
+  const result = shellFocusLockUpdate(packages, until);
+  return result.ok ? { ok: true, until } : { ok: false, reason: result.reason || "当前环境不支持即时更新看守锁" };
+}
+
+/** L2 看守锁：停止。 */
+export function runCustomAppDeviceLockStop(_app: InstalledCustomApp, record: Record<string, unknown> = {}): Record<string, unknown> {
+  void record;
+  const result = shellFocusLockStop();
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "当前环境不支持看守锁" };
+}
+
+/** 截屏：直接返回当前屏幕的 data URL，供查岗自证等场景使用。 */
+export async function runCustomAppDeviceScreenshot(): Promise<Record<string, unknown>> {
+  const captured = await captureScreenshot();
+  if (!captured.ok) return { ok: false, reason: captured.reason };
+  return {
+    ok: true,
+    dataUrl: `data:image/png;base64,${captured.base64}`,
+    width: captured.width,
+    height: captured.height,
+    bytes: captured.bytes,
+  };
+}
+
+/** L2 看守锁：状态。 */
+export function runCustomAppDeviceLockStatus(_app: InstalledCustomApp, record: Record<string, unknown> = {}): Record<string, unknown> {
+  void record;
+  const result = shellFocusLockStatus();
+  return { ok: true, running: result.running, until: result.until, packages: result.packages };
+}
+
+/** 专注倒计时桌面组件：推会话状态。 */
+export function runCustomAppFocusWidgetUpdate(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const result = shellFocusWidgetUpdate(cleanText(record.json, 4000) || "{}");
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "当前环境不支持专注组件" };
+}
+
+/** 专注倒计时桌面组件：拉起「添加到桌面」引导。 */
+export function runCustomAppFocusWidgetPin(_app: InstalledCustomApp, _record?: Record<string, unknown>): Record<string, unknown> {
+  if (_app.id && _record && Object.keys(_record).length > 0) { /* 占位：签名与调用点对齐 */ }
+  const result = shellFocusWidgetPin();
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "当前环境不支持添加组件" };
+}
+
+/** 看守锁覆盖页 TA 提醒线。 */
+export function runCustomAppDeviceLockTaLine(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const result = shellFocusLockTaLine(cleanText(record.taLine, 200), cleanText(record.charName, 60));
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "当前环境不支持" };
+}
+
+/** L3：设备管理员状态。 */
+export function runCustomAppDeviceAdminStatus(_app: InstalledCustomApp, _record?: Record<string, unknown>): Record<string, unknown> {
+  if (_app.id && _record && Object.keys(_record).length > 0) { /* 占位：签名与调用点对齐 */ }
+  return { ok: true, active: shellIsDeviceAdminActive() };
+}
+
+/** L3：引导激活设备管理员。 */
+export function runCustomAppDeviceAdminRequest(_app: InstalledCustomApp, _record?: Record<string, unknown>): Record<string, unknown> {
+  if (_app.id && _record && Object.keys(_record).length > 0) { /* 占位：签名与调用点对齐 */ }
+  const result = shellRequestDeviceAdmin();
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "无法跳转系统页" };
+}
+
+/** 查岗 v2：壳侧截当前屏（复用查岗授权链，结果经 checkIn 事件回推）。
+ *  自定义 APP 发起的查岗也要把图送进聊天室，否则用户同意给看后没人接。
+ *  返回的 base64 不回传给 APP，避免 APP 自己保存/上传屏幕内容。 */
+export async function runCustomAppDeviceCheckinRequest(_app: InstalledCustomApp, record: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const characterId = cleanText(record.characterId, 120);
+  if (!characterId) return { ok: false, reason: "查岗缺少 characterId" };
+  const name = cleanText(record.name, 80) || "TA";
+  const avatar = typeof record.avatar === "string" ? record.avatar : "";
+  let outcome: Awaited<ReturnType<typeof requestCheckIn>>;
+  try {
+    outcome = await requestCheckIn(characterId, name, avatar);
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : "查岗请求失败" };
+  }
+  const sessionId = loadChatSessions()
+    .filter(session => !session.isGroup && session.contactId === characterId)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]?.id ?? "";
+  if (outcome.accepted && outcome.base64) {
+    try {
+      if (outcome.reply && sessionId) {
+        pushChatMessage({ sessionId, role: "user", content: outcome.reply, status: "sent" });
+      }
+      if (sessionId) {
+        pushChatMessage({
+          sessionId,
+          role: "system",
+          content: `[${name}想看看你现在在做什么，你把屏幕给它看了]`,
+          status: "sent",
+        });
+        const stored = await storeMediaBase64(outcome.base64, "image/png");
+        pushChatMessage({
+          sessionId,
+          role: "user",
+          content: "",
+          mediaType: "image",
+          mediaUrl: stored.ref,
+          mediaData: { label: "通行证查岗自证" },
+          status: "sent",
+        });
+        void requestBackgroundChatReply(sessionId, {
+          appId: "checkin",
+          appTags: ["checkin", "screenshot", "accepted"],
+        }).catch(() => undefined);
+      }
+      return { ok: true, accepted: true };
+    } catch {
+      return { ok: false, reason: "图片没能保存，这次没发出去" };
+    }
+  }
+  if (outcome.reply && sessionId) {
+    pushChatMessage({ sessionId, role: "user", content: outcome.reply, status: "sent" });
+  }
+  if (sessionId) {
+    const reason = "reason" in outcome ? outcome.reason : "unknown";
+    const declined = reason === "user_rejected";
+    const timedOut = reason === "timeout";
+    const note = declined
+      ? `[${name}想看看你现在在做什么，你没有给它看${outcome.reply ? "，但回了一句话" : ""}]`
+      : timedOut
+        ? `[${name}想看看你现在在做什么，你没有回应]`
+        : `[${name}想看看你现在的屏幕，但没能截到（${reason}）]`;
+    pushChatMessage({ sessionId, role: "system", content: note, status: "sent" });
+    const guidanceKind = declined ? "declined" : timedOut ? "timeout" : "failed";
+    void requestBackgroundChatReply(sessionId, {
+      appId: "checkin",
+      appTags: ["checkin", "screenshot", guidanceKind],
+    }).catch(() => undefined);
+  }
+  return { ok: true, accepted: false, reason: "reason" in outcome ? outcome.reason : "unknown" };
+}
+
+/** 原生定时查岗：排程（进程被杀也弹）。 */
+export function runCustomAppDeviceFocusPassCheckInSchedule(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const result = shellScheduleFocusPassCheckIn({
+    passId: cleanText(record.passId, 120),
+    app: cleanText(record.app, 120),
+    characterId: cleanText(record.characterId, 120),
+    name: cleanText(record.name, 80) || "TA",
+    avatar: typeof record.avatar === "string" ? record.avatar : "",
+    dueAt: Number(record.dueAt) || 0,
+  });
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "原生查岗闹钟排程失败" };
+}
+
+export function runCustomAppDeviceFocusPassCheckInCancel(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const result = shellCancelFocusPassCheckIn(cleanText(record.passId, 120));
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "取消原生查岗闹钟失败" };
+}
+
+/** 拦截页留下的待处理申请（页面轮询取走 → 打开申请单）。 */
+export function runCustomAppDeviceLockPendingApply(app: InstalledCustomApp, record?: Record<string, unknown>): Record<string, unknown> {
+  void app; void record;
+  const pending = shellFocusLockPendingApply();
+  return pending ? { ok: true, pkg: pending.pkg, label: pending.label } : { ok: false };
+}
+
+/** 悬浮窗权限状态（L2/L3 覆盖页前置）。 */
+export function runCustomAppDeviceOverlayStatus(app: InstalledCustomApp, record?: Record<string, unknown>): Record<string, unknown> {
+  void app; void record;
+  return { ok: true, granted: shellCanDrawOverlay() };
+}
+
+/** 拉起悬浮窗授权页。 */
+export function runCustomAppDeviceOverlayRequest(app: InstalledCustomApp, record?: Record<string, unknown>): Record<string, unknown> {
+  void app; void record;
+  shellRequestOverlayPermission();
+  return { ok: true };
+}
+
 export async function executeCustomAppHostAction(
   app: InstalledCustomApp,
   rawAction: CustomAppHostAction,
@@ -2358,9 +2707,53 @@ export async function executeCustomAppHostAction(
     case "notification":
     case "ui.notification":
       return createCustomAppNotification(app, payload, onNotice);
+    case "shell.notify":
+      return runCustomAppShellNotify(payload);
+    case "device.alarm.set":
+      return runCustomAppDeviceAlarmSet(app, payload);
+    case "device.dnd.set":
+      return runCustomAppDeviceDnd(app, payload);
+    case "device.brightness.set":
+      return runCustomAppDeviceBrightness(app, payload);
+    case "device.apps.list":
+      return runCustomAppDeviceAppsList(app, payload);
+    case "device.screenshot":
+      return runCustomAppDeviceScreenshot();
+    case "device.lock.start":
+      return runCustomAppDeviceLockStart(app, payload);
+    case "device.lock.update":
+      return runCustomAppDeviceLockUpdate(app, payload);
+    case "device.lock.stop":
+      return runCustomAppDeviceLockStop(app, payload);
+    case "device.lock.status":
+      return runCustomAppDeviceLockStatus(app, payload);
+    case "device.focusWidget.update":
+      return runCustomAppFocusWidgetUpdate(app, payload);
+    case "device.focusWidget.pin":
+      return runCustomAppFocusWidgetPin(app, payload);
+    case "device.lock.taLine":
+      return runCustomAppDeviceLockTaLine(app, payload);
+    case "device.admin.status":
+      return runCustomAppDeviceAdminStatus(app, payload);
+    case "device.admin.request":
+      return runCustomAppDeviceAdminRequest(app, payload);
+    case "device.checkin.request":
+      return runCustomAppDeviceCheckinRequest(app, payload);
+    case "device.checkin.schedule":
+      return runCustomAppDeviceFocusPassCheckInSchedule(app, payload);
+    case "device.checkin.cancel":
+      return runCustomAppDeviceFocusPassCheckInCancel(app, payload);
+    case "device.lock.pendingApply":
+      return runCustomAppDeviceLockPendingApply(app, payload);
+    case "device.overlay.status":
+      return runCustomAppDeviceOverlayStatus(app, payload);
+    case "device.overlay.request":
+      return runCustomAppDeviceOverlayRequest(app, payload);
     case "db.update":
     case "app.data.update":
       return updateCustomAppDataRecord(app, payload);
+    case "app.clearData":
+      return runCustomAppHostClearData(app);
     case "badge":
     case "notifications.badge":
       if (payload.delta !== undefined) return incrementCustomAppBadge(app.id, Number(payload.delta) || 0);
@@ -2409,7 +2802,8 @@ function customAppHostActionNeedsChatStorage(actionType: string): boolean {
     || actionType === "chat.message"
     || actionType === "chat.sendMessage"
     || actionType === "chat.reply"
-    || actionType === "chat.contact";
+    || actionType === "chat.contact"
+    || actionType === "device.checkin.request";
 }
 
 function customAppHostActionNeedsSettingsStorage(actionType: string): boolean {
@@ -2421,7 +2815,7 @@ function customAppHostActionNeedsSettingsStorage(actionType: string): boolean {
 export async function runDueCustomAppTasks(onNotice?: HostNotice): Promise<number> {
   await hydrateKvDb();
   const now = Date.now();
-  const apps = new Map(loadInstalledCustomApps().map(app => [app.id, app]));
+  const apps = new Map(loadAllCustomApps().map(app => [app.id, app]));
   let tasks = loadCustomAppTasks();
   const due = tasks.filter(task => task.status === "pending" && new Date(task.runAt).getTime() <= now);
   if (due.length === 0) return 0;

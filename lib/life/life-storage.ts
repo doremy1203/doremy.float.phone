@@ -9,6 +9,7 @@ import {
   type LifeOwnerType,
   type VirtualLifeState,
 } from "./life-types";
+import { consolidateLifeScenes } from "./life-scene-consolidation";
 
 const STORAGE_KEY = "ai_phone_virtual_life_state_v1";
 registerKvMigration(STORAGE_KEY);
@@ -38,11 +39,13 @@ function normalizeState(value: unknown): VirtualLifeState {
   if (!value || typeof value !== "object") return createEmptyVirtualLifeState();
   const raw = value as Partial<VirtualLifeState>;
   const empty = createEmptyVirtualLifeState();
-  return {
+  const normalized: VirtualLifeState = {
     schemaVersion: 1,
     scheduleProfileVersion: typeof raw.scheduleProfileVersion === "number" ? raw.scheduleProfileVersion : 0,
+    sceneMessageFormatVersion: typeof raw.sceneMessageFormatVersion === "number" ? raw.sceneMessageFormatVersion : 0,
     settings: normalizeSettings(raw.settings),
     locations: Array.isArray(raw.locations) ? raw.locations : [],
+    locationFolders: Array.isArray(raw.locationFolders) ? raw.locationFolders.filter(folder => folder && typeof folder.id === "string" && typeof folder.name === "string") : [],
     actorStates: Array.isArray(raw.actorStates) ? raw.actorStates : [],
     schedules: Array.isArray(raw.schedules) ? raw.schedules.map(slot => {
       // Older UI forms incorrectly labelled ordinary manual activities as free-time.
@@ -60,6 +63,7 @@ function normalizeState(value: unknown): VirtualLifeState {
     timeline: Array.isArray(raw.timeline) ? raw.timeline : [],
     updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : empty.updatedAt,
   };
+  return consolidateLifeScenes(normalized);
 }
 
 /** Loads persisted state without generating schedules or advancing anyone's clock. */

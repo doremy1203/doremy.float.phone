@@ -12,16 +12,13 @@ import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.webkit.CookieManager
 import androidx.core.app.NotificationCompat
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 /**
  * 通话控制无障碍服务。
@@ -29,8 +26,8 @@ import java.util.concurrent.TimeUnit
  * 除原有浮窗/前台应用事件外，负责 Android 原生连续应用停留计时：
  * - 阈值与开关由网页感知面板同步到 SharedPreferences；
  * - 计时不依赖 WebView 的 setInterval；
- * - 达到阈值后把事件放入持久队列，经站点登录态 API 写入个人云现实桥收件箱；
- * - 云端继续复用既有 push-bridge 规则匹配、冷却、角色回复和推送链路。
+ * - 达到阈值后先持久化事件，后台尝试唤醒个人云现实桥；
+ * - 云端未及时投递时立即回落本机离线规则，不阻塞无障碍交互。
  *
  * 本服务只读取前台包名，不读取其他应用界面内容。用户关闭「前台应用」感知或总开关后，
  * 原生计时立即停止。Android/厂商仍可能在强制停止、关闭无障碍权限或杀进程时中断服务。
@@ -52,12 +49,6 @@ class CallControlService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private val pendingLock = Any()
     @Volatile private var delivering = false
-
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(12, TimeUnit.SECONDS)
-        .writeTimeout(12, TimeUnit.SECONDS)
-        .build()
 
     private val dwellTicker = object : Runnable {
         override fun run() {
@@ -261,29 +252,30 @@ class CallControlService : AccessibilityService() {
     }
 
     private fun enqueueEvent(event: JSONObject) {
+        val id = event.optString("id")
         synchronized(pendingLock) {
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val queue = try { JSONArray(prefs.getString(QUEUE_KEY, "[]") ?: "[]") } catch (_: Throwable) { JSONArray() }
-            val id = event.optString("id")
+            for (i in 0 until queue.length()) {
+                if (queue.optJSONObject(i)?.optString("id") == id) return
+            }
+        }
+        // 事件先进入原生持久队列，再由后台线程尝试云端接管。
+        event.put("queuedAt", System.currentTimeMillis())
+        synchronized(pendingLock) {
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val queue = try { JSONArray(prefs.getString(QUEUE_KEY, "[]") ?: "[]") } catch (_: Throwable) { JSONArray() }
             for (i in 0 until queue.length()) {
                 if (queue.optJSONObject(i)?.optString("id") == id) return
             }
             queue.put(event)
-            // 网络长期不可用时限制队列长度，避免无限占用本机存储。
             val bounded = JSONArray()
             for (i in (queue.length() - 20).coerceAtLeast(0) until queue.length()) bounded.put(queue.getJSONObject(i))
             prefs.edit().putString(QUEUE_KEY, bounded.toString()).apply()
         }
-        // 同一事件立即交给本机现实桥执行器；云端补传仍独立保留，Cookie/网络失败不影响本地规则。
-        runCatching {
-            NativeRealityBridge.capture(
-                applicationContext,
-                event.optString("type"),
-                event.optString("payload"),
-            )
-        }
     }
 
+    /** 云端先异步接管；短时间未收到通知投递回执，就执行本机离线兜底。 */
     private fun deliverPendingEvents() {
         if (delivering) return
         val events = synchronized(pendingLock) {
@@ -291,41 +283,104 @@ class CallControlService : AccessibilityService() {
             try { JSONArray(raw) } catch (_: Throwable) { JSONArray() }
         }
         if (events.length() == 0) return
-        val cookie = runCatching { CookieManager.getInstance().getCookie(MainActivity.SITE_URL).orEmpty() }.getOrDefault("")
-        if (cookie.isBlank()) return
 
         delivering = true
         Thread({
             try {
                 for (i in 0 until events.length()) {
                     val event = events.optJSONObject(i) ?: continue
-                    val id = event.optString("id")
+                    val id = event.optString("id").trim()
                     if (id.isBlank()) continue
-                    val body = JSONObject()
-                        .put("id", id)
-                        .put("type", event.optString("type"))
-                        .put("payload", event.optString("payload"))
-                        .put("createdAt", event.optString("createdAt"))
-                        .toString()
-                        .toRequestBody("application/json; charset=utf-8".toMediaType())
-                    val request = Request.Builder()
-                        .url("${MainActivity.SITE_URL.trimEnd('/')}/api/push/bridge-native-event")
-                        .header("Cookie", cookie)
-                        .header("Accept", "application/json")
-                        .post(body)
-                        .build()
-                    val accepted = runCatching {
-                        client.newCall(request).execute().use { response ->
-                            // 410 表示事件过期，确认丢弃；其余失败留在本地待重试。
-                            response.isSuccessful || response.code == 410
-                        }
-                    }.getOrDefault(false)
-                    if (accepted) removePendingEvent(id)
+                    if (event.optBoolean("fallbackSent", false)) {
+                        removePendingEvent(id)
+                        continue
+                    }
+                    val completed = runCatching { deliverCloudThenFallback(event) }.getOrDefault(false)
+                    if (completed) removePendingEvent(id)
                 }
             } finally {
                 delivering = false
             }
-        }, "native-perception-upload").start()
+        }, "native-reality-bridge-local").start()
+    }
+
+    private fun deliverCloudThenFallback(event: JSONObject): Boolean {
+        val id = event.optString("id").trim()
+        if (id.isBlank()) return false
+        val cloudAccepted = postBridgeEvent(event)
+        if (cloudAccepted) {
+            // Realtime push normally arrives quickly. Do not hold the native queue for minutes.
+            repeat(6) {
+                if (hasPostedBridgeReceipt(id)) return true
+                try { Thread.sleep(1_500L) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); return false }
+            }
+        }
+        val delivered = runCatching {
+            NativeRealityBridge.postOfflineNotificationFallback(
+                applicationContext, id, event.optString("type"), event.optString("payload")
+            )
+        }.getOrDefault(false)
+        if (delivered) {
+            postBridgeReceipt(id, "fallback")
+            return true
+        }
+        // The cloud has durably accepted the event even if no local offline rule is configured.
+        return cloudAccepted
+    }
+
+    private fun postBridgeEvent(event: JSONObject): Boolean = runCatching {
+        val site = MainActivity.SITE_URL.trimEnd('/')
+        val body = JSONObject()
+            .put("id", event.optString("id"))
+            .put("type", event.optString("type"))
+            .put("payload", event.optString("payload"))
+            .put("createdAt", runCatching {
+                java.time.Instant.parse(event.optString("createdAt")).toEpochMilli()
+            }.getOrDefault(event.optLong("queuedAt", System.currentTimeMillis())))
+            .put("notifyAlreadyShown", false)
+        val response = bridgeRequest("$site/api/push/bridge-native-event", "POST", body.toString())
+        response?.optBoolean("queued", false) == true
+    }.getOrDefault(false)
+
+    private fun hasPostedBridgeReceipt(eventId: String): Boolean = runCatching {
+        val site = MainActivity.SITE_URL.trimEnd('/')
+        val response = bridgeRequest("$site/api/push/bridge-native-event/receipt?id=$eventId", "GET", null)
+        response?.optBoolean("displayed", false) == true
+    }.getOrDefault(false)
+
+    private fun postBridgeReceipt(eventId: String, status: String) {
+        runCatching {
+            val site = MainActivity.SITE_URL.trimEnd('/')
+            bridgeRequest(
+                "$site/api/push/bridge-native-event/receipt",
+                "POST",
+                JSONObject().put("eventId", eventId).put("status", status).toString(),
+            )
+        }
+    }
+
+    private fun bridgeRequest(url: String, method: String, body: String?): JSONObject? {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = 3_000
+            readTimeout = if (method == "POST") 10_000 else 2_500
+            setRequestProperty("Accept", "application/json")
+            val cookie = CookieManager.getInstance().getCookie(MainActivity.SITE_URL).orEmpty()
+            if (cookie.isNotBlank()) setRequestProperty("Cookie", cookie)
+            if (body != null) {
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+        }
+        return try {
+            if (body != null) connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (code in 200..299 && text.isNotBlank()) JSONObject(text) else null
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun removePendingEvent(id: String) {

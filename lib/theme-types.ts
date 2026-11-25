@@ -1,4 +1,4 @@
-import type { DesktopIconId, IconId } from "@/lib/desktop-config";
+import type { DesktopIconId } from "@/lib/desktop-config";
 
 /* ═══════════════════════════════════════════
    Asset types (wallpaper + icon skin + font)

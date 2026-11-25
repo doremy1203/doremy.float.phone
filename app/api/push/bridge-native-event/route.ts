@@ -64,7 +64,7 @@ export async function POST(request: Request) {
         "Content-Type": "application/json",
         "x-upsert": "true",
       },
-      body: JSON.stringify({ type, payload, createdAt: new Date(timestamp).toISOString() }),
+      body: JSON.stringify({ type, payload, createdAt: new Date(timestamp).toISOString(), notifyAlreadyShown: body.notifyAlreadyShown === true }),
       cache: "no-store",
       signal: AbortSignal.timeout(12_000),
     });

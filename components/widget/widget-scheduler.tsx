@@ -113,6 +113,19 @@ export function WidgetScheduler() {
       void tick();
     }, 3000);
 
+    // App resumes after WebView suspension: refresh the native widget immediately
+    // and re-check the auto-generation deadline instead of waiting for the old timer.
+    const onResume = () => {
+      if (document.visibilityState !== "visible") return;
+      cancelStart();
+      if (cancelTimer) cancelTimer();
+      pushWidgetToNative();
+      void tick();
+    };
+    window.addEventListener("focus", onResume);
+    window.addEventListener("pageshow", onResume);
+    document.addEventListener("visibilitychange", onResume);
+
     // 内容一变立刻推：角色刚用工具留了话，桌面应该马上变，不该等下一轮检查
     const onUpdated = () => { pushWidgetToNative(); };
     const onLifeUpdated = () => { pushWidgetToNative(); };
@@ -125,6 +138,9 @@ export function WidgetScheduler() {
       disposed = true;
       cancelStart();
       if (cancelTimer) cancelTimer();
+      window.removeEventListener("focus", onResume);
+      window.removeEventListener("pageshow", onResume);
+      document.removeEventListener("visibilitychange", onResume);
       window.removeEventListener(WIDGET_UPDATED_EVENT, onUpdated);
       window.removeEventListener("virtual-life-state-updated", onLifeUpdated);
     };

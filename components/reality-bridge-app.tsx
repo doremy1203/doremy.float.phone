@@ -31,7 +31,7 @@ import {
 } from "@/lib/reality-bridge/storage";
 import type { BridgeRule } from "@/lib/reality-bridge/types";
 import { buildChatPromptMessages, sendLLMRequest } from "@/lib/chat-engine";
-import { loadChatMessages, loadChatSessions } from "@/lib/chat-storage";
+import { loadChatContacts, loadChatMessages, loadChatSessions } from "@/lib/chat-storage";
 import { createShortcutCommand, loadRecentShortcutCommands, type ShortcutCommand } from "@/lib/shortcut-command-client";
 import { enableOfflinePush, isShellEnvironment, sendShellTestPush } from "@/lib/push-client";
 import { describeBridgePlatform } from "@/lib/shell-detect";
@@ -54,6 +54,31 @@ type ShortcutEmailStatus = {
   recipient: string;
   verified: boolean;
   verificationExpiresAt?: string;
+};
+
+const OFFLINE_REPLY_PRESETS: Record<string, string[]> = {
+  "电量偏低": [
+    "电量已经不多啦，先找机会充会儿电，别等手机突然关机。",
+    "我看到电量快见底了，充电线在旁边的话先接上吧。",
+    "先提醒你一声：手机电量有点危险，记得补点电。"
+  ],
+  "长时间使用": [
+    "你已经盯着屏幕好一会儿啦，起来活动一下眼睛吧。",
+    "休息几分钟嘛，别把眼睛和自己都累着了。",
+    "我不是催你，只是想提醒你稍微歇一歇。"
+  ],
+  "应用用太久": [
+    "这个应用今天陪你太久啦，换换脑子、活动一下吧。",
+    "先歇一会儿怎么样？眼睛和肩膀都需要喘口气。",
+    "我看到你今天已经用很久了，别忘了给自己留点休息时间。"
+  ],
+};
+function defaultOfflineReplies(matchType: string): string[] {
+  return OFFLINE_REPLY_PRESETS[matchType] ?? [
+    "我注意到一件事，想跟你说一声：{signal}",
+    "欸，刚刚发生了这个情况：{signal}",
+    "先提醒你一下哦：{signal}"
+  ];
 };
 
 function newRule(): BridgeRule {
@@ -630,6 +655,8 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
     }).AndroidShell;
     if (!shell?.configureNativeRealityBridge) return;
     const deviceActionConfig = loadDeviceActionConfig();
+    const chatSessions = loadChatSessions();
+    const chatContacts = loadChatContacts();
     const nativeRules = rules
       .filter(rule => !rule.schedule)
       .map(rule => {
@@ -648,7 +675,14 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
             mode: rule.process?.mode || "raw",
             template: rule.process?.mode === "template" ? rule.process?.template || "" : "",
           },
-          offlineReplies: (rule.offlineReplies || []).filter(line => line.trim()).slice(0, 80),
+          offlineReplies: (rule.offlineReplies === undefined ? defaultOfflineReplies(rule.matchType) : rule.offlineReplies).filter(line => line.trim()).slice(0, 80),
+          notificationEnabled: !!rule.actions.chat || !!rule.actions.notify,
+          characterId: rule.actions.chat?.characterId || "",
+          sessionId: (() => {
+            const characterId = rule.actions.chat?.characterId || "";
+            const contactIds = new Set(chatContacts.filter(contact => contact.characterId === characterId).map(contact => contact.id));
+            return chatSessions.find(session => session.characterId === characterId || session.contactId === characterId || contactIds.has(session.contactId))?.id || "";
+          })(),
           characterName: loadCharacters().find(character => character.id === rule.actions.chat?.characterId)?.name || "",
           ...(canSyncAction ? { deviceAction: { action: chosenAction!.action, args: chosenAction!.args ?? {} } } : {}),
         };
@@ -962,8 +996,12 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
       const instruction = [
         `规则名称：${editing.name || "现实桥联动"}`,
         `触发信号：${editing.matchType || "任意信号"}`,
-        `事件正文：{payload}（这是运行时会替换的占位符）`,
-        "请据此生成离线回复库。",
+        `事件正文：{signal}（运行时替换成一句完整状态描述，例如：手机电量偏低，目前约 20%。）；原始数据：{payload}（例如：20%、抖音 90 分钟）`,
+        "请以这个角色本人的口吻，生成 15 条可直接作为 Android 系统通知正文的离线回复。",
+        "必须贴合角色卡、预设、世界书和近期聊天语气；不要写成系统播报、客服话术或统一的关心模板。",
+        "每条都要自然、简短、有变化，可以亲昵、吐槽、认真或轻轻提醒，但不要每句都用同一种语气。",
+        "只依据事件正文表达，不虚构用户正在做的事；整句引用事件时用 {signal}，只在需要具体数值/文字时用 {payload}。不要把两个占位符放进同一句，也不要在占位符前后再重复“我注意到/手机电量”等前缀。",
+        "严格每行一条，不要序号、项目符号、标题、解释、引号或 Markdown。",
       ].join("\n");
       const syntheticMessage = {
         id: `offline-library-${Date.now()}`,
@@ -997,7 +1035,7 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
     } finally {
       setOfflineReplyGenerating(false);
     }
-  }, [editing, characters, onNotice]);
+  }, [editing, characters, ruleTest.payload, onNotice]);
 
   const saveEditing = useCallback(() => {
     if (!editing) return;
@@ -1247,7 +1285,7 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
 
   /* 联动向导：打开时重置步骤；编辑已有联动可自由跳步 */
   const openRuleEditor = useCallback((rule: BridgeRule, existing: boolean) => {
-    setEditing(rule);
+    setEditing({ ...rule, offlineReplies: rule.offlineReplies === undefined ? defaultOfflineReplies(rule.matchType) : [...rule.offlineReplies] });
     setWizStep(1);
     setWizMax(existing ? 6 : 1);
     // 换一条规则就清掉上次的试跑结果，免得把上一条的效果错认成这一条的
@@ -1261,7 +1299,7 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
     // 动作需要角色时，用第一个角色兜底；没有角色卡的话模板仍然可开，
     // 只是「告诉一个角色」那项会指向空 id，由保存时的既有校验拦下并提示。
     const rule = template.build({ characterId: characters[0]?.id ?? "" });
-    setEditing(rule);
+    setEditing({ ...rule, offlineReplies: rule.offlineReplies === undefined ? defaultOfflineReplies(rule.matchType) : [...rule.offlineReplies] });
     setWizStep(1);
     setWizMax(6);
     // 保留示例数据、只清结果：同一份示例常在几条规则之间反复试，

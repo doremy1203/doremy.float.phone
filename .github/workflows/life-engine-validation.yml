@@ -80,6 +80,8 @@ jobs:
         run: npm run lint
       - name: TypeScript type check
         run: npx tsc --noEmit
+      - name: Native background and life-system wiring assertions
+        run: node scripts/test-life-wiring.mjs
       - name: Life schedule regression tests (UTC)
         run: TZ=UTC npm run test:life
       - name: Life schedule regression tests (daylight-saving timezone)

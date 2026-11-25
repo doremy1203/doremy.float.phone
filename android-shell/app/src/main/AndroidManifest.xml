@@ -141,10 +141,56 @@
             android:name=".CallActionReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".FocusWidgetProvider"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/focus_widget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".FocusDeviceAdminReceiver"
+            android:exported="false"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/focus_device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+        <activity
+            android:name=".BlockingActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.FloatShell" />
+
+        <service
+            android:name=".FocusLockService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled focus lock: keeps the user in the focus session by returning to the host app" />
+        </service>
+
         <service
             android:name=".PushService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 每 15 分钟自检一次：厂商清后台后把推送长连接拉回来。 -->
+        <receiver
+            android:name=".PushWatchdogReceiver"
+            android:exported="false" />
 
         <!-- Visible, user-enabled ambient-light automation; notification includes a stop action. -->
         <service
@@ -175,6 +221,18 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- One-shot inexact alarms only store a due marker and show a user-visible reminder. -->
+        <receiver
+            android:name=".BackgroundTaskAlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <!-- 专注通行证查岗：精确闹钟到点直接拉起 CheckInService 浮层，不依赖网页进程。 -->
+        <receiver
+            android:name=".FocusPassCheckInAlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
 
         <!-- 通话浮窗服务：TYPE_APPLICATION_OVERLAY 浮在其他 App 上层。
              mediaPlayback 类型同时把进程钉在前台，网页语音才不会被系统掐断。 -->

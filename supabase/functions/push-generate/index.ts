@@ -914,6 +914,35 @@ Deno.serve(async (req: Request) => {
         return;
       }
     }
+    // 非生活任务（线上主动消息/离线兜底回复）让行：生活现场在前台时，
+    // 用户正在看现场对话，此时再推线上主动消息会形成两条并行叙事。
+    // 只延后、不丢弃，现场离开后任务会按原排期继续。
+    if (!payload.merge?.lifeScene) {
+      try {
+        const liveSnapResponse = await rest(
+          `push_bridge_snapshots?user_id=eq.${encodeURIComponent(job.user_id)}&rule_id=eq.life-schedule&select=payload,updated_at&limit=1`,
+        );
+        const liveSnapRows = liveSnapResponse.ok
+          ? await liveSnapResponse.json() as { payload?: EncryptedPayload }[]
+          : [];
+        if (liveSnapRows[0]?.payload) {
+          const liveSnapshot = JSON.parse(await decryptPayload(liveSnapRows[0].payload, payloadKey)) as {
+            foregroundSceneId?: string; foregroundLeaseUntil?: string;
+          };
+          const foregroundUntil = Date.parse(liveSnapshot.foregroundLeaseUntil || "");
+          if (liveSnapshot.foregroundSceneId && Number.isFinite(foregroundUntil) && foregroundUntil > Date.now()) {
+            const deferred = await deferUntil(
+              Math.max(Date.now() + 60_000, foregroundUntil + 90_000),
+              "life scene is foreground; online proactive job deferred",
+            );
+            if (!deferred?.ok) await finish("done", "life scene foreground; defer failed safely");
+            return;
+          }
+        }
+      } catch {
+        // 快照不可读时不阻塞普通线上任务，保持原有投递行为。
+      }
+    }
     let shortcutStoragePath = "";
 
     if (job.kind === "shortcut_resume" && payload.shortcut) {

@@ -5,6 +5,7 @@ import {
   type DiaryEntry,
   type DiaryEntryBlock,
   type DiaryEntryInput,
+  type DiaryEntryRevision,
   type DiaryEntryTimerSettings,
   type DiaryEntryTodoItem,
   type DiaryEntryTrigger,
@@ -181,6 +182,24 @@ export function normalizeDiaryEntry(raw: unknown): DiaryEntry | null {
   const blocks = normalizeBlocks(record.blocks, body);
   const title = cleanText(record.title, 80) || body.slice(0, 20) || "未命名日记";
 
+  const revisionHistory: DiaryEntryRevision[] = Array.isArray(record.revisionHistory)
+    ? record.revisionHistory.slice(-20).map((item): DiaryEntryRevision | null => {
+      if (!item || typeof item !== "object") return null;
+      const revision = item as Record<string, unknown>;
+      const revisionBody = cleanMultilineText(revision.body, 6000);
+      return {
+        title: cleanText(revision.title, 80) || revisionBody.slice(0, 20) || "未命名日记",
+        dateLabel: cleanText(revision.dateLabel, 40),
+        mood: cleanText(revision.mood, 60),
+        weather: cleanText(revision.weather, 60),
+        tags: normalizeTags(revision.tags),
+        body: revisionBody,
+        blocks: normalizeBlocks(revision.blocks, revisionBody),
+        savedAt: typeof revision.savedAt === "string" ? revision.savedAt : createdAt,
+      };
+    }).filter((item): item is DiaryEntryRevision => Boolean(item))
+    : [];
+
   return {
     id,
     characterId,
@@ -199,6 +218,8 @@ export function normalizeDiaryEntry(raw: unknown): DiaryEntry | null {
       : typeof record.updated_at === "string"
         ? record.updated_at
         : createdAt,
+    isFavorite: Boolean(record.isFavorite ?? record.favorite),
+    revisionHistory,
   };
 }
 
@@ -270,6 +291,73 @@ export function createDiaryEntry(input: DiaryEntryInput): DiaryEntry {
 export function deleteDiaryEntry(id: string): void {
   if (!id) return;
   saveDiaryEntries(loadDiaryEntries().filter(entry => entry.id !== id));
+}
+
+export type DiaryEntryEditableFields = Pick<DiaryEntry, "title" | "dateLabel" | "mood" | "weather" | "tags" | "body" | "blocks">;
+
+function snapshotDiaryEntry(entry: DiaryEntry): DiaryEntryRevision {
+  return {
+    title: entry.title,
+    dateLabel: entry.dateLabel,
+    mood: entry.mood,
+    weather: entry.weather,
+    tags: [...entry.tags],
+    body: entry.body,
+    blocks: entry.blocks.map(block => block.type === "todo"
+      ? { ...block, items: block.items.map(item => ({ ...item })) }
+      : { ...block }),
+    savedAt: entry.updatedAt || entry.createdAt,
+  };
+}
+
+/** Save a user edit while keeping the original creation timestamp and a restorable revision. */
+export function updateDiaryEntry(id: string, patch: Partial<DiaryEntryEditableFields>): DiaryEntry | null {
+  if (!id) return null;
+  const entries = loadDiaryEntries();
+  const index = entries.findIndex(entry => entry.id === id);
+  if (index < 0) return null;
+  const current = entries[index];
+  const revisionHistory = [...(current.revisionHistory ?? []), snapshotDiaryEntry(current)].slice(-20);
+  const updated = normalizeDiaryEntry({
+    ...current,
+    ...patch,
+    revisionHistory,
+    updatedAt: new Date().toISOString(),
+  });
+  if (!updated) return null;
+  entries[index] = updated;
+  saveDiaryEntries(entries);
+  return updated;
+}
+
+/** Favorite state is independent of content revisions and does not change the writing date. */
+export function setDiaryEntryFavorite(id: string, isFavorite: boolean): DiaryEntry | null {
+  if (!id) return null;
+  const entries = loadDiaryEntries();
+  const index = entries.findIndex(entry => entry.id === id);
+  if (index < 0) return null;
+  const updated = { ...entries[index], isFavorite: Boolean(isFavorite) };
+  entries[index] = updated;
+  saveDiaryEntries(entries);
+  return updated;
+}
+
+/** Restore a selected prior snapshot; the current content is itself kept as a new revision. */
+export function restoreDiaryEntryRevision(id: string, revisionIndex = -1): DiaryEntry | null {
+  const entry = loadDiaryEntries().find(item => item.id === id);
+  if (!entry?.revisionHistory?.length) return null;
+  const index = revisionIndex < 0 ? entry.revisionHistory.length - 1 : revisionIndex;
+  const revision = entry.revisionHistory[index];
+  if (!revision) return null;
+  return updateDiaryEntry(id, {
+    title: revision.title,
+    dateLabel: revision.dateLabel,
+    mood: revision.mood,
+    weather: revision.weather,
+    tags: revision.tags,
+    body: revision.body,
+    blocks: revision.blocks,
+  });
 }
 
 export function loadDiaryEntryTimerSettings(): DiaryEntryTimerSettings {

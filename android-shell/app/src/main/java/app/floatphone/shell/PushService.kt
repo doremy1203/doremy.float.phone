@@ -1,10 +1,12 @@
 package app.floatphone.shell
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -14,6 +16,7 @@ import android.os.IBinder
 import android.util.Base64
 import android.webkit.CookieManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 // RemoteInput 必须用 androidx 版：NotificationCompat.Action.addRemoteInput()
 // 收的是 androidx.core.app.RemoteInput，与框架的 android.app.RemoteInput
 // 是两个类型（同名不同源），混用会直接编译失败。
@@ -45,6 +48,12 @@ class PushService : Service() {
         private const val CH_MESSAGES = "shell_messages"
         private const val CH_CALLS = "shell_calls"
         private const val NOTIF_FG_ID = 1
+        private const val PREFS = "shell_push_cache"
+        private const val KEY_URL = "supabase_url"
+        private const val KEY_ANON = "anon_key"
+        private const val KEY_USER = "user_id"
+        private const val WATCHDOG_INTERVAL_MS = 15 * 60 * 1000L
+        const val WATCHDOG_ACTION = "app.floatphone.shell.PUSH_WATCHDOG"
         private var running = false
 
         fun start(context: Context) {
@@ -52,6 +61,26 @@ class PushService : Service() {
             val intent = Intent(context, PushService::class.java)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
             else context.startService(intent)
+        }
+
+        /**
+         * 看门狗：厂商清理后台后，START_STICKY 不一定会把服务拉回来。
+         * 每 15 分钟给自己一发精确闹钟；收到后若服务已死就重新 startForegroundService，
+         * 然后续排下一次。精确闹钟会触发系统的短时允许名单，后台启动前台服务才不会被拦。
+         */
+        fun scheduleWatchdog(context: Context) {
+            runCatching {
+                val alarm = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                val intent = Intent(context, PushWatchdogReceiver::class.java).setAction(WATCHDOG_ACTION)
+                val pending = PendingIntent.getBroadcast(
+                    context, 0x5055, intent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                )
+                val triggerAt = System.currentTimeMillis() + WATCHDOG_INTERVAL_MS
+                val exactAllowed = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarm.canScheduleExactAlarms()
+                if (exactAllowed) alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+                else alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+            }
         }
     }
 
@@ -79,6 +108,7 @@ class PushService : Service() {
         running = true
         createChannels()
         startForeground(NOTIF_FG_ID, buildKeepAliveNotification("等待连接…"))
+        scheduleWatchdog(this)
         thread(name = "shell-push-loop") { connectionLoop() }
     }
 
@@ -133,17 +163,39 @@ class PushService : Service() {
             }
         }
 
-        val me = getJson("/api/auth/me") ?: return null
+        val me = getJson("/api/auth/me") ?: return@runCatching cachedConfig()
         val userId = me.optJSONObject("account")?.optString("id").orEmpty()
-        if (userId.isEmpty()) return null
-        val online = getJson("/api/online/config") ?: return null
-        if (!online.optBoolean("configured")) return null
+        if (userId.isEmpty()) return@runCatching null
+        val online = getJson("/api/online/config") ?: return@runCatching cachedConfig()
+        if (!online.optBoolean("configured")) return@runCatching null
         val url = online.optString("supabaseUrl")
         val key = online.optString("anonKey")
-        if (url.isEmpty() || key.isEmpty()) return null
+        if (url.isEmpty() || key.isEmpty()) return@runCatching null
+        val config = PushConfig(url.trimEnd('/'), key, userId)
+        cacheConfig(config)
         registerShellSubscription(cookie, userId)
-        PushConfig(url.trimEnd('/'), key, userId)
+        config
     }.getOrNull()
+
+    /** 站点短暂不可达时用上次成功的连接参数续命，避免长连接跟着站点一起断。 */
+    private fun cachedConfig(): PushConfig? = runCatching {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val url = prefs.getString(KEY_URL, "").orEmpty()
+        val key = prefs.getString(KEY_ANON, "").orEmpty()
+        val userId = prefs.getString(KEY_USER, "").orEmpty()
+        if (url.isEmpty() || key.isEmpty() || userId.isEmpty()) null
+        else PushConfig(url, key, userId)
+    }.getOrNull()
+
+    private fun cacheConfig(config: PushConfig) {
+        runCatching {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(KEY_URL, config.supabaseUrl)
+                .putString(KEY_ANON, config.anonKey)
+                .putString(KEY_USER, config.userId)
+                .apply()
+        }
+    }
 
     /**
      * 在站点注册一条合成推送订阅（endpoint = shell:<userId>）。
@@ -225,6 +277,7 @@ class PushService : Service() {
                     val body = payload.optJSONObject("payload") ?: return
                     val title = body.optString("title").ifEmpty { "小手机" }
                     val text2 = body.optString("body").ifEmpty { "有新消息" }
+                    val bridgeEventId = body.optString("bridgeEventId").trim()
                     // 来电：全屏来电通知（任何一步失败回落普通通知，主路不受影响）
                     if (body.optString("kind") == "call") {
                         val shown = runCatching {
@@ -234,9 +287,13 @@ class PushService : Service() {
                                 body.optLong("callTs", System.currentTimeMillis()),
                             )
                         }.isSuccess
-                        if (shown) return
+                        if (shown) {
+                            if (bridgeEventId.isNotEmpty()) sendBridgeReceipt(bridgeEventId)
+                            return
+                        }
                     }
-                    showMessageNotification(title, text2, body.optString("sessionId"), body.optString("avatar"), body.optString("kind"), body.optString("sceneId"))
+                    val notificationPosted = showMessageNotification(title, text2, body.optString("sessionId"), body.optString("avatar"), body.optString("kind"), body.optString("sceneId"))
+                    if (notificationPosted && bridgeEventId.isNotEmpty()) sendBridgeReceipt(bridgeEventId)
                 }
             }
 
@@ -260,6 +317,28 @@ class PushService : Service() {
         socket?.cancel()
         socket = null
         return normal
+    }
+
+    /** 告知现实桥：这条事件通知已由 Android NotificationManager 接受提交。 */
+    private fun sendBridgeReceipt(eventId: String) {
+        thread(name = "bridge-notification-receipt") {
+            runCatching {
+                val cookie = CookieManager.getInstance().getCookie(MainActivity.SITE_URL).orEmpty()
+                val body = JSONObject()
+                    .put("eventId", eventId)
+                    .put("status", "posted")
+                    .toString()
+                    .toRequestBody("application/json; charset=utf-8".toMediaType())
+                val builder = Request.Builder()
+                    .url("${MainActivity.SITE_URL.trimEnd('/')}/api/push/bridge-native-event/receipt")
+                    .post(body)
+                    .header("Accept", "application/json")
+                if (cookie.isNotEmpty()) builder.header("Cookie", cookie)
+                avatarClient.newCall(builder.build()).execute().use { response ->
+                    if (!response.isSuccessful) android.util.Log.w("FloatPush", "bridge receipt rejected: ${response.code}")
+                }
+            }.onFailure { android.util.Log.w("FloatPush", "bridge receipt failed", it) }
+        }
     }
 
     // ── 通知 ──
@@ -383,7 +462,11 @@ class PushService : Service() {
         getSystemService(NotificationManager::class.java).notify(CallAlert.NOTIF_MISSED_ID, notification)
     }
 
-    private fun showMessageNotification(title: String, body: String, sessionId: String? = null, avatarUrl: String? = null, kind: String = "", sceneId: String = "") {
+    private fun showMessageNotification(title: String, body: String, sessionId: String? = null, avatarUrl: String? = null, kind: String = "", sceneId: String = ""): Boolean {
+        if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+            && getSystemService(NotificationManager::class.java).getNotificationChannel(CH_MESSAGES)?.importance == NotificationManager.IMPORTANCE_NONE
+        ) return false
         val builder = NotificationCompat.Builder(this, CH_MESSAGES)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(title)
@@ -405,6 +488,7 @@ class PushService : Service() {
         } else if (sid.isNotEmpty()) builder.addAction(buildReplyAction(sid))
         getSystemService(NotificationManager::class.java).notify(notifId++, builder.build())
         if (notifId > 400) notifId = 100
+        return true
     }
 
     /**
@@ -485,5 +569,14 @@ class PushService : Service() {
 
     private fun sleepSec(sec: Long) {
         runCatching { Thread.sleep(sec * 1000) }
+    }
+}
+
+/** 推送服务看门狗：收到闹钟就把服务拉起并续排下一次。 */
+class PushWatchdogReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent?) {
+        if (intent?.action != PushService.WATCHDOG_ACTION) return
+        runCatching { PushService.start(context) }
+        runCatching { PushService.scheduleWatchdog(context) }
     }
 }

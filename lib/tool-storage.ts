@@ -492,7 +492,7 @@ export function getEnabledTools(appId?: string): EnabledTool[] {
     {
         // Life actions are global toolbox capabilities, available outside the Life APP too.
         const lifeSettings = loadVirtualLifeState().settings;
-        if (lifeSettings.enabled && lifeSettings.enableCharacterAutonomy) {
+        if (lifeSettings.enabled) {
             for (const tool of LIFE_TOOL_DEFINITIONS) {
                 const capabilityId = tool.name === "life_propose_invitation"
                     ? LIFE_INVITATION_CAPABILITY_ID
@@ -500,13 +500,22 @@ export function getEnabledTools(appId?: string): EnabledTool[] {
                         ? LIFE_FOLLOW_CAPABILITY_ID
                         : LIFE_SCHEDULE_CAPABILITY_ID;
                 const capability = getInternalCapability(capabilityId);
-                const allowed = capability?.enabled && capability.mode !== "off" && (tool.name === "life_propose_invitation"
+                const isScheduleRead = tool.name === "life_view_schedule";
+                const isScheduleWrite = tool.name === "life_create_schedule"
+                    || tool.name === "life_change_schedule"
+                    || tool.name === "life_cancel_schedule"
+                    || tool.name === "life_move_location";
+                const allowed = capability?.enabled && capability.mode !== "off"
+                    && (isScheduleRead || lifeSettings.enableCharacterAutonomy)
+                    && (tool.name === "life_propose_invitation"
                     ? lifeSettings.enableInvitations
                     : tool.name === "life_request_follow"
                         ? lifeSettings.enableFollowRequestTool
-                        : tool.name === "life_change_schedule"
-                            ? lifeSettings.enableScheduleChangeTool
-                            : false);
+                        : isScheduleRead
+                            ? true
+                            : isScheduleWrite
+                                ? lifeSettings.enableScheduleChangeTool
+                                : false);
                 if (allowed) tools.push({ ...tool, source: "life", sourceId: capabilityId });
             }
         }
@@ -657,16 +666,17 @@ const BUILTIN_SEARCH: RestToolConfig = {
     id: "builtin_search",
     name: "搜索",
     description: "搜索互联网获取最新信息",
-    endpoint: "https://api.tavily.com/search",
+    endpoint: "https://api.deepseek.com/v1/tools/search",
     method: "POST",
     parameterSchema: JSON.stringify({
         type: "object",
         properties: {
             query: { type: "string", description: "搜索关键词" },
         },
+        required: ["query"],
     }),
-    fixedParams: { api_key: "" },  // 用户需在设置中填入 Tavily API Key
-    directFetch: true,
+    fixedParams: { provider: "deepseek", api_key: "" },
+    directFetch: false,
     enabled: false,
     builtIn: true,
     createdAt: 0,
@@ -681,7 +691,7 @@ const BUILTIN_REST_TOOLS: RestToolConfig[] = [
 
 function mergeBuiltinRestTool(existing: RestToolConfig | undefined, builtin: RestToolConfig): RestToolConfig {
     if (!existing) return builtin;
-    return {
+    const merged: RestToolConfig = {
         ...builtin,
         ...existing,
         id: builtin.id,
@@ -689,6 +699,22 @@ function mergeBuiltinRestTool(existing: RestToolConfig | undefined, builtin: Res
         createdBy: existing.createdBy || builtin.createdBy,
         createdAt: existing.createdAt ?? builtin.createdAt,
         updatedAt: existing.updatedAt ?? builtin.updatedAt,
+    };
+    if (builtin.id !== "builtin_search") return merged;
+
+    const fixedParams = { ...(builtin.fixedParams || {}), ...(existing.fixedParams || {}) };
+    // Existing installations with a saved key were using Tavily; preserve that setup.
+    // New installations default to DeepSeek Search.
+    const storedProvider = existing.fixedParams?.provider;
+    const provider = storedProvider === "tavily" || storedProvider === "deepseek"
+        ? storedProvider
+        : (String(existing.fixedParams?.api_key || "").trim() ? "tavily" : "deepseek");
+    return {
+        ...merged,
+        endpoint: provider === "tavily" ? "https://api.tavily.com/search" : "https://api.deepseek.com/v1/tools/search",
+        method: "POST",
+        directFetch: false,
+        fixedParams: { ...fixedParams, provider },
     };
 }
 

@@ -19,6 +19,7 @@ import { loadGameProjectionEntries } from "./game-storage";
 import { loadDiaryEntries } from "./diary-entry-storage";
 import { loadVirtualLifeState } from "./life/life-storage";
 import { loadPhotoWallState } from "./photo-wall-storage";
+import { loadMemoTimelineProjectionEntries } from "./memo-archive-storage";
 import { asPlayerRecordSubject } from "./life/life-timeline-subject";
 import type { DiaryEntry, DiaryEntryBlock } from "./diary-entry-types";
 import { loadNoteWallProjectionEntries } from "./notewall-memory";
@@ -54,7 +55,7 @@ function formatPhotoDirectiveForPrompt(msg: ChatMessage): string {
 
 export type NativeTimelineEntry = {
     id: string;
-    sourceApp: "chat" | "moments" | "story" | "vn" | "map" | "game" | "diary" | "xiaohongshu" | "interview_magazine" | "cocreate" | "checkphone" | "custom_app" | "photo_wall" | "life" | "phone_widget" | "watch" | "global_watch";
+    sourceApp: "chat" | "moments" | "story" | "vn" | "map" | "game" | "diary" | "xiaohongshu" | "interview_magazine" | "cocreate" | "checkphone" | "custom_app" | "photo_wall" | "memo" | "life" | "phone_widget" | "watch" | "global_watch";
     sourceDetail?: "direct" | "group" | "system" | "story" | "chat_offline" | "game" | "diary_entry" | "notewall" | "xiaohongshu" | "black_market_theater" | "interview_issue" | "interview_shared_issue" | "cocreate_project" | "checkphone" | "custom_app_event" | "life_shared_event" | "photo_wall_creation"; // chat sub-type: 1:1 vs group chat vs system note
     authorType?: "user" | "character" | "npc"; // who authored this entry
     postAuthorType?: "user" | "character"; // for moments: who owns the parent post
@@ -67,6 +68,7 @@ export type NativeTimelineEntry = {
     customAppId?: string;
     customAppName?: string;
     customAppLabel?: string;
+    memoNoteId?: string;
 };
 
 export type NativeMomentComment = {
@@ -896,6 +898,18 @@ export function loadNativeTimeline(
         }
     }
 
+    // Memo timeline contains metadata only; full note bodies stay inside the local archive.
+    for (const memoEntry of loadMemoTimelineProjectionEntries(characterId)) {
+        if (options?.afterTimestamp && memoEntry.timestamp <= options.afterTimestamp) continue;
+        entries.push({
+            id: memoEntry.id,
+            sourceApp: "memo",
+            memoNoteId: memoEntry.memoNoteId,
+            timestamp: memoEntry.timestamp,
+            content: memoEntry.content,
+        });
+    }
+
     // Sort by timestamp ascending
     entries.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     return entries;
@@ -1098,7 +1112,7 @@ export function prepareShortTermContext(
     const historyMessageIds = new Set(history.map(message => message.id));
     const characterName = loadCharacters().find(c => c.id === characterId)?.name ?? "角色";
     const wrapsCurrentHistory = appId === "chat" || appId === "group_chat" || appId === "story" || appId === "vn" || appId === "adventure";
-    const skipDirectChatEntries = appId === "chat" && !options?.includeDirectChatEntries;
+    const skipDirectChatEntries = options?.includeDirectChatEntries === false || (appId === "chat" && !options?.includeDirectChatEntries);
 
     // ── Collect non-history entries per block ──
     const raw: { tag: string; order: number; entries: NativeTimelineEntry[] }[] = [];
@@ -1207,7 +1221,9 @@ export function prepareShortTermContext(
         raw.push({ tag: "recent_group_chat", order: FEATURE_ORDER.group_chat, entries: offlineGroupChatEntries });
     }
 
-    const offlineDirectChatEntries = timeline.filter(e => isChatOfflineEntry(e) && !e.groupSessionId);
+    const offlineDirectChatEntries = skipDirectChatEntries
+        ? []
+        : timeline.filter(e => isChatOfflineEntry(e) && !e.groupSessionId);
     if (offlineDirectChatEntries.length > 0) {
         raw.push({ tag: "recent_chat", order: FEATURE_ORDER.chat, entries: offlineDirectChatEntries });
     }

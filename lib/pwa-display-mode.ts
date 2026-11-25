@@ -1,5 +1,6 @@
-export type PwaDisplayPreference = "fullscreen" | "standalone";
-export type RuntimePwaDisplayMode = "fullscreen" | "standalone" | "minimal-ui" | "browser";
+import { isShellEnvironment } from "./shell-detect";
+
+export type PwaDisplayPreference = "fullscreen" | "standalone";export type RuntimePwaDisplayMode = "fullscreen" | "standalone" | "minimal-ui" | "browser";
 export type PwaHostedSurface = "custom-app" | "game";
 
 export type PwaHostedSafeArea = {
@@ -52,6 +53,9 @@ export function writePwaDisplayPreference(preference: PwaDisplayPreference) {
 /** Preserve the upstream default: mobile browsers request fullscreen unless Edge or explicitly disabled. */
 export function shouldRequestPwaFullscreen(): boolean {
   if (typeof document === "undefined" || typeof navigator === "undefined") return false;
+  // 安卓壳的 WebView 本身就是铺满的，再请求 DOM 全屏必然失败；
+  // 继续请求只会在每次点击后弹一条「浏览器没有允许网页进入全屏」。
+  if (isShellEnvironment()) return false;
   const preference = readPwaDisplayPreference(document.cookie);
   if (preference === "standalone") return false;
   if (preference === "fullscreen") return true;

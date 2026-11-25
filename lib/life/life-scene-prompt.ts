@@ -4,7 +4,7 @@ import { asPlayerRecordSubject } from "./life-timeline-subject";
 import { renderUserNameMacro, USER_NAME_MACRO } from "../user-macro";
 import { resolveUserIdentity } from "../settings-storage";
 
-export function buildLifeScenePromptContext(state: VirtualLifeState, scene: LifeSceneState, viewerId?: string): string {
+export function buildLifeScenePromptContext(state: VirtualLifeState, scene: LifeSceneState, viewerId?: string, throughMessageId?: string): string {
   // 玩家记录在角色记忆里统一用 {{user}}，发送前再解析成该角色当前人设的称呼。
   const playerRefName = resolveUserIdentity(viewerId, "chat")?.name;
   const visibleActorStates = state.actorStates.filter(actor => {
@@ -15,12 +15,42 @@ export function buildLifeScenePromptContext(state: VirtualLifeState, scene: Life
   });
   const participantIds = scene.participants.map(p => p.ownerId);
   const location = state.locations.find(item => item.id === scene.locationId);
+  const homeLocations = state.locations.filter(item => item.id === "home" || item.id.startsWith("home-"));
+  const allSceneMessages = state.sceneMessages.filter(message => message.sceneId === scene.id);
+  const throughIndex = throughMessageId ? allSceneMessages.findIndex(message => message.id === throughMessageId) : -1;
+  const prefix = throughIndex >= 0 ? allSceneMessages.slice(0, throughIndex + 1) : allSceneMessages;
+  const cutoffAt = throughIndex >= 0 ? allSceneMessages[throughIndex].createdAt : undefined;
+  const cutoffMs = cutoffAt ? Date.parse(cutoffAt) : Number.POSITIVE_INFINITY;
+  const prefixMessageIds = new Set(prefix.map(message => message.id));
+  const repliesByTurn = new Map<string, typeof allSceneMessages>();
+  for (const reply of prefix) {
+    if (!reply.replyToMessageId) continue;
+    const replies = repliesByTurn.get(reply.replyToMessageId) ?? [];
+    replies.push(reply);
+    repliesByTurn.set(reply.replyToMessageId, replies);
+  }
+  const sceneMessages: typeof allSceneMessages = [];
+  const includedMessageIds = new Set<string>();
+  for (const message of prefix) {
+    if ((message.replyToMessageId && prefixMessageIds.has(message.replyToMessageId)) || includedMessageIds.has(message.id)) continue;
+    sceneMessages.push(message);
+    includedMessageIds.add(message.id);
+    if (message.role === "player") {
+      for (const reply of (repliesByTurn.get(message.id) ?? []).slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+        if (includedMessageIds.has(reply.id)) continue;
+        sceneMessages.push(reply);
+        includedMessageIds.add(reply.id);
+      }
+    }
+  }
+  const visibleMessageIds = new Set(sceneMessages.map(message => message.id));
   const memories = state.memories
-    .filter(memory => memory.participants.includes(viewerId || "player") && memory.participants.some(id => participantIds.includes(id)))
+    .filter(memory => memory.participants.includes(viewerId || "player")
+      && memory.participants.some(id => participantIds.includes(id))
+      && Date.parse(memory.occurredAt) <= cutoffMs)
     .sort((a,b) => b.occurredAt.localeCompare(a.occurredAt))
     .slice(0, 8)
     .reverse();
-  const sceneMessages = state.sceneMessages.filter(message => message.sceneId === scene.id);
   const recentMessages = sceneMessages.slice(-12);
   const turnGroups = new Map<string, { speakerName: string; speakerId: string; isPlayer: boolean; action: string[]; dialogue: string[]; createdAt: string }>();
   for (const message of recentMessages) {
@@ -59,13 +89,17 @@ export function buildLifeScenePromptContext(state: VirtualLifeState, scene: Life
     .slice(0, 8)
     .reverse() : [];
   const recentCharacterEvents = viewerId ? state.timeline
-    .filter(entry => entry.actorId === viewerId || entry.actorId === "player")
+    .filter(entry => (entry.actorId === viewerId || entry.actorId === "player")
+      && (Date.parse(entry.occurredAt) <= cutoffMs || Boolean(entry.sourceId && visibleMessageIds.has(entry.sourceId))))
     .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
     .slice(0, 8)
     .reverse() : [];
   const lines = [
     "【当前生活场景状态】",
     `场景：${scene.locationName}（locationId=${scene.locationId}）`,
+    "【地点库中的住宅地点（用于准确安排串门、聚餐和留宿）】",
+    ...homeLocations.map(home => `- ${home.name}（locationId=${home.id}）；同住角色：${(home.residents ?? []).join("、") || "未设置"}`),
+    "地点规则：home 是玩家家；home-角色ID 是对应角色的家；若地点库中的 residents 指向某角色，则该角色住在该住宅。去其他角色家做客、吃饭或留宿时，必须使用对方住宅对应的 locationId；不得把其他人的家改写成自己的家。没有匹配的住宅 ID 时，不要猜测或默认玩家家。",
     location?.description ? `地点固定描写：${location.description}` : "",
     scene.currentDescription?.trim() ? `【当前现场描述（由本场景原始行动与对白整理；用于保持连续性，不得覆盖原始记录）】\n${scene.currentDescription.trim()}` : "",
     location?.atmosphere ? `地点氛围：${location.atmosphere}` : "",

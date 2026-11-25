@@ -1,6 +1,7 @@
 package app.floatphone.shell
 
 import android.app.AppOpsManager
+import org.json.JSONArray
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
@@ -314,6 +315,38 @@ class DeviceActionBridge(private val context: Context) {
      * 本应用自身也在候选里（见下方循环注释）：角色可以用它把用户
      * 从别的 App 里「叫回」小手机。
      */
+    /**
+     * 已安装的可启动应用清单（白名单选择器数据源）。
+     * queryIntentActivities(MAIN/LAUNCHER)：拿到的必然可启动，
+     * 天然绕开无界面组件；按显示名排序；本应用自身排除（锁机白名单选它没有意义）。
+     */
+    fun listInstalledApps(): String {
+        return try {
+            val pm = context.packageManager
+            val launchable = pm.queryIntentActivities(
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),
+                0,
+            )
+            val arr = JSONArray()
+            val rows = ArrayList<Triple<String, String, String>>()
+            for (info in launchable) {
+                val pkg = info.activityInfo?.packageName ?: continue
+                if (pkg == context.packageName) continue
+                val label = runCatching {
+                    pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+                }.getOrDefault(pkg)
+                rows.add(Triple(label.lowercase(), pkg, label))
+            }
+            rows.sortBy { it.first }
+            for ((_, pkg, label) in rows) {
+                arr.put(JSONObject().put("package", pkg).put("label", label))
+            }
+            JSONObject().put("ok", true).put("apps", arr).put("count", rows.size).toString()
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", e.message ?: "无法列出应用").put("apps", JSONArray()).toString()
+        }
+    }
+
     fun findPackageByLabel(label: String): String {
         if (label.isBlank()) return ""
         return try {

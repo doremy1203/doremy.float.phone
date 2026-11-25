@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BookOpen, Clock3, RefreshCw, Settings2, Eye, ChevronLeft, ImagePlus } from "lucide-react";
+import { BookOpen, RefreshCw, Settings2, Eye, ChevronLeft, ImagePlus } from "lucide-react";
 import type { Character } from "@/lib/character-types";
 import { loadChatContacts, loadChatMessages, loadChatSessions, type ChatMessage } from "@/lib/chat-storage";
 import { simpleLLMCall } from "@/lib/api-helpers";
@@ -145,14 +145,14 @@ export function LifeObservation({ characters, active = false, onNotice }: { char
     const previousCovered = config.coveredUntil ? new Date(config.coveredUntil).getTime() : defaultStart;
     const fromMs = Math.max(previousCovered, defaultStart);
     if (fromMs >= nowMs - 60_000) {
-      if (manual) tell("目前没有需要补写的新行程；之后有新行程时再打开即可继续记录。");
+      if (manual) tell("暂无新行程");
       return;
     }
     const coveredSchedules = schedules.filter(slot => new Date(slot.endAt).getTime() > fromMs && new Date(slot.startAt).getTime() < nowMs);
     const coveredTimeline = timeline.filter(entry => new Date(entry.occurredAt).getTime() >= fromMs && new Date(entry.occurredAt).getTime() <= nowMs);
     if (!coveredSchedules.length && !coveredTimeline.length) {
       updateData(current => ({ ...current, characters: { ...current.characters, [character.id]: { ...config, coveredUntil: new Date(nowMs).toISOString(), lastGeneratedAt: new Date().toISOString() } } }));
-      if (manual) tell("这段时间没有可用的行程或生活事件记录，已推进观察时间；可以在角色日常里先补全行程。");
+      if (manual) tell("暂无可记录的生活事件");
       return;
     }
     const contact = loadChatContacts().find(item => item.characterId === character.id);
@@ -177,7 +177,20 @@ export function LifeObservation({ characters, active = false, onNotice }: { char
         character.persona ? "角色设定：" + character.persona : "",
         character.personality ? "性格：" + character.personality : "",
         (character.tags ?? []).length ? "标签：" + (character.tags ?? []).join("、") : "",
-        state.locations.map(location => location.characterHabits?.[character.id] ? `${location.name}的习惯：${location.characterHabits[character.id]}` : "").filter(Boolean).join("\n"),
+        state.locations.map(location => location.characterHabits?.[character.id] ? location.name + "的习惯：" + location.characterHabits[character.id] : "").filter(Boolean).join("\n"),
+        (() => {
+          const visitedIds = new Set(coveredSchedules.map(schedule => schedule.plannedLocationId).filter((value): value is string => Boolean(value)));
+          const visitedNames = new Set(coveredSchedules.map(schedule => schedule.plannedLocationName).filter((value): value is string => Boolean(value)));
+          return state.locations.filter(location => visitedIds.has(location.id) || visitedNames.has(location.name) || (location.aliases ?? []).some(alias => visitedNames.has(alias)))
+            .slice(0, 12)
+            .map(location => [
+              "地点档案：" + location.name,
+              location.description ? "环境：" + location.description.slice(0, 180) : "",
+              location.atmosphere ? "氛围：" + location.atmosphere.slice(0, 100) : "",
+              location.layout ? "布局：" + location.layout.slice(0, 120) : "",
+              location.props?.length ? "道具：" + location.props.slice(0, 6).join("、") : "",
+            ].filter(Boolean).join("；")).join("\n");
+        })(),
       ].filter(Boolean).join("\n");
       const prompt: ChatMessage = {
         id: makeId(), sessionId: session.id, role: "user", status: "sent", createdAt: new Date().toISOString(),
@@ -231,7 +244,7 @@ export function LifeObservation({ characters, active = false, onNotice }: { char
         return { ...current, entries: [...current.entries, ...entries], characters: { ...current.characters, [character.id]: { ...currentConfig, lastGeneratedAt: createdAt, coveredUntil: new Date(nowMs).toISOString() } } };
       });
       recordLifeDiagnostic({ source: "生活观察", event: "生活片段补写完成", status: "ok", detail: "已为 " + character.name + " 生成 " + entries.length + " 张事件卡片。", meta: { characterId: character.id, fromAt: new Date(fromMs).toISOString(), toAt: new Date(nowMs).toISOString(), manual } });
-      tell("已为「" + character.name + "」生成 " + entries.length + " 张独立生活事件卡片。");
+      tell("已生成 " + entries.length + " 段记录");
     } catch (error) {
       recordLifeDiagnostic({ source: "生活观察", event: "生活片段补写失败", status: "error", detail: error instanceof Error ? error.message : String(error), meta: { characterId: character.id, manual } });
       tell(error instanceof Error ? "生活描写生成失败：" + error.message : "生活描写生成失败，请检查模型配置。");
@@ -308,7 +321,7 @@ export function LifeObservation({ characters, active = false, onNotice }: { char
 
   return <section hidden={!active} className="min-w-0 max-w-full space-y-4 break-words [overflow-wrap:anywhere]">
     <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
-      <div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--life-accent)]">Life Observer</p><h2 className="mt-1 text-xl font-semibold text-stone-800">观察 TA 的生活</h2><p className="mt-1 max-w-2xl text-sm leading-relaxed text-stone-500">从角色自己的行程与已记录事件出发，补写你没有亲眼看到的生活片段。点进角色才生成，不会一口气为所有角色生成长文。</p></div>
+      <div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--life-accent)]">Life Observer</p><h2 className="mt-1 text-xl font-semibold text-stone-800">观察 TA 的生活</h2><p className="mt-1 max-w-2xl text-sm leading-relaxed text-stone-500">从角色自己的行程与已记录事件出发，补写你没有亲眼看到的生活片段。</p></div>
       <button type="button" onClick={() => setSettingsOpen(value => !value)} className="inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm"><Settings2 size={16}/>观察设置</button>
     </div>
     {settingsOpen && <div className="rounded-2xl border border-stone-200 bg-white/80 p-4">
@@ -317,7 +330,7 @@ export function LifeObservation({ characters, active = false, onNotice }: { char
         <label className="text-sm">最多向前补写几天<input type="number" min={1} max={30} value={data.settings.maxBackfillDays} onChange={event => updateData(current => ({ ...current, settings: { ...current.settings, maxBackfillDays: clamp(Number(event.target.value), 1, 30) } }))} className="mt-1 block w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5"/></label>
         <label className="text-sm">生活记录保留天数<input type="number" min={1} max={3650} value={data.settings.retentionDays} onChange={event => updateData(current => ({ ...current, settings: { ...current.settings, retentionDays: clamp(Number(event.target.value), 1, 3650) } }))} className="mt-1 block w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5"/></label>
       </div>
-      <p className="mt-2 text-xs leading-relaxed text-stone-500">清理按记录生成时间计算；缩短保留期会在下次保存时清除过期记录。补写上限按角色自己的虚拟生活时间计算。</p>
+      <p className="mt-2 text-xs leading-relaxed text-stone-500">保留期按生成时间计算；补写范围按角色虚拟时间计算。</p>
     </div>}
     {!selectedCharacter ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       {characters.map(character => {
@@ -344,12 +357,11 @@ export function LifeObservation({ characters, active = false, onNotice }: { char
       <div className="flex items-center justify-between gap-3"><button type="button" onClick={() => setSelectedId(null)} className="inline-flex items-center gap-1 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm"><ChevronLeft size={16}/>角色列表</button><div className="flex gap-2"><button type="button" disabled={busyId === selectedCharacter.id} onClick={() => void generateForCharacter(selectedCharacter, true)} className="inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm disabled:opacity-50"><RefreshCw size={15} className={busyId === selectedCharacter.id ? "animate-spin" : ""}/>继续补写</button></div></div>
       <article className="rounded-2xl border border-white/80 bg-white/75 p-4">
         <div className="flex items-center gap-3">{selectedCharacter.avatar ? <img src={selectedCharacter.avatar} alt="" className="h-12 w-12 rounded-full object-cover"/> : <div className="grid h-12 w-12 place-items-center rounded-full bg-[#b88768]/15 text-lg">{selectedCharacter.name.slice(0,1)}</div>}<div><h3 className="text-lg font-semibold text-stone-800">{selectedCharacter.name} 的生活观察记录</h3><p className="text-xs text-stone-500">{selectedEntries.length} 段记录 · {selectedEntries[0] ? "最近记录至 " + fmt(selectedEntries[0].toAt) : "首次观察"}</p></div></div>
-        <div className="mt-3 flex items-start gap-2 rounded-xl bg-[#f7efe5] p-3 text-xs leading-relaxed text-stone-600"><Clock3 size={15} className="mt-0.5 shrink-0"/>点开后会按上次覆盖的时间继续补写到角色当前虚拟时间；超出「最多补写天数」的旧时段会跳过，避免一次生成过长。</div>
-        <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-stone-100 bg-white/80 p-3"><div className="min-w-0"><p className="text-sm font-medium text-stone-700">自动生活描写</p><p className="mt-0.5 text-xs text-stone-500">每隔设定时间生成一次；仅在应用处于前台时自动触发，进入角色页面时也会补齐新行程。</p></div><input type="checkbox" aria-label="开启该角色自动生活描写" checked={selectedConfig?.enabled ?? false} onChange={event => updateData(current => ({ ...current, characters: { ...current.characters, [selectedCharacter.id]: { ...(current.characters[selectedCharacter.id] ?? { intervalMinutes: 180 }), enabled: event.target.checked } } }))}/></div>
+         <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-stone-100 bg-white/80 p-3"><div className="min-w-0"><p className="text-sm font-medium text-stone-700">自动生活描写</p><p className="mt-0.5 text-xs text-stone-500">每隔设定时间生成；仅应用前台运行。</p></div><input type="checkbox" aria-label="开启该角色自动生活描写" checked={selectedConfig?.enabled ?? false} onChange={event => updateData(current => ({ ...current, characters: { ...current.characters, [selectedCharacter.id]: { ...(current.characters[selectedCharacter.id] ?? { intervalMinutes: 180 }), enabled: event.target.checked } } }))}/></div>
       </article>
-      {busyId === selectedCharacter.id && <div className="rounded-xl bg-white/80 p-3 text-sm text-stone-600">正在整理行程、时间线并生成生活描写……</div>}
-      {selectedEntries.map(entry => <article key={entry.id} className="rounded-2xl border border-stone-200/70 bg-white/85 p-4 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-100 pb-2"><div className="flex items-center gap-2 text-xs font-semibold text-[var(--life-accent)]"><BookOpen size={15}/>{entry.eventTime || (fmt(entry.fromAt) + " — " + fmt(entry.toAt))}</div><div className="flex items-center gap-3"><button type="button" disabled={imageBusyId === entry.id} onClick={() => void generateEntryImage(entry)} className="inline-flex items-center gap-1 text-xs text-[var(--life-accent)] disabled:opacity-50"><ImagePlus size={14}/>{imageBusyId === entry.id ? "正在生成…" : entry.imageMediaRef ? "重新生成场景图" : "生成场景图"}</button><button type="button" onClick={() => regenerateEntry(entry)} className="text-xs text-stone-500 hover:text-[var(--life-accent)]">重新生成这段</button><button type="button" onClick={() => deleteEntry(entry.id)} className="text-xs text-stone-400 hover:text-red-600">删除</button></div></div><div className="mt-3 border-l-2 border-[var(--life-accent)]/35 pl-3"><h3 className="font-serif text-base font-semibold text-stone-800">{entry.title || "生活片段"}</h3>{(entry.locationName || entry.people?.length) && <p className="mt-1 text-[11px] text-stone-500">{entry.locationName ? "地点：" + entry.locationName : ""}{entry.locationName && entry.people?.length ? " · " : ""}{entry.people?.length ? "人物：" + entry.people.map(person => renderUserNameMacro(person, userDisplayName)).join("、") : ""}</p>}<p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-stone-700">{renderUserNameMacro(entry.content, userDisplayName)}</p></div>{entry.imageMediaRef && (imageUrls[entry.id] ? <img src={imageUrls[entry.id]} alt={entry.characterName + "的生活场景图"} className="mt-3 max-h-[420px] w-full rounded-xl object-contain bg-stone-100"/> : <p className="mt-3 text-xs text-stone-400">场景图已保存，正在读取图片…</p>)}</article>)}
-      {!selectedEntries.length && busyId !== selectedCharacter.id && <p className="rounded-2xl bg-white/70 p-5 text-sm text-stone-500">还没有生活描写。点击「继续补写」开始观察。</p>}
+      {busyId === selectedCharacter.id && <div className="rounded-xl bg-white/80 p-3 text-sm text-stone-600">正在生成…</div>}
+      {selectedEntries.map(entry => <article key={entry.id} className="rounded-2xl border border-stone-200/70 bg-white/85 p-4 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-100 pb-2"><div className="flex items-center gap-2 text-xs font-semibold text-[var(--life-accent)]"><BookOpen size={15}/>{entry.eventTime || (fmt(entry.fromAt) + " — " + fmt(entry.toAt))}</div><div className="flex items-center gap-3"><button type="button" disabled={imageBusyId === entry.id} onClick={() => void generateEntryImage(entry)} className="inline-flex items-center gap-1 text-xs text-[var(--life-accent)] disabled:opacity-50"><ImagePlus size={14}/>{imageBusyId === entry.id ? "正在生成…" : entry.imageMediaRef ? "重新生成场景图" : "生成场景图"}</button><button type="button" onClick={() => regenerateEntry(entry)} className="text-xs text-stone-500 hover:text-[var(--life-accent)]">重新生成这段</button><button type="button" onClick={() => deleteEntry(entry.id)} className="text-xs text-stone-400 hover:text-red-600">删除</button></div></div><div className="mt-3 border-l-2 border-[var(--life-accent)]/35 pl-3"><h3 className="font-serif text-base font-semibold text-stone-800">{entry.title || "生活片段"}</h3>{(entry.locationName || entry.people?.length) && <p className="mt-1 text-[11px] text-stone-500">{entry.locationName ? "地点：" + entry.locationName : ""}{entry.locationName && entry.people?.length ? " · " : ""}{entry.people?.length ? "人物：" + entry.people.map(person => renderUserNameMacro(person, userDisplayName)).join("、") : ""}</p>}<p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-stone-700">{renderUserNameMacro(entry.content, userDisplayName)}</p></div>{entry.imageMediaRef && (imageUrls[entry.id] ? <img src={imageUrls[entry.id]} alt={entry.characterName + "的生活场景图"} className="mt-3 max-h-[420px] w-full rounded-xl object-contain bg-stone-100"/> : <p className="mt-3 text-xs text-stone-400">正在读取图片…</p>)}</article>)}
+      {!selectedEntries.length && busyId !== selectedCharacter.id && <p className="rounded-2xl bg-white/70 p-5 text-sm text-stone-500">暂无记录</p>}
       <div className="flex flex-wrap gap-2"><button type="button" onClick={() => clearCharacter(selectedCharacter.id)} className="rounded-xl border border-red-100 bg-white px-3 py-2 text-xs text-red-600">清空该角色全部记录</button><button type="button" onClick={() => setSelectedId(null)} className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-xs text-stone-600">返回角色列表</button></div>
     </div>}
     {notice && <div role="status" className="rounded-xl border border-stone-200 bg-white/80 px-3 py-2 text-sm text-stone-600">{notice}<button type="button" onClick={() => setNotice("")} className="ml-2 text-stone-400">×</button></div>}

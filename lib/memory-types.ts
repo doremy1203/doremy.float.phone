@@ -34,7 +34,7 @@ export type MemoryConfig = {
         chat?: boolean; group_chat?: boolean; moments?: boolean; checkphone?: boolean; diary?: boolean;
         xiaohongshu?: boolean; interview_magazine?: boolean; cocreate?: boolean; game?: boolean;
         story?: boolean; vn?: boolean; adventure?: boolean; custom_app?: boolean; photo_wall?: boolean;
-        life?: boolean; phone_widget?: boolean; watch?: boolean; global_watch?: boolean;
+        life?: boolean; phone_widget?: boolean; watch?: boolean; global_watch?: boolean; memo?: boolean;
     };
     shortTermAllowedSources?: {
         chat?: boolean;
@@ -55,6 +55,7 @@ export type MemoryConfig = {
         phone_widget?: boolean;
         watch?: boolean;
         global_watch?: boolean;
+        memo?: boolean;
     };
     /** 每个消费 APP 从所有已允许来源合并读取的短期记忆总条数上限；0=不限制。最终仍受 shortTermTokenBudget 约束。 */
     /** Internal one-time settings migration marker; does not affect stored memories. */
@@ -162,7 +163,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
         chat: true, group_chat: true, moments: true, checkphone: true, diary: true,
         xiaohongshu: true, interview_magazine: true, cocreate: true, game: true,
         story: true, vn: true, adventure: true, custom_app: true, photo_wall: true,
-        life: true, phone_widget: true, watch: true, global_watch: true,
+        life: true, phone_widget: true, watch: true, global_watch: true, memo: true,
     },
     shortTermAllowedSources: {
         chat: true,
@@ -183,6 +184,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
         phone_widget: true,
         watch: true,
         global_watch: true,
+        memo: true,
     },
     shortTermAppLimits: {
         chat: 0, group_chat: 0, life: 0, photo_wall: 8, watch: 8, global_watch: 5,

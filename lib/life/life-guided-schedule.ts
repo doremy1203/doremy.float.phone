@@ -62,7 +62,20 @@ export function parseGuidedScheduleResponse(
     const item = value as Record<string, unknown>;
     const operation = typeof item.operation === "string" ? item.operation.trim().toLowerCase() : "";
     const existingId = typeof item.existingScheduleId === "string" ? item.existingScheduleId.trim() : "";
-    return existingId && ["move", "update", "cancel"].includes(operation) ? [existingId] : [];
+    const actorId = typeof item.actorId === "string" ? item.actorId.trim() : "";
+    const actorTypeRaw = typeof item.actorType === "string" ? item.actorType.trim().toLowerCase() : "";
+    const actorType = actorTypeRaw === "player" || actorTypeRaw === "用户" || actorTypeRaw === "玩家"
+      ? "player"
+      : actorTypeRaw === "character" || actorTypeRaw === "角色" ? "character" : null;
+    if (!existingId || !actorId || !actorType || !["move", "update", "cancel"].includes(operation)) return [];
+    const context = contexts.find(entry => entry.ownerType === actorType && entry.ownerId === actorId);
+    const existing = context?.existing.find(slot => slot.id === existingId);
+    if (!context || !existing) return [];
+    const started = new Date(existing.startAt) <= context.now || new Date(existing.endAt) <= context.now;
+    const protectedManual = existing.source === "manual" && existing.kind !== "free-time";
+    return !started && !protectedManual && existing.source !== "event" && existing.kind !== "appointment"
+      ? [existingId]
+      : [];
   }));
 
   for (const [index, value] of decoded.schedules.entries()) {
@@ -119,8 +132,9 @@ export function parseGuidedScheduleResponse(
       rejected.push(`第 ${index + 1} 条缺少有效的 existingScheduleId`);
       continue;
     }
-    if (existing && (new Date(existing.endAt) <= context.now || new Date(existing.startAt) <= context.now || existing.source === "event")) {
-      rejected.push(`第 ${index + 1} 条试图调整已开始、已过去或已确认的固定日程`);
+    if (existing && (new Date(existing.endAt) <= context.now || new Date(existing.startAt) <= context.now
+      || existing.source === "event" || (existing.source === "manual" && existing.kind !== "free-time") || existing.kind === "appointment")) {
+      rejected.push(`第 ${index + 1} 条试图调整已开始、已过去、用户手动安排或已确认的固定日程`);
       continue;
     }
 
@@ -166,11 +180,16 @@ export function parseGuidedScheduleResponse(
       continue;
     }
     const startMs = startAt.getTime(), endMs = endAt.getTime();
-    const conflict = context.existing.find(slot =>
-      slot.kind !== "free-time"
-      && slot.id !== existingScheduleId
-      && !scheduledToChange.has(slot.id)
-      && overlaps(startMs, endMs, new Date(slot.startAt).getTime(), new Date(slot.endAt).getTime()));
+    const conflict = context.existing.find(slot => {
+      const slotStart = new Date(slot.startAt).getTime();
+      const slotEnd = new Date(slot.endAt).getTime();
+      const isAlreadyInProgress = slotStart <= context.now.getTime() && slotEnd > context.now.getTime();
+      const replaceableFreeTime = slot.kind === "free-time" && !isAlreadyInProgress;
+      return !replaceableFreeTime
+        && slot.id !== existingScheduleId
+        && !scheduledToChange.has(slot.id)
+        && overlaps(startMs, endMs, slotStart, slotEnd);
+    });
     if (conflict) {
       conflicts.push(`${context.name}：${title}（与「${conflict.title}」冲突；请重新规划）`);
       continue;

@@ -98,6 +98,7 @@ const MEMORY_SOURCE_OPTIONS: Array<{ key: MemorySourceKey; label: string }> = [
     { key: "phone_widget", label: "桌面小组件" },
     { key: "watch", label: "一起看" },
     { key: "global_watch", label: "全局陪看" },
+    { key: "memo", label: "备忘录" },
 ];
 
 type MemoryEditorState = {

@@ -3,13 +3,25 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 
+// Exercise the shared location-room helpers through the runtime module, not a stub.
+
 const source = readFileSync(new URL("../lib/life/life-runtime.ts", import.meta.url), "utf8");
-const compiled = ts.transpileModule(source, {
+const engineSource = readFileSync(new URL("../lib/life/life-engine.ts", import.meta.url), "utf8");
+const compile = input => ts.transpileModule(input, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
 }).outputText;
+const engineBox = { exports: {} };
+vm.runInNewContext(compile(engineSource), {
+  module: engineBox, exports: engineBox.exports, Date, Math, console,
+}, { filename: "life-engine.cjs" });
 const moduleBox = { exports: {} };
-const sandbox = { module: moduleBox, exports: moduleBox.exports, Date, Math, console };
-vm.runInNewContext(compiled, sandbox, { filename: "life-runtime.cjs" });
+const sandbox = {
+  module: moduleBox,
+  exports: moduleBox.exports,
+  Date, Math, console,
+  require: specifier => specifier === "./life-engine" ? engineBox.exports : {},
+};
+vm.runInNewContext(compile(source), sandbox, { filename: "life-runtime.cjs" });
 const { applyCharacterLifeScheduleChange, confirmLifeInvitation, generateWeeklyLifePlan, getCurrentActorSchedule, insertManualLifeScheduleSlot, overlayScheduleSlotsOverFreeTime, placeAppointmentInActorSchedule, resolveActorLifeNow, settleActorTimelineToNow, syncScheduleLocationsToLibrary, synchronizeCharacterHomeSchedule, reserveCharacterLocationStay, resolveActorLocation } = moduleBox.exports;
 assert.equal(typeof generateWeeklyLifePlan, "function", "weekly planner should be exported");
 assert.equal(typeof getCurrentActorSchedule, "function", "current schedule selector should be exported");
@@ -215,7 +227,7 @@ const blocked = insertManualLifeScheduleSlot(withAppointment, manualActivity);
 assert.equal(blocked.conflict?.id, protectedAppointment.id, "manual insertion must report confirmed appointment conflicts");
 assert.equal(blocked.state, withAppointment, "a conflicting insert must leave the schedule unchanged");
 
-const characterToolPlan = { ...manualActivity, id: "character-tool-plan", title: "角色主动调整的计划", source: "character-tool" };
+const characterToolPlan = { ...manualActivity, id: "character-tool-plan", title: "角色主动调整的计划", kind: "study", source: "character-tool" };
 const withCharacterToolPlan = { ...emptyPlan, schedules: [...emptyPlan.schedules, characterToolPlan] };
 const blockedByCharacterTool = insertManualLifeScheduleSlot(withCharacterToolPlan, { ...manualActivity, id: "overlapping-user-plan" });
 assert.equal(blockedByCharacterTool.conflict?.id, characterToolPlan.id, "manual plans must not silently overwrite a character-authored schedule change");
@@ -314,8 +326,21 @@ const apState = {
 };
 const apStarted = settleActorTimelineToNow(apState, "player", "player", apNow);
 assert.equal(apStarted.events[0].status, "active");
-assert.ok(apStarted.scenes.some(scene => scene.eventId === "ap-event" && scene.status === "active"));
+assert.equal(apStarted.scenes.length, 1, "an appointment must reuse/create one location room, not a separate event room");
+assert.equal(apStarted.scenes[0].locationId, "cafe");
+assert.equal(apStarted.scenes[0].status, "paused", "scheduled events must not steal the foreground room");
+assert.equal(apStarted.scenes[0].eventId, undefined, "new location rooms must not be keyed as event scenes");
 assert.equal(apStarted.actorStates.find(actor => actor.ownerType === "player").actualLocationId, "cafe");
+
+const appointmentWithNamedLocation = {
+  ...apState,
+  events: apState.events.map(event => ({ ...event, locationId: undefined, locationName: "Cafe Alias" })),
+  locations: apState.locations.map(location => location.id === "cafe" ? { ...location, aliases: ["Cafe Alias"] } : location),
+};
+const settledNamedLocation = settleActorTimelineToNow(appointmentWithNamedLocation, "player", "player", apNow);
+assert.equal(settledNamedLocation.scenes[0].locationId, "cafe", "event location aliases must resolve to the canonical location id rather than the player's prior location");
+
+
 const apCharacterSettled = settleActorTimelineToNow(apStarted, "character", "c1", apNow);
 assert.equal(apCharacterSettled.actorStates.find(actor => actor.ownerType === "character").actualLocationId, "cafe");
 
@@ -330,10 +355,10 @@ assert.equal(
   "completed",
   "a confirmed appointment crossed entirely during catch-up should be completed, not marked missed",
 );
-assert.ok(
-  caughtUpAfterAppointment.scenes.some(scene => scene.eventId === "ap-event" && scene.status === "completed"),
-  "catch-up should retain a completed shared scene for the elapsed appointment",
-);
+assert.equal(caughtUpAfterAppointment.scenes.length, 1, "catch-up should retain one canonical location room");
+assert.equal(caughtUpAfterAppointment.scenes[0].locationId, "cafe");
+assert.equal(caughtUpAfterAppointment.scenes[0].status, "paused", "a completed event must not complete its location chat room");
+assert.equal(caughtUpAfterAppointment.scenes[0].eventId, undefined);
 assert.equal(
   caughtUpAfterAppointment.memories.length,
   1,
@@ -352,6 +377,7 @@ const existingSharedSceneState = {
     participants: [
       { ownerType: "player", ownerId: "player", activity: "喝咖啡", awarenessByActorId: {} },
       { ownerType: "character", ownerId: "c1", activity: "喝咖啡", awarenessByActorId: {} },
+      { ownerType: "character", ownerId: "c2", activity: "在店里看书", awarenessByActorId: { player: "aware" } },
     ],
     lastSettledEventIds: [],
   }],
@@ -363,7 +389,14 @@ const attachedExistingScene = settleActorTimelineToNow(
   new Date("2026-10-15T15:00:00.000Z"),
 );
 assert.equal(attachedExistingScene.scenes.length, 1, "catch-up should reuse an existing matching shared scene");
-assert.equal(attachedExistingScene.scenes[0].eventId, "ap-event", "the elapsed appointment should attach to the existing shared scene");
+assert.equal(attachedExistingScene.scenes[0].id, "scene-opened-manually", "the elapsed appointment should reuse the existing location room");
+assert.equal(attachedExistingScene.scenes[0].eventId, undefined, "legacy event identity must not partition the location room");
+assert.equal(attachedExistingScene.scenes[0].status, "active", "settling an appointment must not change the current room state");
+assert.deepEqual(
+  Array.from(attachedExistingScene.scenes[0].participants, participant => participant.ownerType + ":" + participant.ownerId),
+  ["player:player", "character:c1", "character:c2"],
+  "settling an appointment must preserve other people already in the location room",
+);
 assert.equal(attachedExistingScene.events.find(event => event.id === "ap-event")?.status, "completed");
 
 const activeAppointmentWithoutScene = {
@@ -381,10 +414,10 @@ assert.equal(
   "completed",
   "an already-active appointment that lost its scene should be recovered during catch-up",
 );
-assert.ok(
-  recoveredActiveAppointment.scenes.some(scene => scene.eventId === "ap-event" && scene.status === "completed"),
-  "catch-up should reconstruct the missing scene for an elapsed active appointment",
-);
+assert.equal(recoveredActiveAppointment.scenes.length, 1);
+assert.equal(recoveredActiveAppointment.scenes[0].locationId, "cafe");
+assert.equal(recoveredActiveAppointment.scenes[0].status, "paused");
+assert.equal(recoveredActiveAppointment.scenes[0].eventId, undefined, "recovery must create a location room, not an event room");
 
 const staleCompletedSceneState = {
   ...activeAppointmentWithoutScene,
@@ -411,7 +444,8 @@ const recoveredStaleScene = settleActorTimelineToNow(
 );
 assert.equal(recoveredStaleScene.scenes.length, 1, "recovery must reuse the event-linked scene even when its previous status was stale");
 assert.equal(recoveredStaleScene.scenes[0].id, "ap-existing-scene");
-assert.equal(recoveredStaleScene.scenes[0].status, "completed");
+assert.equal(recoveredStaleScene.scenes[0].status, "paused", "legacy completed event rooms are folded back into reusable location rooms");
+assert.equal(recoveredStaleScene.scenes[0].eventId, undefined);
 
 const staleActiveSceneState = {
   ...activeAppointmentWithoutScene,
@@ -436,10 +470,12 @@ const recoveredOngoingAppointment = settleActorTimelineToNow(
 );
 assert.equal(
   recoveredOngoingAppointment.scenes.find(scene => scene.id === "unrelated-active-scene")?.status,
-  "paused",
-  "recovering an ongoing appointment should pause a stale unrelated active scene",
+  "active",
+  "recovering an ongoing appointment must not switch the user's currently open room",
 );
-assert.ok(recoveredOngoingAppointment.scenes.some(scene => scene.eventId === "ap-event" && scene.status === "active"));
+assert.equal(recoveredOngoingAppointment.scenes.length, 2);
+assert.equal(recoveredOngoingAppointment.scenes.find(scene => scene.locationId === "cafe")?.status, "paused");
+assert.equal(recoveredOngoingAppointment.scenes.find(scene => scene.locationId === "cafe")?.eventId, undefined);
 
 const historicalAppointmentWithCurrentScene = settleActorTimelineToNow(
   staleActiveSceneState,
@@ -541,7 +577,8 @@ assert.equal(restoredHome.state.actorStates.find(actor => actor.ownerType === "c
 
 assert.equal(typeof reserveCharacterLocationStay, "function", "manual companion transfer should be a testable runtime operation");
 const tripStart = new Date("2026-10-15T10:30:00.000Z");
-const tripEnd = new Date("2026-10-15T12:30:00.000Z");
+const requestedTripEnd = new Date("2026-10-15T12:30:00.000Z");
+const tripEnd = new Date("2026-10-15T11:00:00.000Z");
 const transferState = {
   ...makeState([
     { id: "before-trip", ownerType: "character", ownerId: "c-trip", startAt: "2026-10-15T09:00:00.000Z", endAt: "2026-10-15T11:00:00.000Z", title: "原地点上午安排", kind: "work", source: "weekly-generation", plannedLocationId: "office", plannedLocationName: "公司", updatedAt: "2026-10-15T09:00:00.000Z" },
@@ -558,19 +595,55 @@ const transferred = reserveCharacterLocationStay(transferState, {
   locationId: "cafe",
   locationName: "街角咖啡店",
   startAt: tripStart,
-  endAt: tripEnd,
+  endAt: requestedTripEnd,
   title: "与我同行：前往街角咖啡店",
 });
 const tripSlots = transferred.schedules.filter(slot => slot.ownerType === "character" && slot.ownerId === "c-trip");
 const truncated = tripSlots.find(slot => slot.id === "before-trip");
-assert.equal(truncated.endAt, tripStart.toISOString(), "the active itinerary slot is truncated at departure");
-assert.ok(tripSlots.some(slot => slot.source === "manual" && slot.plannedLocationId === "cafe" && slot.startAt === tripStart.toISOString() && slot.endAt === tripEnd.toISOString()), "a manual visit reservation covers the full stay");
-assert.ok(tripSlots.some(slot => slot.title === "原地点下午安排" && slot.startAt === tripEnd.toISOString() && slot.endAt === "2026-10-15T13:00:00.000Z"), "a slot crossing the return time resumes after the visit");
-assert.ok(tripSlots.some(slot => slot.id === "after-trip" && slot.plannedLocationId === "office"), "future slots after the visit remain intact");
+assert.equal(truncated.endAt, tripStart.toISOString(), "the elapsed prefix of the interrupted itinerary remains intact");
+assert.ok(tripSlots.some(slot => slot.source === "manual" && slot.plannedLocationId === "cafe" && slot.startAt === tripStart.toISOString() && slot.endAt === tripEnd.toISOString()), "manual travel replaces the current activity only until its next schedule boundary");
+assert.ok(!tripSlots.some(slot => slot.title === "原地点上午安排" && slot.startAt === tripEnd.toISOString()), "the unfinished tail of the replaced activity must not be restored");
+assert.ok(tripSlots.some(slot => slot.id === "during-trip" && slot.startAt === tripEnd.toISOString()), "the next future itinerary entry remains unchanged");
+assert.ok(tripSlots.some(slot => slot.id === "crossing-trip-end" && slot.plannedLocationId === "library"), "later future itinerary entries remain intact");
+assert.ok(tripSlots.some(slot => slot.id === "after-trip" && slot.plannedLocationId === "office"), "all later slots remain intact");
 assert.ok(transferred.schedules.some(slot => slot.id === "other-character"), "other characters' itineraries remain untouched");
 const tripActor = transferred.actorStates.find(actor => actor.ownerType === "character" && actor.ownerId === "c-trip");
 assert.equal(tripActor.actualLocationId, "cafe", "the companion's actual location follows the player");
-assert.equal(tripActor.actualLocationUntil, tripEnd.toISOString(), "the temporary location override expires at the planned return time");
+assert.equal(tripActor.actualLocationUntil, tripEnd.toISOString(), "the manual trip ends at the next planned activity boundary");
+
+const companionOverlay = overlayScheduleSlotsOverFreeTime(transferred, [{
+  id: "night-home-generated",
+  ownerType: "character",
+  ownerId: "c-trip",
+  startAt: tripStart.toISOString(),
+  endAt: tripEnd.toISOString(),
+  title: "夜间私人时间",
+  kind: "free-time",
+  source: "weekly-generation",
+  plannedLocationId: "home-c-trip",
+  plannedLocationName: "角色的家",
+  updatedAt: tripStart.toISOString(),
+}]);
+assert.ok(companionOverlay.schedules.some(slot => slot.source === "manual" && slot.plannedLocationId === "cafe"), "weekly generation must not replace the active manual travel slot");
+assert.ok(!companionOverlay.schedules.some(slot => slot.id === "night-home-generated"), "conflicting weekly home schedule must be rejected during companion travel");
+const companionToolChange = applyCharacterLifeScheduleChange(transferred, "c-trip", {
+  startAt: "2026-10-15T10:40:00.000Z",
+  endAt: "2026-10-15T10:50:00.000Z",
+  title: "角色自主安排",
+  locationId: "office",
+}, new Date("2026-10-15T10:00:00.000Z"));
+assert.ok(companionToolChange.error, "character-authored schedule changes must not overwrite an active manual travel slot");
+assert.ok(companionToolChange.state.schedules.some(slot => slot.source === "manual" && slot.plannedLocationId === "cafe"), "rejected autonomous change must preserve the active manual travel slot");
+const companionTimelineState = { ...transferred, events: [], memories: [], invitations: [], scenes: [], timeline: [], settings: { playerDisplayName: "我", saveConfirmedEventsToMemory: true } };
+const duringCompanionStay = settleActorTimelineToNow(companionTimelineState, "character", "c-trip", new Date("2026-10-15T10:45:00.000Z"));
+const duringCompanionActor = duringCompanionStay.actorStates.find(actor => actor.ownerType === "character" && actor.ownerId === "c-trip");
+assert.equal(duringCompanionActor.actualLocationId, "cafe", "timeline settlement keeps the companion at the chosen location during the replacement slot");
+assert.equal(duringCompanionActor.actualLocationUntil, tripEnd.toISOString(), "timeline settlement retains the replacement slot boundary");
+const afterCompanionStay = settleActorTimelineToNow(duringCompanionStay, "character", "c-trip", tripEnd);
+const afterCompanionActor = afterCompanionStay.actorStates.find(actor => actor.ownerType === "character" && actor.ownerId === "c-trip");
+assert.equal(afterCompanionActor.actualLocationName, "公园", "the next preserved itinerary entry takes over when the replaced activity ends");
+assert.ok(afterCompanionActor.actualLocationId, "the resumed schedule resolves to a concrete location id");
+assert.equal(afterCompanionActor.activity, "原地点中间安排", "the next preserved itinerary activity resumes without restoring the interrupted activity remainder");
 
 
 
@@ -608,7 +681,7 @@ const locationState = {
     { id: "current-office", ownerType: "character", ownerId: "c-location", startAt: "2026-10-15T10:00:00.000Z", endAt: "2026-10-15T11:00:00.000Z", title: "工作", kind: "work", source: "weekly-generation", plannedLocationId: "office", plannedLocationName: "公司", updatedAt: "2026-10-15T10:00:00.000Z" },
   ]),
   locations: [{ id: "office", name: "公司" }, { id: "cafe", name: "咖啡店" }],
-  actorStates: [{ ownerType: "character", ownerId: "c-location", actualLocationId: "cafe", actualLocationName: "咖啡店", updatedAt: locationNow.toISOString() }],
+  actorStates: [{ ownerType: "character", ownerId: "c-location", actualLocationId: "cafe", actualLocationName: "咖啡店", locationSource: "manual", manualSetAt: "2026-10-15T10:00:00.000Z", updatedAt: locationNow.toISOString() }],
 };
 assert.equal(resolveActorLocation(locationState, "character", "c-location", locationNow).id, "cafe", "manual actual location should override a different planned location");
 const expiredLocationState = {
@@ -622,6 +695,94 @@ const temporaryLocationState = {
 };
 assert.equal(resolveActorLocation(temporaryLocationState, "character", "c-location", locationNow).id, "cafe", "an active temporary location should override the schedule");
 
+const manualTravelNow = new Date("2026-10-15T10:30:00.000Z");
+const manualTravelState = {
+  ...makeState([{
+    id: "home-routine",
+    ownerType: "character",
+    ownerId: "c-travel",
+    startAt: "2026-10-15T10:00:00.000Z",
+    endAt: "2026-10-15T12:00:00.000Z",
+    title: "在家洗澡、听故事",
+    kind: "habit",
+    source: "weekly-generation",
+    plannedLocationId: "home-c-travel",
+    plannedLocationName: "角色的家",
+    updatedAt: "2026-10-15T10:00:00.000Z",
+  }]),
+  actorStates: [{
+    ownerType: "character", ownerId: "c-travel", activity: "与玩家同行",
+    scheduleSlotId: "previous-slot", actualLocationId: "bedroom",
+    actualLocationName: "玩家所在卧室", actualLocationUntil: null,
+    locationSource: "manual", manualSetAt: "2026-10-15T10:20:00.000Z",
+    updatedAt: "2026-10-15T10:20:00.000Z",
+  }],
+  events: [], memories: [], invitations: [], scenes: [], timeline: [],
+  locations: [{ id: "home-c-travel", name: "角色的家" }, { id: "bedroom", name: "玩家所在卧室" }],
+  settings: { playerDisplayName: "我", saveConfirmedEventsToMemory: true },
+};
+const settledManualTravel = settleActorTimelineToNow(manualTravelState, "character", "c-travel", manualTravelNow);
+const manualTravelActor = settledManualTravel.actorStates.find(actor => actor.ownerType === "character" && actor.ownerId === "c-travel");
+assert.equal(manualTravelActor.actualLocationId, "bedroom",
+  "an explicit manual location must survive a newly active home schedule");
+assert.equal(manualTravelActor.activity, "与玩家同行",
+  "schedule settlement must not overwrite the activity during a manual location override");
+assert.equal(manualTravelActor.manualSetAt, "2026-10-15T10:20:00.000Z",
+  "settlement must never refresh the manual TTL marker");
+assert.equal(manualTravelActor.locationSource, "manual",
+  "an active manual override keeps its manual source marker");
+
+// The 2-hour TTL is measured from manualSetAt only; once it elapses the schedule
+// owns presence again even when no slot currently covers the moment.
+const manualExpiredAt = new Date("2026-10-15T12:21:00.000Z");
+const settledExpiredManual = settleActorTimelineToNow(manualTravelState, "character", "c-travel", manualExpiredAt);
+const expiredManualActor = settledExpiredManual.actorStates.find(actor => actor.ownerType === "character" && actor.ownerId === "c-travel");
+assert.equal(expiredManualActor.actualLocationId, "home-c-travel",
+  "an expired manual location must fall back to the character's residence when no slot is active");
+assert.equal(expiredManualActor.locationSource, "schedule",
+  "expired manual overrides must clear the manual source marker");
+
+const playerRoomState = {
+  ...makeState([{
+    id: "player-next-slot",
+    ownerType: "player",
+    ownerId: "player",
+    startAt: "2026-10-15T10:00:00.000Z",
+    endAt: "2026-10-15T12:00:00.000Z",
+    title: "去公园散步",
+    kind: "habit",
+    source: "weekly-generation",
+    plannedLocationId: "park",
+    plannedLocationName: "公园",
+    updatedAt: "2026-10-15T09:00:00.000Z",
+  }]),
+  actorStates: [{
+    ownerType: "player", ownerId: "player", activity: "临时停留",
+    actualLocationId: "cafe", actualLocationName: "咖啡店",
+    actualLocationUntil: "2026-10-15T10:00:00.000Z",
+    updatedAt: "2026-10-15T09:00:00.000Z",
+  }],
+  events: [], memories: [], invitations: [],
+  scenes: [{
+    id: "stable-cafe-room", locationId: "cafe", locationName: "咖啡店",
+    startedAt: "2026-10-15T08:00:00.000Z", updatedAt: "2026-10-15T09:00:00.000Z",
+    status: "active",
+    participants: [{ ownerType: "player", ownerId: "player", activity: "聊天", awarenessByActorId: {} }],
+    lastSettledEventIds: [],
+  }],
+  timeline: [],
+  locations: [{ id: "cafe", name: "咖啡店" }, { id: "park", name: "公园" }],
+  settings: { playerDisplayName: "我", saveConfirmedEventsToMemory: true },
+};
+const settledPlayerRoom = settleActorTimelineToNow(playerRoomState, "player", "player", locationNow);
+assert.equal(settledPlayerRoom.actorStates[0].actualLocationId, "park", "expired stays must still advance the player's actual location");
+assert.equal(settledPlayerRoom.scenes[0].id, "stable-cafe-room");
+assert.equal(settledPlayerRoom.scenes[0].locationId, "cafe", "schedule settlement must never move the location room or its history");
+assert.equal(settledPlayerRoom.scenes[0].status, "active", "schedule settlement must not steal the currently open room");
+assert.equal(settledPlayerRoom.timeline.at(-1).sceneId, undefined, "a location movement record must not be attached to the old room");
+
+
+
  
 // All legacy per-actor clock records are ignored: schedule time is always wall-clock time.
 const wallClockNow = new Date("2026-10-15T10:30:00.000Z");
@@ -631,22 +792,66 @@ assert.equal(
   "legacy simulation clocks must never shift life-system time",
 );
 
-// AI schedule candidates replace any free-time slot, while preserving its unaffected edges.
+// Automatic generation may replace only generated free-time placeholders.
 const freeTimeOverlay = overlayScheduleSlotsOverFreeTime(makeState([{
   id: "free-placeholder", ownerType: "character", ownerId: "c-overlay",
   startAt: "2026-10-15T09:00:00.000Z", endAt: "2026-10-15T18:00:00.000Z",
-  title: "自由活动", kind: "free-time", source: "manual",
+  title: "自由活动", kind: "free-time", source: "weekly-generation",
 }]), [{
   id: "ai-study", ownerType: "character", ownerId: "c-overlay",
   startAt: "2026-10-15T12:00:00.000Z", endAt: "2026-10-15T14:00:00.000Z",
   title: "学习", kind: "study", source: "weekly-generation",
 }]);
-assert.ok(freeTimeOverlay.schedules.some(slot => slot.id === "ai-study"), "AI candidate should replace an overlapping free-time slot");
+assert.ok(freeTimeOverlay.schedules.some(slot => slot.id === "ai-study"), "AI candidate should replace generated free-time");
 assert.ok(freeTimeOverlay.schedules.some(slot => slot.startAt === "2026-10-15T09:00:00.000Z" && slot.endAt === "2026-10-15T12:00:00.000Z" && slot.kind === "free-time"), "free-time before the AI plan should be preserved");
 assert.ok(freeTimeOverlay.schedules.some(slot => slot.startAt === "2026-10-15T14:00:00.000Z" && slot.endAt === "2026-10-15T18:00:00.000Z" && slot.kind === "free-time"), "free-time after the AI plan should be preserved");
-assert.equal(freeTimeOverlay.schedules.filter(slot => slot.ownerId === "c-overlay").length, 3, "overlay should split one free-time slot into two edges plus one AI plan");
+assert.equal(freeTimeOverlay.schedules.filter(slot => slot.ownerId === "c-overlay").length, 3, "overlay should split one generated free-time slot into two edges plus one AI plan");
 
-// Character-initiated AI changes can occupy free-time without being blocked as a conflict.
+const manualFreeOverlay = overlayScheduleSlotsOverFreeTime(makeState([{
+  id: "manual-free", ownerType: "character", ownerId: "c-manual-free",
+  startAt: "2026-10-15T09:00:00.000Z", endAt: "2026-10-15T18:00:00.000Z",
+  title: "用户安排的自由时间", kind: "free-time", source: "manual",
+}]), [{
+  id: "ai-study-manual", ownerType: "character", ownerId: "c-manual-free",
+  startAt: "2026-10-15T12:00:00.000Z", endAt: "2026-10-15T14:00:00.000Z",
+  title: "学习", kind: "study", source: "weekly-generation",
+}]);
+assert.ok(manualFreeOverlay.schedules.some(slot => slot.id === "ai-study-manual"),
+  "weekly generation may replace a free-time placeholder even if its legacy source is manual");
+assert.ok(manualFreeOverlay.schedules.some(slot => slot.startAt === "2026-10-15T09:00:00.000Z" && slot.endAt === "2026-10-15T12:00:00.000Z"),
+  "free-time before the generated activity must be preserved");
+assert.ok(manualFreeOverlay.schedules.some(slot => slot.startAt === "2026-10-15T14:00:00.000Z" && slot.endAt === "2026-10-15T18:00:00.000Z"),
+  "free-time after the generated activity must be preserved");
+
+const cancelledFreeOverlay = overlayScheduleSlotsOverFreeTime(makeState([{
+  id: "cancelled-free", ownerType: "character", ownerId: "c-cancelled",
+  startAt: "2026-10-15T09:00:00.000Z", endAt: "2026-10-15T18:00:00.000Z",
+  title: "自由活动", kind: "free-time", source: "character-tool",
+}]), [{
+  id: "regenerated-slot", ownerType: "character", ownerId: "c-cancelled",
+  startAt: "2026-10-15T12:00:00.000Z", endAt: "2026-10-15T14:00:00.000Z",
+  title: "自动安排的学习", kind: "study", source: "weekly-generation",
+}]);
+assert.equal(cancelledFreeOverlay.schedules.length, 1,
+  "a cancelled slot represented as character free-time must not be regenerated");
+assert.equal(cancelledFreeOverlay.schedules[0]?.id, "cancelled-free",
+  "the cancellation tombstone must remain the only overlapping schedule");
+
+const userCanFillCancelledTime = insertManualLifeScheduleSlot(makeState([{
+  id: "cancelled-free-manual-fill", ownerType: "character", ownerId: "c-fill",
+  startAt: "2026-10-15T09:00:00.000Z", endAt: "2026-10-15T18:00:00.000Z",
+  title: "自由活动", kind: "free-time", source: "character-tool",
+}]), {
+  id: "user-replacement", ownerType: "character", ownerId: "c-fill",
+  startAt: "2026-10-15T12:00:00.000Z", endAt: "2026-10-15T14:00:00.000Z",
+  title: "用户新安排", kind: "special", source: "manual",
+});
+assert.equal(userCanFillCancelledTime.conflict, undefined,
+  "a user must be able to replace a character's cancelled free-time placeholder");
+assert.ok(userCanFillCancelledTime.state.schedules.some(slot => slot.id === "user-replacement"));
+
+// Character-initiated changes may occupy a free-time placeholder, including
+// legacy records whose source is manual; real manual activities remain protected.
 const autonomyOverFree = applyCharacterLifeScheduleChange(makeState([{
   id: "character-free", ownerType: "character", ownerId: "c-autonomy",
   startAt: "2026-10-15T10:00:00.000Z", endAt: "2026-10-15T12:00:00.000Z",
@@ -655,7 +860,100 @@ const autonomyOverFree = applyCharacterLifeScheduleChange(makeState([{
   startAt: "2026-10-15T10:30:00.000Z", endAt: "2026-10-15T11:30:00.000Z",
   title: "去咖啡店学习",
 }, new Date("2026-10-15T09:00:00.000Z"));
-assert.equal(autonomyOverFree.error, undefined, "character AI changes must not treat free-time as a blocking conflict");
-assert.ok(autonomyOverFree.state.schedules.some(slot => slot.title === "去咖啡店学习"), "character AI activity should be inserted over free-time");
+assert.equal(autonomyOverFree.error, undefined);
+assert.ok(autonomyOverFree.state.schedules.some(slot => slot.title === "去咖啡店学习"),
+  "character AI activity may replace a free-time placeholder regardless of legacy source");
+
+const inProgressChange = applyCharacterLifeScheduleChange(makeState([{
+  id: "in-progress", ownerType: "character", ownerId: "c-progress",
+  startAt: "2026-10-15T08:00:00.000Z", endAt: "2026-10-15T12:00:00.000Z",
+  title: "正在学习", kind: "study", source: "weekly-generation",
+}]), "c-progress", {
+  startAt: "2026-10-15T10:00:00.000Z", endAt: "2026-10-15T11:00:00.000Z",
+  title: "临时外出",
+}, new Date("2026-10-15T09:00:00.000Z"));
+assert.match(inProgressChange.error || "", /冲突/,
+  "character tools must not reshape an activity that has already started");
+
+
+const householdA = { id: "home-a", name: "A的家", residents: ["a"], visibility: "private" };
+const householdB = { id: "home-b", name: "B的家", residents: ["b"], visibility: "private" };
+const visitToB = {
+  id: "a-visits-b", ownerType: "character", ownerId: "a",
+  startAt: "2026-12-02T18:00:00.000Z", endAt: "2026-12-02T20:00:00.000Z",
+  title: "去B家吃晚饭", kind: "meal", source: "weekly-generation",
+  plannedLocationId: "home-b", plannedLocationName: "B的家", updatedAt: "2026-12-01T00:00:00.000Z",
+};
+const householdState = { ...makeState([visitToB]), locations: [householdA, householdB] };
+const syncedA = synchronizeCharacterHomeSchedule(householdState, {
+  characterId: "a", destinationHomeId: "home-a", destinationHomeName: "A的家",
+  now: new Date("2026-12-01T12:00:00.000Z"),
+});
+assert.equal(syncedA.state.schedules.find(slot => slot.id === "a-visits-b")?.plannedLocationId, "home-b",
+  "changing A's residence must not rewrite A's planned visit to B's home");
+
+const legacyHomeSlot = { ...visitToB, id: "legacy-own-home", title: "在家休息", plannedLocationId: null, plannedLocationName: "家" };
+const syncedLegacy = synchronizeCharacterHomeSchedule(
+  { ...householdState, schedules: [legacyHomeSlot] },
+  { characterId: "a", destinationHomeId: "home-a", destinationHomeName: "A的家", now: new Date("2026-12-01T12:00:00.000Z") },
+);
+assert.equal(syncedLegacy.state.schedules[0].plannedLocationId, "home-a",
+  "unresolved legacy home slots should migrate to the actor's own home");
+
+const generatedWithVisit = generateWeeklyLifePlan(
+  householdState, "character", "a", "A", new Date("2026-12-01T00:00:00.000Z"), undefined, "", false,
+);
+assert.equal(generatedWithVisit.schedules.find(slot => slot.id === "a-visits-b")?.plannedLocationId, "home-b",
+  "weekly plan migration must preserve an explicit visit to another character's home");
+
+const scheduleStart = "2026-12-02T18:00:00.000Z";
+const scheduleEnd = "2026-12-02T19:00:00.000Z";
+const createVisit = applyCharacterLifeScheduleChange(householdState, "a", {
+  startAt: scheduleStart, endAt: scheduleEnd, title: "去B家吃饭", locationId: "home-b",
+}, new Date("2026-12-01T12:00:00.000Z"));
+assert.equal(createVisit.error, undefined, "a character should be able to schedule a visit to another known household");
+assert.equal(createVisit.state.schedules.find(slot => slot.id.startsWith("life-tool-plan-a-"))?.plannedLocationId, "home-b");
+
+const invalidDestination = applyCharacterLifeScheduleChange(householdState, "a", {
+  startAt: scheduleStart, endAt: scheduleEnd, title: "去不存在的地方", locationId: "missing-home",
+}, new Date("2026-12-01T12:00:00.000Z"));
+assert.match(invalidDestination.error ?? "", /不存在/);
+assert.equal(invalidDestination.state, householdState,
+  "an unknown location must not silently fall back to the player's home");
+
+const defaultOwnHome = applyCharacterLifeScheduleChange(householdState, "a", {
+  startAt: scheduleStart, endAt: scheduleEnd, title: "回家休息",
+}, new Date("2026-12-01T12:00:00.000Z"));
+assert.equal(defaultOwnHome.state.schedules.find(slot => slot.id.startsWith("life-tool-plan-a-"))?.plannedLocationId, "home-a",
+  "an omitted destination should resolve to the actor's own residence, not the player's home");
+
+const importedDossier = {
+  id: "imported-place-old-town-flower-shop", name: "旧城区花店",
+  description: "临街的老式花店，窗边有自然光。", atmosphere: "安静、清新。",
+  layout: "入口朝街，柜台在右侧。", props: ["花桶", "剪刀"],
+  sourceRefs: [{ sourceKey: "worldbook:city:flower-shop", kind: "worldbook", worldBookId: "city", entryUid: "flower-shop", importedAt: "2026-11-15T00:00:00.000Z" }],
+  visibility: "public",
+};
+const oldScheduleStub = { id: "schedule-place-old-town-flower-shop", name: "旧城区花店", description: "由角色日程自动同步建立；可在地点库中继续编辑。", atmosphere: "", layout: "", props: [], visibility: "public" };
+const placeholderState = makeState([{
+  id: "slot-old-flower-shop", ownerType: "character", ownerId: "a",
+  startAt: "2026-12-02T08:00:00.000Z", endAt: "2026-12-02T09:00:00.000Z",
+  title: "去花店", kind: "free-time", source: "weekly-generation",
+  plannedLocationId: oldScheduleStub.id, plannedLocationName: oldScheduleStub.name, updatedAt: "2026-12-01T00:00:00.000Z",
+}]);
+placeholderState.locations = [oldScheduleStub, importedDossier];
+placeholderState.actorStates = [{ ownerType: "character", ownerId: "a", activity: "在花店", actualLocationId: oldScheduleStub.id, actualLocationName: oldScheduleStub.name, updatedAt: "2026-12-01T00:00:00.000Z" }];
+placeholderState.scenes = [{ id: "scene-old-flower-shop", locationId: oldScheduleStub.id, locationName: oldScheduleStub.name, startedAt: "2026-12-02T08:00:00.000Z", updatedAt: "2026-12-02T08:00:00.000Z", status: "active", participants: [], lastSettledEventIds: [] }];
+const remappedLocations = syncScheduleLocationsToLibrary(placeholderState);
+assert.equal(remappedLocations.schedules[0].plannedLocationId, importedDossier.id, "a schedule-only placeholder must remap to a richer imported location dossier");
+assert.equal(remappedLocations.schedules[0].plannedLocationName, importedDossier.name);
+assert.equal(remappedLocations.locations.find(location => location.id === importedDossier.id).sourceRefs[0].sourceKey, importedDossier.sourceRefs[0].sourceKey, "schedule synchronization must preserve imported provenance");
+assert.equal(remappedLocations.locations.length, 2, "remapping should not duplicate the imported dossier");
+assert.equal(remappedLocations.actorStates[0].actualLocationId, importedDossier.id, "active actor state must follow the remapped canonical location");
+assert.equal(remappedLocations.scenes[0].locationId, importedDossier.id, "active scenes must follow the remapped canonical location");
+
+const generatedResidenceState = generateWeeklyLifePlan(makeState(), "character", "char-without-home", "测试角色", new Date("2026-12-01T00:00:00.000Z"), undefined, "", false);
+assert.ok(generatedResidenceState.locations.some(location => location.id === "home-char-without-home"), "weekly generation must persist the actor personal home in the location catalog");
+assert.ok(generatedResidenceState.schedules.some(slot => slot.ownerId === "char-without-home" && slot.plannedLocationId === "home-char-without-home"), "generated home schedule slots must reference the canonical personal home ID");
 
 console.log("Life schedule regression tests passed.");

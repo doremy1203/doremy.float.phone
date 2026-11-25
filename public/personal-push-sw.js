@@ -35,6 +35,11 @@ self.addEventListener("push", (event) => {
         return;
       }
     }
+    if (typeof meta.bridgeEventId === "string" && meta.bridgeEventId) {
+      const receipt = await fetch("/api/push/bridge-native-event/receipt?id=" + encodeURIComponent(meta.bridgeEventId), { credentials: "same-origin", cache: "no-store" })
+        .then(response => response.ok ? response.json() : null).catch(() => null);
+      if (receipt && receipt.fallback === true) return;
+    }
     await self.registration.showNotification(title, {
       body: (declarative && declarative.body) || data.body || "",
       icon: "/icon-192.png",
@@ -45,8 +50,12 @@ self.addEventListener("push", (event) => {
         type: meta.type || "",
         sessionId: meta.sessionId || "",
         callTs: meta.callTs || 0,
+        bridgeEventId: meta.bridgeEventId || "",
       },
     });
+    if (typeof meta.bridgeEventId === "string" && meta.bridgeEventId) {
+      await fetch("/api/push/bridge-native-event/receipt", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ eventId: meta.bridgeEventId, status: "displayed" }) }).catch(() => undefined);
+    }
   })());
 });
 self.addEventListener("notificationclick", (event) => {

@@ -6,4 +6,5 @@
     <string name="accessibility_service_description">让角色的通话小窗能浮在其他 App 上层，并允许角色感知当前前台 App，实现深度陪伴（仅本机使用）。</string>
     <!-- 桌面小组件在系统「添加小组件」列表里的说明 -->
     <string name="phone_widget_desc">角色留在桌面上的话</string>
+    <string name="focus_widget_desc">专注倒计时：动态显示当前专注剩余时间、任务与 TA 的状态。</string>
 </resources>

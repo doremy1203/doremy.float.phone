@@ -27,15 +27,28 @@ export function MediaMaintenanceScheduler() {
       });
     };
 
-    timeoutHandle = window.setTimeout(() => {
+    const scheduleRun = () => {
       if (cancelled) return;
       const idleWindow = window as WindowWithIdleCallback;
       if (typeof idleWindow.requestIdleCallback === "function") {
         idleHandle = idleWindow.requestIdleCallback(run, { timeout: 5000 });
-        return;
+      } else {
+        run();
       }
-      run();
-    }, 45000);
+    };
+    timeoutHandle = window.setTimeout(scheduleRun, 45000);
+
+    // Maintenance engine enforces its own 24-hour auto-run interval and a single
+    // in-flight promise, so a resume catch-up cannot duplicate a completed run.
+    const onResume = () => {
+      if (document.visibilityState !== "visible") return;
+      if (timeoutHandle !== null) window.clearTimeout(timeoutHandle);
+      if (idleHandle !== null) (window as WindowWithIdleCallback).cancelIdleCallback?.(idleHandle);
+      scheduleRun();
+    };
+    window.addEventListener("focus", onResume);
+    window.addEventListener("pageshow", onResume);
+    document.addEventListener("visibilitychange", onResume);
 
     return () => {
       cancelled = true;
@@ -43,6 +56,9 @@ export function MediaMaintenanceScheduler() {
       if (idleHandle !== null) {
         (window as WindowWithIdleCallback).cancelIdleCallback?.(idleHandle);
       }
+      window.removeEventListener("focus", onResume);
+      window.removeEventListener("pageshow", onResume);
+      document.removeEventListener("visibilitychange", onResume);
     };
   }, []);
 

@@ -19,6 +19,17 @@ function loadTs(relativePath, filename) {
 const { parseWidgetLineOutput } = loadTs("../lib/widget/output.ts", "widget-output.cjs");
 const { stripMalformedTextToolDirectives, stripTextToolDirectives } =
   loadTs("../lib/text-tool-protocol.ts", "text-tool-protocol.cjs");
+const { createBuiltinAppPrompts } = loadTs("../lib/builtin-app-prompts.ts", "builtin-app-prompts.cjs");
+const appPrompts = createBuiltinAppPrompts();
+const widgetPrompt = appPrompts.find(prompt => prompt.identifier === "phone_widget_status")?.content ?? "";
+assert.ok(widgetPrompt, "desktop widget status prompt must exist");
+assert.doesNotMatch(widgetPrompt, /\\{\\{(?:description|personality)\\}\\}/, "widget prompt must not reinject the character card already supplied by the shared assembler");
+assert.match(widgetPrompt, /统一注入的角色信息/, "widget prompt should defer character identity to the shared assembler");
+assert.equal(
+  appPrompts.filter(prompt => /\\{\\{(?:description|personality)\\}\\}/.test(prompt.content)).length,
+  0,
+  "built-in app prompts must not duplicate full character-card macros",
+);
 
 assert.deepEqual(JSON.parse(JSON.stringify(parseWidgetLineOutput('{"text":"灯没关，桌上那杯茶给你留着","status":"耐心等着"}'))), {
   text: "灯没关，桌上那杯茶给你留着",
@@ -67,4 +78,4 @@ assert.equal(
   '普通文字\n没有动作指令',
 );
 
-console.log("Phone widget output safety tests passed.");
+console.log("Phone widget output and prompt de-duplication tests passed.");

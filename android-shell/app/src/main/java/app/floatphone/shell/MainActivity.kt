@@ -14,13 +14,17 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioManager
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Base64
+import org.json.JSONObject
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import android.view.WindowManager
@@ -85,6 +89,9 @@ class MainActivity : AppCompatActivity() {
          * 只需要管一个开关。渠道一旦创建过，后建的只更新名称/描述，不会重置用户选择。
          */
         const val CH_MESSAGES = "shell_messages"
+        @Volatile var isForeground: Boolean = false
+    private var lastSignaledPending = ""
+            private set
         @Volatile private var nativeCrashRecorderInstalled = false
         private const val MAX_WEB_CONSOLE_LOGS = 200
         private val webConsoleLogs = java.util.Collections.synchronizedList(mutableListOf<String>())
@@ -126,6 +133,59 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     android.os.Process.killProcess(android.os.Process.myPid())
                 }
+            }
+        }
+    }
+
+    // 角色 TTS 只在实际播放期间短暂申请焦点，让正在播放的视频尽可能 duck 而不是打断语音。
+    private val callAudioFocusLock = Any()
+    private var callAudioFocusRequest: android.media.AudioFocusRequest? = null
+    private var legacyCallAudioFocusHeld = false
+    private val callAudioFocusListener = AudioManager.OnAudioFocusChangeListener { /* TTS 播放由 WebView 生命周期管理；焦点变化不销毁会话。 */ }
+
+    private fun requestCallAudioFocusInternal(): Boolean {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
+        synchronized(callAudioFocusLock) {
+            if (callAudioFocusRequest != null || legacyCallAudioFocusHeld) return true
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val request = android.media.AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_ASSISTANT)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build(),
+                    )
+                    .setOnAudioFocusChangeListener(callAudioFocusListener, Handler(Looper.getMainLooper()))
+                    .setWillPauseWhenDucked(false)
+                    .build()
+                if (audioManager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                    callAudioFocusRequest = request
+                    true
+                } else false
+            } else {
+                val result = audioManager.requestAudioFocus(
+                    callAudioFocusListener,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
+                )
+                legacyCallAudioFocusHeld = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+                legacyCallAudioFocusHeld
+            }
+        }
+    }
+
+    private fun abandonCallAudioFocusInternal(): Boolean {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
+        synchronized(callAudioFocusLock) {
+            val request = callAudioFocusRequest
+            val legacyHeld = legacyCallAudioFocusHeld
+            callAudioFocusRequest = null
+            legacyCallAudioFocusHeld = false
+            return when {
+                request != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ->
+                    audioManager.abandonAudioFocusRequest(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+                legacyHeld -> audioManager.abandonAudioFocus(callAudioFocusListener) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+                else -> true
             }
         }
     }
@@ -1033,6 +1093,29 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
 }
 
     @SuppressLint("SetJavaScriptEnabled")
+    override fun onResume() {
+        super.onResume()
+        isForeground = true
+        // 拦截页点了「申请用一会儿」：唤起专注 app 打开预填申请单
+        // 按内容去重（同一份申请只唤醒一次；下次拦截产生新申请会再次唤醒）
+        val pending = runCatching { FocusLockService.peekPendingApply(this) }.getOrDefault("")
+        if (pending.isNotEmpty() && pending != lastSignaledPending) {
+            lastSignaledPending = pending
+            webView?.post {
+                runCatching {
+                    webView?.evaluateJavascript(
+                        "window.dispatchEvent(new CustomEvent('open-app',{detail:{appId:'doris.focus.companion'}}))", null,
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onPause() {
+        isForeground = false
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pruneCachedSharedVideos()
@@ -1482,7 +1565,8 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         super.onStop()
         if (!recoveryBoot) {
             runCatching { CallOverlayService.onHostBackground() }
-            runCatching { CheckInService.onHostBackground() }
+            runCatching { CheckInService.onHostBackground(this) }
+            runCatching { BackgroundEnhancementManager.onHostBackground(this) }
         }
     }
 
@@ -1490,11 +1574,13 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         super.onStart()
         if (!recoveryBoot) {
             runCatching { CallOverlayService.onHostForeground() }
-            runCatching { CheckInService.onHostForeground() }
+            runCatching { CheckInService.onHostForeground(this) }
+            runCatching { BackgroundEnhancementManager.onHostForeground(this) }
         }
     }
 
     override fun onDestroy() {
+        runCatching { abandonCallAudioFocusInternal() }
         // Recovery mode intentionally returns before creating a WebView. Keep its
         // lifecycle safe: touching a lateinit WebView here would crash the recovery UI.
         if (::webView.isInitialized) {
@@ -1511,6 +1597,14 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
     inner class ShellBridge {
         @JavascriptInterface
         fun getVersion(): String = VERSION
+
+        /** TTS 发声时临时申请可 duck 的焦点；不在整个通话期间独占音频。 */
+        @JavascriptInterface
+        fun requestCallAudioFocus(): Boolean = isTrustedShellPage() && requestCallAudioFocusInternal()
+
+        /** 当前 TTS 片段结束或被取消时归还焦点。 */
+        @JavascriptInterface
+        fun abandonCallAudioFocus(): Boolean = isTrustedShellPage() && abandonCallAudioFocusInternal()
 
         /** Allow the trusted in-app player to request landscape, then restore normal sensor rotation. */
         @JavascriptInterface
@@ -1723,6 +1817,42 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         fun getNativeRealityBridgeLog(): String =
             NativeRealityBridge.recentLog(this@MainActivity)
 
+        /** 读取本机离线现实桥待写入聊天室的消息。 */
+        @JavascriptInterface
+        fun getPendingNativeRealityBridgeMessages(): String =
+            NativeRealityBridge.pendingChatMessages(this@MainActivity)
+
+        /** 聊天室确认写入后才从原生持久队列中确认，避免 WebView 重启丢消息。 */
+        @JavascriptInterface
+        fun acknowledgeNativeRealityBridgeMessages(idsJson: String): Boolean =
+            NativeRealityBridge.acknowledgeChatMessages(this@MainActivity, idsJson)
+
+        /** 原生后台事件队列状态；只返回计数和时间，不暴露事件正文。 */
+        @JavascriptInterface
+        fun getNativePerceptionDiagnostics(): String = try {
+            val prefs = getSharedPreferences("native_background_perception", Context.MODE_PRIVATE)
+            val queue = org.json.JSONArray(prefs.getString("pending_events", "[]") ?: "[]")
+            var cloudAcceptedCount = 0
+            var fallbackSentCount = 0
+            var oldestQueuedAt = 0L
+            for (i in 0 until queue.length()) {
+                val event = queue.optJSONObject(i) ?: continue
+                if (event.optBoolean("cloudAccepted", false)) cloudAcceptedCount += 1
+                if (event.optBoolean("fallbackSent", false)) fallbackSentCount += 1
+                val queuedAt = event.optLong("queuedAt", 0L)
+                if (queuedAt > 0L && (oldestQueuedAt == 0L || queuedAt < oldestQueuedAt)) oldestQueuedAt = queuedAt
+            }
+            org.json.JSONObject()
+                .put("serviceConnected", CallControlService.connected)
+                .put("pendingCount", queue.length())
+                .put("cloudAcceptedCount", cloudAcceptedCount)
+                .put("fallbackSentCount", fallbackSentCount)
+                .put("oldestQueuedAt", oldestQueuedAt)
+                .toString()
+        } catch (error: Throwable) {
+            org.json.JSONObject().put("error", error.javaClass.simpleName + ": " + (error.message ?: "unknown")).toString()
+        }
+
         /** 原生无障碍服务是否支持独立后台停留计时（供网页避免重复触发）。 */
         @JavascriptInterface
         fun supportsBackgroundDwellTracking(): Boolean = true
@@ -1790,6 +1920,98 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         /** 按应用显示名找包名（找不到返回空串）。 */
         @JavascriptInterface
         fun findPackageByLabel(label: String): String = deviceAction.findPackageByLabel(label)
+
+        /** 已安装可启动应用清单（白名单选择器数据源）。 */
+        @JavascriptInterface
+        fun listInstalledApps(): String = deviceAction.listInstalledApps()
+
+        /** L2 看守锁：锁机名单 + 截止时间。网页层经权限门调用。 */
+        @JavascriptInterface
+        fun focusLockStart(packagesJson: String, untilEpochMs: Long): String =
+            FocusLockService.start(this@MainActivity, packagesJson, untilEpochMs).toString()
+
+        /** 通行证/白名单变更：只换名单，不重置倒计时。 */
+        @JavascriptInterface
+        fun focusLockUpdate(packagesJson: String, untilEpochMs: Long): String =
+            FocusLockService.update(this@MainActivity, packagesJson, untilEpochMs).toString()
+
+        @JavascriptInterface
+        fun focusLockStop(): String = FocusLockService.stop(this@MainActivity).toString()
+
+        @JavascriptInterface
+        fun focusLockStatus(): String = FocusLockService.status(this@MainActivity).toString()
+
+        /** 专注通行证查岗：原生闹钟到点直接弹浮层（网页/进程不在也能弹）。 */
+        @JavascriptInterface
+        fun scheduleFocusPassCheckIn(json: String): String = runCatching {
+            val o = JSONObject(json)
+            val ok = FocusPassCheckInScheduler.schedule(
+                this@MainActivity,
+                o.optString("passId"),
+                o.optString("app"),
+                o.optString("characterId"),
+                o.optString("name"),
+                o.optString("avatar"),
+                o.optLong("dueAt", 0L),
+            )
+            JSONObject().put("ok", ok).toString()
+        }.getOrElse { JSONObject().put("ok", false).put("reason", it.message ?: "排程失败").toString() }
+
+        @JavascriptInterface
+        fun cancelFocusPassCheckIn(passId: String): Boolean =
+            FocusPassCheckInScheduler.cancel(this@MainActivity, passId)
+
+        /** 取走原生查岗结果（含截图 base64）；空串表示没有待取结果。 */
+        @JavascriptInterface
+        fun consumePendingFocusPassCheckIn(): String =
+            CheckInService.consumePendingFocusPassCheckIn(this@MainActivity)
+
+        /** 专注倒计时桌面组件：网页推一份会话状态（Chronometer 原生倒计时，无需每秒推送）。 */
+        @JavascriptInterface
+        fun focusWidgetUpdate(json: String): String = FocusWidgetProvider.update(this@MainActivity, json).toString()
+
+        /** 专注倒计时桌面组件：拉起系统的「添加到桌面」引导。 */
+        @JavascriptInterface
+        fun focusWidgetPin(): String = FocusWidgetProvider.requestPin(this@MainActivity).toString()
+
+        @JavascriptInterface
+        fun focusWidgetRemove(): String = FocusWidgetProvider.remove(this@MainActivity).toString()
+
+        /** 拦截页「申请用一会儿」：取走待处理申请（一次性）。 */
+        @JavascriptInterface
+        fun focusLockPendingApply(): String = FocusLockService.takePendingApply(this@MainActivity)
+
+        /** 看守锁覆盖页的 TA 提醒线（查岗/承诺文案由网页决定）。 */
+        @JavascriptInterface
+        fun focusLockTaLine(taLine: String, charName: String): String =
+            FocusLockService.setTaLine(this@MainActivity, taLine, charName).toString()
+
+        /** L3：设备管理员是否已激活（防绕过能力前置）。 */
+        @JavascriptInterface
+        fun isDeviceAdminActive(): Boolean = runCatching {
+            val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+            dpm.isAdminActive(android.content.ComponentName(this@MainActivity, FocusDeviceAdminReceiver::class.java))
+        }.getOrDefault(false)
+
+        /** L3：引导用户激活设备管理员（跳系统确认页，用户自己点激活）。 */
+        @JavascriptInterface
+        fun requestDeviceAdmin(): Boolean = runCatching {
+            val intent = Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).putExtra(
+                android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN,
+                android.content.ComponentName(this@MainActivity, FocusDeviceAdminReceiver::class.java),
+            ).putExtra(
+                android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                "L3 承诺死锁的防绕过能力需要设备管理员：锁屏执行与卸载保护。可随时在系统设置里停用。",
+            )
+            startActivity(intent)
+            true
+        }.getOrDefault(false)
+
+        /** 查岗 v2：壳截当前屏（复用既有查岗授权链，结果经 checkIn 事件回推网页）。 */
+        @JavascriptInterface
+        fun requestFocusCheckIn(characterId: String, name: String, avatar: String) {
+            CheckInService.show(this@MainActivity, characterId, name, avatar)
+        }
 
         /** 设闹钟（会打开系统时钟 App 让用户确认）。 */
         @JavascriptInterface
@@ -2232,6 +2454,49 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         @JavascriptInterface
         fun getCheckInDiagnostics(): String = CheckInService.diagnosticsJson(this@MainActivity)
 
+        /** 前后台状态与累计后台时长，供查岗调度使用；不读取任何用户内容。 */
+        @JavascriptInterface
+        fun getCheckInAppState(): String = CheckInService.appLifecycleJson(this@MainActivity)
+
+        /** 后台增强中心：只暴露状态与用户主动选择的系统设置入口。 */
+        @JavascriptInterface
+        fun getBackgroundEnhancementDiagnostics(): String =
+            BackgroundEnhancementManager.diagnosticsJson(this@MainActivity)
+
+        @JavascriptInterface
+        fun setBackgroundEnhancementMode(mode: String): Boolean {
+            if (!isTrustedShellPage()) return false
+            return BackgroundEnhancementManager.setMode(this@MainActivity, mode)
+        }
+
+        @JavascriptInterface
+        fun openBackgroundEnhancementSettings(kind: String): Boolean {
+            if (!isTrustedShellPage()) return false
+            return BackgroundEnhancementManager.openSettings(this@MainActivity, kind)
+        }
+
+        /** 为查岗设置原生一次性唤醒提醒；真正截图仍由现有受权限保护的流程执行。 */
+        @JavascriptInterface
+        fun scheduleBackgroundCheckIn(
+            characterId: String,
+            characterName: String,
+            dueAtMillis: Long,
+            remainingBackgroundMs: Long,
+            backgroundOnly: Boolean,
+        ): Boolean {
+            if (!isTrustedShellPage()) return false
+            return BackgroundEnhancementManager.scheduleCheckIn(
+                this@MainActivity, characterId, characterName,
+                dueAtMillis, remainingBackgroundMs, backgroundOnly,
+            )
+        }
+
+        @JavascriptInterface
+        fun cancelBackgroundCheckIn(characterId: String): Boolean {
+            if (!isTrustedShellPage()) return false
+            return BackgroundEnhancementManager.cancelCheckIn(this@MainActivity, characterId)
+        }
+
         /**
          * 读走「用户主动截屏（悬浮球）」的结果（JSON 字符串，空串 = 没有）。
          *
@@ -2410,6 +2675,71 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
             }.onFailure { error ->
                 synchronized(webConsoleLogs) {
                     webConsoleLogs.add("saveBase64File failed: " + (error.message ?: error.javaClass.simpleName))
+                }
+            }.getOrDefault(false)
+        }
+
+        /**
+         * 按媒体类型保存：图片进系统相册（Pictures/小手机），语音进音乐库（Music/小手机），
+         * 其他文件仍进下载目录。相册/音乐库使用对应的 MediaStore collection，避免只落在
+         * Downloads 里、图库和音乐 App 看不到。
+         */
+        @JavascriptInterface
+        fun saveBase64Media(fileName: String, base64: String, kind: String): Boolean {
+            return runCatching {
+                val safeName = fileName
+                    .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                    .trim()
+                    .ifBlank { "download" }
+                    .take(120)
+                val normalizedKind = when (kind) {
+                    "image", "audio" -> kind
+                    else -> "file"
+                }
+                val bytes = Base64.decode(base64, Base64.DEFAULT)
+                val mime = guessMimeType(safeName)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val collection = when (normalizedKind) {
+                        "image" -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                        "audio" -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+                        else -> MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                    }
+                    val relativePath = when (normalizedKind) {
+                        "image" -> Environment.DIRECTORY_PICTURES + "/小手机"
+                        "audio" -> Environment.DIRECTORY_MUSIC + "/小手机"
+                        else -> Environment.DIRECTORY_DOWNLOADS
+                    }
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                    val uri = contentResolver.insert(collection, values) ?: return@runCatching false
+                    val stream = contentResolver.openOutputStream(uri) ?: run {
+                        contentResolver.delete(uri, null, null)
+                        return@runCatching false
+                    }
+                    stream.use { it.write(bytes) }
+                    values.clear()
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    contentResolver.update(uri, values, null, null)
+                } else {
+                    @Suppress("DEPRECATION")
+                    val publicDir = when (normalizedKind) {
+                        "image" -> Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                        "audio" -> Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+                        else -> Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    }
+                    val dir = File(publicDir, "小手机").apply { mkdirs() }
+                    val file = File(dir, safeName)
+                    FileOutputStream(file).use { it.write(bytes) }
+                    MediaScannerConnection.scanFile(this@MainActivity, arrayOf(file.absolutePath), arrayOf(mime), null)
+                }
+                true
+            }.onFailure { error ->
+                synchronized(webConsoleLogs) {
+                    webConsoleLogs.add("saveBase64Media failed: " + (error.message ?: error.javaClass.simpleName))
                 }
             }.getOrDefault(false)
         }

@@ -30,9 +30,14 @@ import { XiaohongshuApp } from "@/components/xiaohongshu/xiaohongshu-app";
 import { StoryApp } from "@/components/story/story-app";
 import { LifeEngineApp } from "@/components/life/life-engine-app";
 import { ArchiveRoomApp } from "@/components/archive-room-app";
+import { MemoArchiveApp } from "@/components/memo-archive-app";
 import { PhotoWallApp } from "@/components/photo-wall-app";
 import { WatchTogetherApp } from "@/components/watch-together-app";
 import { CALL_STATS_ENTRY_HTML } from "@/lib/builtin-apps/call-stats-source";
+import { HEARTCRAFT_ENTRY_HTML } from "@/lib/builtin-apps/heartcraft-source";
+import { buildHeartcraftApp, HEARTCRAFT_APP_ID } from "@/lib/builtin-apps/heartcraft-meta";
+import { buildFocusCompanionApp, FOCUS_COMPANION_APP_ID } from "@/lib/builtin-apps/focus-companion-meta";
+import { isHeartcraftInstalled, isFocusCompanionInstalled } from "@/lib/builtin-apps/registry";
 import { VnApp } from "@/components/vn/vn-app";
 import ReadingApp from "@/components/reading/reading-app";
 import MapApp from "@/components/map/map-app";
@@ -93,6 +98,8 @@ import {
 import type { CustomAppMarketItem } from "@/lib/custom-app-market-types";
 import {
   CUSTOM_APP_HOST_STATE_UPDATED_EVENT,
+  CUSTOM_APP_IMAGE_JOB_EVENT,
+  getCustomAppActiveImageJobs,
   loadCustomAppBadges,
   runDueCustomAppTasks,
 } from "@/lib/custom-app-host-api";
@@ -236,6 +243,30 @@ type CustomAppLaunchState = {
   context: Record<string, unknown>;
   returnTo?: CustomAppReturnTarget | null;
 };
+
+/** 正在后台跑生图的自定义 APP：保持 iframe 挂载但隐藏，完成后再卸载。 */
+type BackgroundCustomApp = {
+  app: InstalledCustomApp;
+  iconId: DesktopIconId;
+  launchState: CustomAppLaunchState | null;
+};
+
+/** 内置「心意手作工坊」：1:1 复用 heartcraft.doris 1.3.1 的 HTML，由 CustomAppRunner 挂载。 */
+const HEARTCRAFT_BUILTIN_APP = buildHeartcraftApp(HEARTCRAFT_ENTRY_HTML);
+
+/** 内置「角色陪伴专注」：HTML 约 1MB，桌面壳只保存元信息，实体 HTML 在 openApp/后台事件时动态 import，
+ *  避免把 1MB 字符串拖进主 bundle。挂载与运行协议同 heartcraft（CustomAppRunner + AiPhone 桥）。 */
+const FOCUS_COMPANION_META_APP = buildFocusCompanionApp("");
+let focusCompanionEntryHtmlPromise: Promise<string> | null = null;
+async function loadFocusCompanionEntryHtml(): Promise<string> {
+  if (!focusCompanionEntryHtmlPromise) {
+    focusCompanionEntryHtmlPromise = import("@/lib/builtin-apps/focus-companion-source")
+      .then(mod => mod.FOCUS_COMPANION_ENTRY_HTML)
+      .catch(err => { focusCompanionEntryHtmlPromise = null; throw err; });
+  }
+  return focusCompanionEntryHtmlPromise;
+}
+const FOCUS_COMPANION_ICON_MIGRATION_KEY = "ai_phone_focuscompanion_icon_v1";
 
 type CustomAppBackgroundEventRun = {
   id: string;
@@ -416,8 +447,21 @@ function trimEmptyTrailingPages(layout: DesktopLayout, widgets: WidgetInstance[]
   return next;
 }
 
+function isLegacyHeartcraftMarketApp(app: InstalledCustomApp): boolean {
+  return app.id !== HEARTCRAFT_APP_ID && (app.manifest?.id || app.id) === HEARTCRAFT_APP_ID;
+}
+
+/** 用户自己装了同 id 的「角色陪伴专注」市场版：桌面不再多显示一个重复图标（内置版接管运行）。 */
+function isFocusCompanionMarketOverride(app: InstalledCustomApp): boolean {
+  return app.id === FOCUS_COMPANION_META_APP.id
+    || (app.manifest?.id || app.id) === FOCUS_COMPANION_META_APP.manifest?.id;
+}
+
 function getInstalledCustomIconIds(): Set<string> {
-  return new Set(loadInstalledCustomApps().map(app => toCustomAppIconId(app.id)));
+  return new Set(loadInstalledCustomApps()
+    .filter(app => !isLegacyHeartcraftMarketApp(app))
+    .filter(app => !isFocusCompanionMarketOverride(app))
+    .map(app => toCustomAppIconId(app.id)));
 }
 
 
@@ -453,6 +497,78 @@ function migrateNewLifestyleAppsToPageFour(
 }
 
 
+
+const HEARTCRAFT_ICON_MIGRATION_KEY = "ai_phone_heartcraft_icon_v1";
+
+/** 老用户桌面上已经有自定义布局：把新内置的「心意手作」补到第三页空位。
+    只补一次；用户之后自己删掉/收进文件夹，不会被再塞回来。 */
+function migrateHeartcraftIcon(
+  layout: DesktopLayout,
+  widgets: WidgetInstance[],
+  dock: DesktopIconId[],
+  folders: DesktopFolderMap,
+): DesktopLayout {
+  if (kvGet(HEARTCRAFT_ICON_MIGRATION_KEY) === "1") return layout;
+  const folderMembers = new Set(Object.values(folders).flatMap(folder => folder.icons));
+  const already = getDesktopPageKeysForState(layout, widgets)
+    .some(pageKey => (layout[pageKey] ?? []).some(icon => icon.id === "heartcraft"));
+  if (already || dock.includes("heartcraft") || folderMembers.has("heartcraft")) {
+    kvSet(HEARTCRAFT_ICON_MIGRATION_KEY, "1");
+    return layout;
+  }
+  const next = cloneDesktopLayout(layout, widgets);
+  ensureDesktopPage(next, "page3");
+  const widgetOcc = buildWidgetOccupancy(widgets.filter(widget => widget.page === 3));
+  const usedCells = new Set((next.page3 ?? []).map(icon => `${icon.row},${icon.col}`));
+  const free = findNearestFreeCell(3, 1, widgetOcc, usedCells);
+  if (free) {
+    next.page3.push({ id: "heartcraft", ...free });
+    kvSet(HEARTCRAFT_ICON_MIGRATION_KEY, "1");
+  }
+  return next;
+}
+
+/** 老用户桌面上已经有自定义布局：把新内置的「角色陪伴专注」补到第三页空位（只补一次）。 */
+function migrateFocusCompanionIcon(
+  layout: DesktopLayout,
+  widgets: WidgetInstance[],
+  dock: DesktopIconId[],
+  folders: DesktopFolderMap,
+): DesktopLayout {
+  if (kvGet(FOCUS_COMPANION_ICON_MIGRATION_KEY) === "1") return layout;
+  const folderMembers = new Set(Object.values(folders).flatMap(folder => folder.icons));
+  const already = getDesktopPageKeysForState(layout, widgets)
+    .some(pageKey => (layout[pageKey] ?? []).some(icon => icon.id === "focuscompanion"));
+  if (already || dock.includes("focuscompanion") || folderMembers.has("focuscompanion")) {
+    kvSet(FOCUS_COMPANION_ICON_MIGRATION_KEY, "1");
+    return layout;
+  }
+  const next = cloneDesktopLayout(layout, widgets);
+  ensureDesktopPage(next, "page3");
+  const widgetOcc = buildWidgetOccupancy(widgets.filter(widget => widget.page === 3));
+  const usedCells = new Set((next.page3 ?? []).map(icon => `${icon.row},${icon.col}`));
+  const free = findNearestFreeCell(3, 1, widgetOcc, usedCells);
+  if (free) {
+    next.page3.push({ id: "focuscompanion", ...free });
+    kvSet(FOCUS_COMPANION_ICON_MIGRATION_KEY, "1");
+  }
+  return next;
+}
+
+const MEMO_ICON_MIGRATION_KEY = "ai_phone_memo_archive_icon_v1";
+function migrateMemoArchiveIcon(layout: DesktopLayout, widgets: WidgetInstance[], dock: DesktopIconId[], folders: DesktopFolderMap): DesktopLayout {
+  if (kvGet(MEMO_ICON_MIGRATION_KEY) === "1") return layout;
+  const folderMembers = new Set(Object.values(folders).flatMap(folder => folder.icons));
+  const already = getDesktopPageKeysForState(layout, widgets).some(pageKey => (layout[pageKey] ?? []).some(icon => icon.id === "memo"));
+  if (already || dock.includes("memo") || folderMembers.has("memo")) { kvSet(MEMO_ICON_MIGRATION_KEY, "1"); return layout; }
+  const next = cloneDesktopLayout(layout, widgets);
+  ensureDesktopPage(next, "page4" as DesktopPageKey);
+  const occupied = buildWidgetOccupancy(widgets.filter(widget => widget.page === 4));
+  const used = new Set((next.page4 ?? []).map(icon => `${icon.row},${icon.col}`));
+  const free = findNearestFreeCell(4, 1, occupied, used);
+  if (free) { next.page4.push({ id: "memo", ...free }); kvSet(MEMO_ICON_MIGRATION_KEY, "1"); }
+  return next;
+}
 
 function migrateLegacyDesktopIconId(id: string, customIconIds = getInstalledCustomIconIds()): DesktopIconId | null {
   if (id === "weibo") return "game";
@@ -804,18 +920,29 @@ type GridGeometry = {
   rowHeight: number;
 };
 
+function getShellCompatScale(): number {
+  if (typeof document === "undefined") return 1;
+  const raw = document.documentElement.style.getPropertyValue("--compat-layout-scale");
+  const z = Number.parseFloat(raw || "1");
+  return Number.isFinite(z) && z > 0 ? z : 1;
+}
+
 function getGridGeometry(gridEl: HTMLElement): GridGeometry {
+  /* 壳缩放（--compat-layout-scale，大屏触屏档 >1）：getBoundingClientRect 是
+     视觉值（已乘壳缩放），getComputedStyle 是布局值（390 设计稿等效）——
+     混算前布局值统一乘 k 换成视觉值，指针→格子换算才不会在缩放屏上错位。 */
+  const k = getShellCompatScale();
   const rect = gridEl.getBoundingClientRect();
   const computed = getComputedStyle(gridEl);
   const colWidths = computed.gridTemplateColumns.split(/\s+/).map(parseFloat);
-  const colWidth = colWidths[0] || 66;
-  const colGap = parseFloat(computed.columnGap) || 20;
-  const rowGap = parseFloat(computed.rowGap) || 0;
+  const colWidth = (colWidths[0] || 66) * k;
+  const colGap = (parseFloat(computed.columnGap) || 20) * k;
+  const rowGap = (parseFloat(computed.rowGap) || 0) * k;
   /* rect 高度是 border-box（含 padding），网格行轨道只占内容盒。 */
-  const padY = (parseFloat(computed.paddingTop) || 0) + (parseFloat(computed.paddingBottom) || 0);
+  const padY = ((parseFloat(computed.paddingTop) || 0) + (parseFloat(computed.paddingBottom) || 0)) * k;
   const contentWidth = colWidths.length * colWidth + (colWidths.length - 1) * colGap;
   const originX = rect.left + (rect.width - contentWidth) / 2;
-  const originY = rect.top + (parseFloat(computed.paddingTop) || 0);
+  const originY = rect.top + (parseFloat(computed.paddingTop) || 0) * k;
   const totalRowGap = (GRID_ROWS - 1) * rowGap;
   const rowHeight = (rect.height - padY - totalRowGap) / GRID_ROWS;
   return { originX, originY, colStep: colWidth + colGap, rowStep: rowHeight + rowGap, colWidth, rowHeight };
@@ -1214,6 +1341,23 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [glassPaintPass, setGlassPaintPass] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [activeApp, setActiveApp] = useState<DesktopIconId | null>(null);
+  /** 内置「角色陪伴专注」的完整定义（HTML 挂载后异步载入，见 loadFocusCompanionEntryHtml）。 */
+  const [focusCompanionApp, setFocusCompanionApp] = useState<InstalledCustomApp | null>(null);
+  /** 后台工具/聊天事件的同步路径拿不到 state，走 ref。 */
+  const focusCompanionAppRef = useRef<InstalledCustomApp | null>(null);
+  /** 预载「角色陪伴专注」的 HTML：动态 import 单独成 chunk，不阻塞首屏；后台工具/聊天事件也能随时拿到完整定义。 */
+  useEffect(() => {
+    let cancelled = false;
+    loadFocusCompanionEntryHtml()
+      .then(html => {
+        if (cancelled) return;
+        const app = buildFocusCompanionApp(html);
+        focusCompanionAppRef.current = app;
+        setFocusCompanionApp(app);
+      })
+      .catch(() => { });
+    return () => { cancelled = true; };
+  }, []);
   const [lifeFocusCharacterId, setLifeFocusCharacterId] = useState<string | null>(null);
   const [customApps, setCustomApps] = useState<InstalledCustomApp[]>([]);
   // 自定义 APP 桌面图标样式偏好（global = 忽略上传图标走全局效果）
@@ -1630,7 +1774,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       const stored = readThemeProfile();
       setSavedTheme(stored);
       setDraftTheme(stored);
-      setCustomApps(loadInstalledCustomApps());
+      setCustomApps(loadInstalledCustomApps().filter(app => !isLegacyHeartcraftMarketApp(app) && !isFocusCompanionMarketOverride(app)));
 
       // Reload widgets + layout after hydration
       const hydratedWidgets = loadWidgets();
@@ -1646,11 +1790,14 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
           const normalized = normalizeLayout(JSON.parse(rawV2), hydratedWidgets, dockIds, hydratedFolders);
           const sane = sanitizeDesktopFolders(hydratedFolders, normalized, hydratedDock, hydratedWidgets);
           const migratedLayout = migrateNewLifestyleAppsToPageFour(sane.layout, hydratedWidgets, hydratedDock, sane.folders);
+          const withHeartcraft = migrateHeartcraftIcon(migratedLayout, hydratedWidgets, hydratedDock, sane.folders);
+          const withFocus = migrateFocusCompanionIcon(withHeartcraft, hydratedWidgets, hydratedDock, sane.folders);
+          const withMemo = migrateMemoArchiveIcon(withFocus, hydratedWidgets, hydratedDock, sane.folders);
           setFolders(sane.folders);
-          setLayout(migratedLayout);
+          setLayout(withMemo);
           if (sane.changed) writeDesktopFolders(sane.folders);
-          if (sane.changed || migratedLayout !== sane.layout || migratedLayout !== migratedLayout || kvGet(NEW_LIFESTYLE_APPS_PAGE_MIGRATION_KEY) === "1") {
-            kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(migratedLayout));
+          if (sane.changed || withFocus !== withHeartcraft || withMemo !== withFocus || kvGet(NEW_LIFESTYLE_APPS_PAGE_MIGRATION_KEY) === "1") {
+            kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(withMemo));
           }
           setDesktopReady(true);
           return;
@@ -1678,7 +1825,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
 
   useEffect(() => {
     const refreshCustomApps = () => {
-      const installed = loadInstalledCustomApps();
+      const installed = loadInstalledCustomApps().filter(app => !isLegacyHeartcraftMarketApp(app) && !isFocusCompanionMarketOverride(app));
       setCustomApps(installed);
       // Drop any dock icons whose custom app was uninstalled, then keep the
       // paged layout disjoint from whatever remains in the dock.
@@ -1749,7 +1896,12 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   useEffect(() => {
     const unregister = registerCustomAppBackgroundToolExecutor(payload => (
       new Promise<unknown>((resolve, reject) => {
-        const id = `bg_tool_${Date.now()}_${++backgroundRunSeqRef.current}_${payload.app.id}`;
+        /* 内置应用的工具是通过注册表拿到的「元信息 stub」（entryHtml 为空），
+           真正起后台环境时得换成带 HTML 的完整定义，否则挂出来是空白页。 */
+        const bgApp = payload.app.id === HEARTCRAFT_BUILTIN_APP.id ? HEARTCRAFT_BUILTIN_APP
+          : payload.app.id === FOCUS_COMPANION_META_APP.id ? (focusCompanionAppRef.current ?? FOCUS_COMPANION_META_APP)
+          : payload.app;
+        const id = `bg_tool_${Date.now()}_${++backgroundRunSeqRef.current}_${bgApp.id}`;
         const timeoutMs = customAppBackgroundTimeoutMs(payload.tool.timeoutMs);
         const timeoutId = window.setTimeout(() => {
           pendingCustomAppBackgroundToolsRef.current.delete(id);
@@ -1761,7 +1913,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
           ...prev,
           {
             id,
-            app: payload.app,
+            app: bgApp,
             payload,
             timeoutMs,
             launchContext: {
@@ -1803,7 +1955,18 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
           isGroup: session?.isGroup === true,
           message: serializeCustomAppBackgroundMessage(message),
         };
-        const nextRuns = customApps
+        /* 内置应用不在 installed 列表里，但同样要接聊天事件（否则关掉 APP 就不会自动开工）。
+           用户自己装了同一个 app 时，让市场版接管，避免两套一起跑。 */
+        const heartcraftBgApps = (isHeartcraftInstalled() || customApps.some(app => app.id === HEARTCRAFT_BUILTIN_APP.id))
+          ? customApps
+          : [...customApps, HEARTCRAFT_BUILTIN_APP];
+        const focusCompanionBgApp = focusCompanionAppRef.current ?? FOCUS_COMPANION_META_APP;
+        const bgApps = (!isFocusCompanionInstalled() && customApps.every(app => app.id !== FOCUS_COMPANION_META_APP.id))
+          ? [...heartcraftBgApps, focusCompanionBgApp]
+          : heartcraftBgApps;
+        const nextRuns = bgApps
+          .filter(app => !(app.id === HEARTCRAFT_BUILTIN_APP.id && activeApp === "heartcraft"))
+          .filter(app => !(app.id === FOCUS_COMPANION_META_APP.id && activeApp === "focuscompanion"))
           .map(app => ({ app, subscription: getBackgroundChatMessageSubscription(app) }))
           .filter((item): item is { app: InstalledCustomApp; subscription: CustomAppEventRecord } => Boolean(item.subscription))
           .filter(({ app }) => (
@@ -2471,6 +2634,50 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     })();
   }
 
+  function openBuiltinHeartcraft(launchContext: Record<string, unknown> = {}): void {
+    const marketApp = getFreshInstalledCustomApp(HEARTCRAFT_BUILTIN_APP.id);
+    if (marketApp) {
+      activateCustomApp(marketApp.id, launchContext);
+      checkCustomAppUpdateInBackground(marketApp, launchContext);
+      return;
+    }
+    setCustomAppLaunchContext({
+      appId: HEARTCRAFT_BUILTIN_APP.id,
+      context: launchContext,
+      returnTo: customAppReturnTargetFromLaunchContext(launchContext),
+    });
+    setActiveApp("heartcraft");
+  }
+
+  /** 打开内置「角色陪伴专注」：市场版优先；内置版等 HTML chunk 就绪后再挂（首次约几百 KB，二次秒开）。 */
+  function openBuiltinFocusCompanion(launchContext: Record<string, unknown> = {}): void {
+    const marketApp = getFreshInstalledCustomApp(FOCUS_COMPANION_META_APP.id);
+    if (marketApp) {
+      activateCustomApp(marketApp.id, launchContext);
+      checkCustomAppUpdateInBackground(marketApp, launchContext);
+      return;
+    }
+    setCustomAppLaunchContext({
+      appId: FOCUS_COMPANION_META_APP.id,
+      context: launchContext,
+      returnTo: customAppReturnTargetFromLaunchContext(launchContext),
+    });
+    if (!focusCompanionApp) {
+      setNotice("正在打开「角色陪伴专注」…");
+      loadFocusCompanionEntryHtml()
+        .then(html => {
+          const app = buildFocusCompanionApp(html);
+          focusCompanionAppRef.current = app;
+          setFocusCompanionApp(app);
+          setActiveApp("focuscompanion");
+          setNotice(null);
+        })
+        .catch(() => setNotice("「角色陪伴专注」加载失败，请重试。"));
+      return;
+    }
+    setActiveApp("focuscompanion");
+  }
+
   function openCustomAppWithBackgroundUpdateCheck(
     iconId: DesktopIconId,
     launchContext: Record<string, unknown> = {},
@@ -2479,6 +2686,15 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     if (!appId) return;
     const app = getFreshInstalledCustomApp(appId);
     if (!app) {
+      /* 聊天卡片点进来：如果是内置应用（不在 installed 列表里），直接打开内置版 */
+      if (appId === HEARTCRAFT_BUILTIN_APP.id) {
+        openBuiltinHeartcraft(launchContext);
+        return;
+      }
+      if (appId === FOCUS_COMPANION_META_APP.id) {
+        openBuiltinFocusCompanion(launchContext);
+        return;
+      }
       setNotice("这个 APP 已被卸载或不存在。");
       return;
     }
@@ -2488,6 +2704,14 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
   function openApp(iconId: DesktopIconId): void {
     if (isFolderIconId(iconId)) return; // 文件夹 tile 由点击处打开面板，不走这里
+    if (iconId === "heartcraft") {
+      openBuiltinHeartcraft();
+      return;
+    }
+    if (iconId === "focuscompanion") {
+      openBuiltinFocusCompanion();
+      return;
+    }
     if (customAppIdFromIconId(iconId)) {
       openCustomAppWithBackgroundUpdateCheck(iconId);
       return;
@@ -2505,7 +2729,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
   const handleInstallCustomAppToDesktop = useCallback((app: InstalledCustomApp) => {
     const iconId = toCustomAppIconId(app.id);
-    setCustomApps(loadInstalledCustomApps());
+    setCustomApps(loadInstalledCustomApps().filter(app => !isLegacyHeartcraftMarketApp(app) && !isFocusCompanionMarketOverride(app)));
     let placedPageNumber: number | null = null;
     setLayout(prev => {
       const widgets = widgetsRef.current;
@@ -2566,6 +2790,17 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     return () => window.removeEventListener("floatphone-native-back", handleNativeBack);
   }, [activeApp, openFolderId]);
   const [customAppLaunchContext, setCustomAppLaunchContext] = useState<CustomAppLaunchState | null>(null);
+  const [backgroundCustomApps, setBackgroundCustomApps] = useState<BackgroundCustomApp[]>([]);
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ appId?: string; count?: number }>).detail;
+      if (!detail?.appId || Number(detail.count) > 0) return;
+      // 生图完成：隐藏的后台 APP 可以卸载了；如果用户已经重新打开它，保留到用户自己关闭。
+      setBackgroundCustomApps(prev => prev.filter(entry => entry.app.id !== detail.appId || activeAppRef.current === entry.iconId));
+    };
+    window.addEventListener(CUSTOM_APP_IMAGE_JOB_EVENT, handler);
+    return () => window.removeEventListener(CUSTOM_APP_IMAGE_JOB_EVENT, handler);
+  }, []);
   const [appMarketLaunchContext, setAppMarketLaunchContext] = useState<Record<string, unknown> | null>(null);
   useEffect(() => {
     const handler = (e: Event) => {
@@ -2577,6 +2812,17 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
         const launchContextRecord = rawLaunchContext && typeof rawLaunchContext === "object" && !Array.isArray(rawLaunchContext)
           ? rawLaunchContext as Record<string, unknown>
           : {};
+        /* 内置 HTML 应用（heartcraft / 角色陪伴专注）：走各自的内置打开链路 */
+        if (nextAppId === FOCUS_COMPANION_APP_ID) {
+          openBuiltinFocusCompanion(launchContextRecord);
+          if (detail.sessionId) setChatInitSessionId(detail.sessionId);
+          return;
+        }
+        if (nextAppId === HEARTCRAFT_APP_ID) {
+          openBuiltinHeartcraft(launchContextRecord);
+          if (detail.sessionId) setChatInitSessionId(detail.sessionId);
+          return;
+        }
         if (customAppId) {
           openCustomAppWithBackgroundUpdateCheck(toCustomAppIconId(customAppId), launchContextRecord);
           if (detail.sessionId) setChatInitSessionId(detail.sessionId);
@@ -2601,7 +2847,15 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       }
     };
     window.addEventListener("open-app", handler);
-    return () => window.removeEventListener("open-app", handler);
+    /* 拦截页点了「申请用一会儿」：壳唤起页面后打开专注 app，由它的 tick 取走预填单 */
+    const onFocusApply = () => {
+      openBuiltinFocusCompanion({});
+    };
+    window.addEventListener("floatphone-focus-apply", onFocusApply);
+    return () => {
+      window.removeEventListener("open-app", handler);
+      window.removeEventListener("floatphone-focus-apply", onFocusApply);
+    };
   }, []);
 
   // Mini chat window state
@@ -4175,6 +4429,18 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
   function closeCustomAppRunner(app: InstalledCustomApp): void {
     const launchState = customAppLaunchContext?.appId === app.id ? customAppLaunchContext : null;
+    const iconId = activeApp;
+    // 生图还在跑时不要卸载 iframe：隐藏起来继续等结果，focused float 仍在前台。
+    if (iconId && getCustomAppActiveImageJobs(app.id) > 0) {
+      setBackgroundCustomApps(prev => {
+        const entry: BackgroundCustomApp = { app, iconId, launchState };
+        return prev.some(item => item.app.id === app.id)
+          ? prev.map(item => item.app.id === app.id ? entry : item)
+          : [...prev, entry];
+      });
+    } else {
+      setBackgroundCustomApps(prev => prev.filter(item => item.app.id !== app.id));
+    }
     setCustomAppLaunchContext(null);
     if (launchState?.returnTo?.appId === "chat") {
       const sessionId = launchState.returnTo.sessionId;
@@ -4292,7 +4558,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       const result = await updateInstalledCustomAppFromMarket(pending.app, {
         resolveMarketItem: async () => pending.item,
       });
-      setCustomApps(loadInstalledCustomApps());
+      setCustomApps(loadInstalledCustomApps().filter(app => !isLegacyHeartcraftMarketApp(app) && !isFocusCompanionMarketOverride(app)));
       setCustomAppUpdatePrompt(null);
       setNotice(result.previousVersion === result.installed.version
         ? `已同步「${result.installed.name}」`
@@ -4328,6 +4594,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
   function renderAppBody() {
     if (!activeApp || !activeIcon) {
+      return null;
+    }
+    // 后台保活的 APP 由下面的隐藏 section 渲染，这里不要再挂一份。
+    if (backgroundCustomApps.some(entry => entry.iconId === activeApp)) {
       return null;
     }
 
@@ -4478,6 +4748,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       return <ArchiveRoomApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
     }
 
+    if (activeApp === "memo") {
+      return <MemoArchiveApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
+    }
+
     if (activeApp === "photowall") {
       return <PhotoWallApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
     }
@@ -4499,6 +4773,53 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
           <CustomAppRunner
             app={CALL_STATS_BUILTIN_APP}
             onClose={() => setActiveApp(null)}
+            onNotice={setNotice}
+          />
+        </CustomAppForegroundBoundary>
+      );
+    }
+
+    if (activeApp === "heartcraft") {
+      return (
+        <CustomAppForegroundBoundary
+          key={HEARTCRAFT_BUILTIN_APP.id}
+          appName={HEARTCRAFT_BUILTIN_APP.name}
+          appId={HEARTCRAFT_BUILTIN_APP.id}
+          appVersion={HEARTCRAFT_BUILTIN_APP.version}
+          manifestId={HEARTCRAFT_BUILTIN_APP.manifest?.id}
+          onClose={() => setActiveApp(null)}
+        >
+          <CustomAppRunner
+            app={HEARTCRAFT_BUILTIN_APP}
+            launchContext={customAppLaunchContext?.appId === HEARTCRAFT_BUILTIN_APP.id ? customAppLaunchContext.context : null}
+            onClose={() => closeCustomAppRunner(HEARTCRAFT_BUILTIN_APP)}
+            onNotice={setNotice}
+          />
+        </CustomAppForegroundBoundary>
+      );
+    }
+
+    if (activeApp === "focuscompanion") {
+      if (!focusCompanionApp) {
+        return (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-black text-sm text-white/80">
+            正在打开「角色陪伴专注」…
+          </div>
+        );
+      }
+      return (
+        <CustomAppForegroundBoundary
+          key={focusCompanionApp.id}
+          appName={focusCompanionApp.name}
+          appId={focusCompanionApp.id}
+          appVersion={focusCompanionApp.version}
+          manifestId={focusCompanionApp.manifest?.id}
+          onClose={() => setActiveApp(null)}
+        >
+          <CustomAppRunner
+            app={focusCompanionApp}
+            launchContext={customAppLaunchContext?.appId === focusCompanionApp.id ? customAppLaunchContext.context : null}
+            onClose={() => closeCustomAppRunner(focusCompanionApp)}
             onNotice={setNotice}
           />
         </CustomAppForegroundBoundary>
@@ -5193,6 +5514,24 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                     />
                   </section>
                 )}
+                {backgroundCustomApps.map(entry => (
+                  <section key={entry.app.id} className="phone-app-pane" style={activeApp !== entry.iconId ? { display: "none" } : undefined}>
+                    <CustomAppForegroundBoundary
+                      appName={entry.app.name}
+                      appId={entry.app.id}
+                      appVersion={entry.app.version}
+                      manifestId={entry.app.manifest?.id}
+                      onClose={() => closeCustomAppRunner(entry.app)}
+                    >
+                      <CustomAppRunner
+                        app={entry.app}
+                        launchContext={entry.launchState?.context ?? null}
+                        onClose={() => closeCustomAppRunner(entry.app)}
+                        onNotice={setNotice}
+                      />
+                    </CustomAppForegroundBoundary>
+                  </section>
+                ))}
               </div>
 
               {!activeApp ? (

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, createContext, type CSSProperties, type ReactNode } from "react";
-import { Activity, AlertTriangle, CalendarDays, Camera, Check, ChevronRight, Clock, Database, FileText, Fingerprint, Globe, HardDrive, Image, Info, KeyRound, Laptop, Layers, LayoutTemplate, Link2, Loader2, LogOut, MessageSquare, Mic, PhoneCall, SlidersHorizontal, UserCircle, Wrench, X, CloudUpload, Zap, Smartphone } from "lucide-react";
+import { Activity, AlertTriangle, BatteryCharging, CalendarDays, Camera, Check, ChevronRight, Clock, Database, FileText, Fingerprint, Globe, HardDrive, Image, Info, KeyRound, Laptop, Layers, LayoutTemplate, Link2, Loader2, LogOut, MessageSquare, Mic, PhoneCall, SlidersHorizontal, UserCircle, Wrench, X, CloudUpload, Zap, Smartphone } from "lucide-react";
 import { ConfirmDialog } from "./ui/modal";
 import { useAccount } from "@/lib/account-context";
 import { isSelfHostedModeEnabled } from "@/lib/self-hosting";
@@ -30,6 +30,7 @@ import { RuntimeDiagnostics } from "./settings/runtime-diagnostics";
 import { PerformanceDiagnostics } from "./settings/performance-diagnostics";
 import { DeviceCompatibilitySettings } from "./settings/device-compatibility-settings";
 import { WidgetSettings } from "./widget/widget-settings";
+import { BackgroundEnhancementSettings } from "./settings/background-enhancement-settings";
 import { fetchIsAdmin } from "@/lib/moderation-client";
 import { PageShell } from "./ui/page-shell";
 import { CardGrid, FeaturedCard, type CardItem, type FeaturedCardItem } from "./ui/card-grid";
@@ -73,6 +74,7 @@ type SubPage =
     | "screenshot"
     | "widget"
     | "diagnostics"
+    | "background"
     | "compatibility"
     | "about";
 
@@ -96,6 +98,7 @@ const SETTINGS_MENU = [
     { id: "widget", icon: LayoutTemplate, label: "桌面小组件", desc: "角色留在桌面上的话", iconColor: BINDING_ACCENTS.memory , glass: "" },
     { id: "agentComputer", icon: Laptop, label: "角色电脑", desc: "云端小电脑（自部署）", iconColor: BINDING_ACCENTS.memory , glass: "agent-computer" },
     { id: "identity", icon: UserCircle, label: "用户身份", desc: "个人信息", iconColor: BINDING_ACCENTS.identity , glass: "identity" },
+    { id: "background", icon: BatteryCharging, label: "后台运行增强", desc: "原生任务提醒、自启动权限与后台诊断", iconColor: BINDING_ACCENTS.memory , glass: "" },
     { id: "diagnostics", icon: Smartphone, label: "故障诊断与设备兼容性", desc: "运行故障检查、屏幕适配、原生接口能力与诊断报告", iconColor: BINDING_ACCENTS.memory , glass: "" },
     { id: "about", icon: Info, label: "关于与声明", desc: "版本与协议", iconColor: BINDING_ACCENTS.memory , glass: "about" },
 ] as const;
@@ -356,6 +359,8 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                 return <ScreenshotSettings onNotice={onNotice} />;
             case "widget":
                 return <WidgetSettings onNotice={onNotice} />;
+            case "background":
+                return <BackgroundEnhancementSettings onNotice={onNotice} />;
             case "diagnostics":
                 return <div style={{ display: "grid", gap: 18 }}><PerformanceDiagnostics /><RuntimeDiagnostics onNotice={onNotice} /><div style={{ borderTop: "1px solid var(--border, rgba(128,128,128,.18))", paddingTop: 18 }}><DeviceCompatibilitySettings onNotice={onNotice} /></div></div>;
             case "agentComputer":

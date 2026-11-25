@@ -219,6 +219,7 @@ const lifeWindow = { dispatchEvent: noOp };
 const lifeStorage = await loadTsWithMocks("../lib/life/life-storage.ts", {
   "../kv-db": kvMocksFor(lifeValues),
   "./life-types": lifeTypes,
+  "./life-scene-consolidation": { consolidateLifeScenes: (state) => state },
   "./life-runtime": { getActorClock: noOp, resolveActorLifeNow: () => new Date() },
 }, { window: lifeWindow, CustomEvent: class CustomEvent { constructor(type) { this.type = type; } } });
 function kvMocksFor(values) {

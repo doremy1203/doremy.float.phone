@@ -261,6 +261,7 @@ function normalizePermission(value: unknown): CustomAppPermission | null {
     "memory.suggest",
     "media.pick",
     "media.save",
+    "media.download",
     "geo.read",
     "geo.watch",
     "notifications.read",
@@ -274,6 +275,9 @@ function normalizePermission(value: unknown): CustomAppPermission | null {
     "wallet.pay",
     "bridge.send",
     "bridge.read",
+    "device.alarm.set",
+    "device.assist",
+    "device.screenshot",
     "online.play",
   ]);
   return allowed.has(text as CustomAppPermission) ? text as CustomAppPermission : null;
@@ -835,6 +839,26 @@ export function setCustomAppIconStyle(appId: string, style: CustomAppIconStyle):
   emitUpdated();
 }
 
+/** 删除一个 APP 的全部私有数据、时间线和它独占的媒体 Blob；保留已装记录。 */
+export function clearCustomAppData(appId: string): { removedMedia: number } {
+  const id = cleanId(appId);
+  let removedMedia = 0;
+  // 先清媒体库 Blob(引用登记在 __media_refs 集合里),再删集合 key
+  try {
+    for (const row of readCustomAppCollection(id, "__media_refs")) {
+      const ref = String(row.id);
+      if (ref && !isCustomAppMediaRefReferenced(ref, id)) {
+        void deleteMediaRef(ref);
+        removedMedia += 1;
+      }
+    }
+  } catch { /* 媒体清理失败不阻断数据清理 */ }
+  kvRemove(`${CUSTOM_APP_DATA_PREFIX}${id}`);
+  for (const key of kvKeysWithPrefix(`${CUSTOM_APP_DATA_PREFIX}${id}/`)) kvRemove(key);
+  kvRemove(`${CUSTOM_APP_TIMELINE_PREFIX}${id}`);
+  return { removedMedia };
+}
+
 export function uninstallCustomApp(appId: string, options: { deleteData?: boolean } = {}): void {
   const id = cleanId(appId);
   saveInstalledCustomApps(loadInstalledCustomApps().filter(app => app.id !== id));
@@ -843,17 +867,7 @@ export function uninstallCustomApp(appId: string, options: { deleteData?: boolea
     delete iconStyles[id];
     kvSet(CUSTOM_APP_ICON_STYLE_KEY, JSON.stringify(iconStyles));
   }
-  if (options.deleteData) {
-    // 先清媒体库 Blob(引用登记在 __media_refs 集合里),再删集合 key
-    try {
-      for (const row of readCustomAppCollection(id, "__media_refs")) {
-        void deleteMediaRef(String(row.id));
-      }
-    } catch { /* 媒体清理失败不阻断卸载 */ }
-    kvRemove(`${CUSTOM_APP_DATA_PREFIX}${id}`);
-    for (const key of kvKeysWithPrefix(`${CUSTOM_APP_DATA_PREFIX}${id}/`)) kvRemove(key);
-    kvRemove(`${CUSTOM_APP_TIMELINE_PREFIX}${id}`);
-  }
+  if (options.deleteData) clearCustomAppData(id);
 }
 
 export async function uninstallCustomAppAsync(appId: string, options: { deleteData?: boolean } = {}): Promise<void> {
@@ -906,6 +920,238 @@ function migrateLegacyCustomAppData(appId: string): void {
   void Promise.all(pending).catch(() => { /* 落盘失败:旧包还在,下个会话重试 */ });
 }
 
+/**
+ * 将旧市场版心意工坊（随机 runtime id）数据幂等并入内置 canonical id。
+ * 只复制、不删除旧 key：旧版安装记录/数据作为回滚保险保留，媒体 Blob 引用不变。
+ */
+const HEARTCRAFT_CANONICAL_DATA_ID = "heartcraft.doris";
+let heartcraftMigrationPromise: Promise<void> | null = null;
+
+function parseCollectionRows(raw: string | null): Array<Record<string, unknown>> {
+  if (!raw) return [];
+  try {
+    const value = JSON.parse(raw) as unknown;
+    return Array.isArray(value) ? value.filter((row): row is Record<string, unknown> => Boolean(row && typeof row === "object" && !Array.isArray(row))) : [];
+  } catch {
+    return [];
+  }
+}
+
+function mergeHeartcraftRows(sources: Array<Array<Record<string, unknown>>>): Array<Record<string, unknown>> {
+  const keyed = new Map<string, Record<string, unknown>>();
+  const anonymous: Array<Record<string, unknown>> = [];
+  const anonymousSeen = new Set<string>();
+  for (const rows of sources) {
+    for (const row of rows) {
+      const id = cleanText(row.id, 200);
+      if (id) keyed.set(id, row);
+      else {
+        let signature = "";
+        try { signature = JSON.stringify(row); } catch { signature = ""; }
+        if (signature && !anonymousSeen.has(signature)) {
+          anonymousSeen.add(signature);
+          anonymous.push(row);
+        }
+      }
+    }
+  }
+  return [...keyed.values(), ...anonymous];
+}
+
+export async function ensureHeartcraftBuiltinDataMigrated(): Promise<void> {
+  if (heartcraftMigrationPromise) return heartcraftMigrationPromise;
+  heartcraftMigrationPromise = (async () => {
+    await hydrateKvDb();
+    const candidateIds = new Set<string>();
+    for (const app of loadInstalledCustomApps()) {
+      const manifestId = normalizeCustomAppManifestId(app.manifest?.id);
+      const id = cleanId(app.id);
+      if (id !== HEARTCRAFT_CANONICAL_DATA_ID
+        && (manifestId === HEARTCRAFT_CANONICAL_DATA_ID || id.startsWith("app_heartcraft.doris_"))) {
+        candidateIds.add(id);
+      }
+    }
+    // 即使旧安装记录已丢失，也从仍然存在的数据 key 中找回旧 runtime id。
+    for (const key of kvKeysWithPrefix(CUSTOM_APP_DATA_PREFIX)) {
+      const suffix = key.slice(CUSTOM_APP_DATA_PREFIX.length);
+      const slash = suffix.indexOf("/");
+      const id = slash >= 0 ? suffix.slice(0, slash) : suffix;
+      if (id && id !== HEARTCRAFT_CANONICAL_DATA_ID
+        && (id.startsWith("app_heartcraft.doris_") || candidateIds.has(id))) candidateIds.add(id);
+    }
+
+    const collections = new Set<string>();
+    const packedById = new Map<string, Record<string, unknown>>();
+    for (const id of candidateIds) {
+      const packedRaw = kvGet(`${CUSTOM_APP_DATA_PREFIX}${id}`);
+      if (packedRaw) {
+        try {
+          const packed = JSON.parse(packedRaw) as unknown;
+          if (packed && typeof packed === "object" && !Array.isArray(packed)) {
+            packedById.set(id, packed as Record<string, unknown>);
+            Object.keys(packed as Record<string, unknown>).forEach(name => collections.add(name));
+          }
+        } catch {
+          // 无法解析的旧整包保持原样，绝不覆盖或删除。
+        }
+      }
+      for (const key of kvKeysWithPrefix(`${CUSTOM_APP_DATA_PREFIX}${id}/`)) {
+        const name = key.slice(`${CUSTOM_APP_DATA_PREFIX}${id}/`.length);
+        if (name) collections.add(name);
+      }
+    }
+
+    for (const collection of collections) {
+      const sources: Array<Array<Record<string, unknown>>> = [];
+      for (const id of candidateIds) {
+        const packedRows = packedById.get(id)?.[collection];
+        if (Array.isArray(packedRows)) {
+          sources.push(packedRows.filter((row): row is Record<string, unknown> => Boolean(row && typeof row === "object" && !Array.isArray(row))));
+        }
+        sources.push(parseCollectionRows(kvGet(customAppCollectionKey(id, collection))));
+      }
+      // canonical rows last, so an existing built-in record wins an id collision.
+      sources.push(parseCollectionRows(kvGet(customAppCollectionKey(HEARTCRAFT_CANONICAL_DATA_ID, collection))));
+      const merged = mergeHeartcraftRows(sources);
+      if (merged.length > 0) {
+        await kvSetAsync(customAppCollectionKey(HEARTCRAFT_CANONICAL_DATA_ID, collection), JSON.stringify(merged));
+      }
+    }
+
+    const timelineIds = new Set<string>([...candidateIds, HEARTCRAFT_CANONICAL_DATA_ID]);
+    const timelineRows: CustomAppTimelineEntry[] = [];
+    for (const id of timelineIds) {
+      const raw = kvGet(`${CUSTOM_APP_TIMELINE_PREFIX}${id}`);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) timelineRows.push(...parsed.filter((row): row is CustomAppTimelineEntry => Boolean(row && typeof row === "object")));
+      } catch { /* 保留原时间线 key，不影响其他集合迁移。 */ }
+    }
+    if (timelineRows.length > 0) {
+      const seen = new Set<string>();
+      const merged = timelineRows.filter(row => {
+        const eventId = getCustomAppTimelineEventId(asRecord(row.data));
+        const key = eventId ? `${row.characterId}:${eventId}` : String(row.id ?? "");
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).map(row => ({ ...row, appId: HEARTCRAFT_CANONICAL_DATA_ID, appName: "心意手作工坊" }))
+        .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")))
+        .slice(-500);
+      await kvSetAsync(`${CUSTOM_APP_TIMELINE_PREFIX}${HEARTCRAFT_CANONICAL_DATA_ID}`, JSON.stringify(merged));
+    }
+  })().catch(error => {
+    heartcraftMigrationPromise = null;
+    throw error;
+  });
+  return heartcraftMigrationPromise;
+}
+
+/** 内置「角色陪伴专注」的 canonical 数据 id。 */
+const FOCUS_COMPANION_CANONICAL_DATA_ID = "doris.focus.companion";
+let focusCompanionMigrationPromise: Promise<void> | null = null;
+
+/**
+ * 防御性归并「角色陪伴专注」的旧数据。
+ *
+ * 内置版与市场版 app id 相同（doris.focus.companion），数据 key 前缀一致，本来无需迁移；
+ * 这里只兜住极少数「装过 id 不同的旧包」（manifest.id 匹配但 runtime id 漂移，
+ * 或遗留 app_doris.focus.companion_* 打包态 id）的情况：把旧集合按行归并进 canonical id。
+ * 幂等：canonical 已有的记录在 id 冲突时获胜，绝不覆盖或删除旧 key。
+ */
+export async function ensureFocusCompanionBuiltinDataMigrated(): Promise<void> {
+  if (focusCompanionMigrationPromise) return focusCompanionMigrationPromise;
+  focusCompanionMigrationPromise = (async () => {
+    await hydrateKvDb();
+    const candidateIds = new Set<string>();
+    for (const app of loadInstalledCustomApps()) {
+      const manifestId = normalizeCustomAppManifestId(app.manifest?.id);
+      const id = cleanId(app.id);
+      if (id !== FOCUS_COMPANION_CANONICAL_DATA_ID
+        && (manifestId === FOCUS_COMPANION_CANONICAL_DATA_ID || id.startsWith("app_doris.focus.companion_"))) {
+        candidateIds.add(id);
+      }
+    }
+    // 即使旧安装记录已丢失，也从仍然存在的数据 key 中找回旧 runtime id。
+    for (const key of kvKeysWithPrefix(CUSTOM_APP_DATA_PREFIX)) {
+      const suffix = key.slice(CUSTOM_APP_DATA_PREFIX.length);
+      const slash = suffix.indexOf("/");
+      const id = slash >= 0 ? suffix.slice(0, slash) : suffix;
+      if (id && id !== FOCUS_COMPANION_CANONICAL_DATA_ID
+        && (id.startsWith("app_doris.focus.companion_") || candidateIds.has(id))) candidateIds.add(id);
+    }
+    if (candidateIds.size === 0) return;
+
+    const collections = new Set<string>();
+    const packedById = new Map<string, Record<string, unknown>>();
+    for (const id of candidateIds) {
+      const packedRaw = kvGet(`${CUSTOM_APP_DATA_PREFIX}${id}`);
+      if (packedRaw) {
+        try {
+          const packed = JSON.parse(packedRaw) as unknown;
+          if (packed && typeof packed === "object" && !Array.isArray(packed)) {
+            packedById.set(id, packed as Record<string, unknown>);
+            Object.keys(packed as Record<string, unknown>).forEach(name => collections.add(name));
+          }
+        } catch {
+          // 无法解析的旧整包保持原样，绝不覆盖或删除。
+        }
+      }
+      for (const key of kvKeysWithPrefix(`${CUSTOM_APP_DATA_PREFIX}${id}/`)) {
+        const name = key.slice(`${CUSTOM_APP_DATA_PREFIX}${id}/`.length);
+        if (name) collections.add(name);
+      }
+    }
+
+    for (const collection of collections) {
+      const sources: Array<Array<Record<string, unknown>>> = [];
+      for (const id of candidateIds) {
+        const packedRows = packedById.get(id)?.[collection];
+        if (Array.isArray(packedRows)) {
+          sources.push(packedRows.filter((row): row is Record<string, unknown> => Boolean(row && typeof row === "object" && !Array.isArray(row))));
+        }
+        sources.push(parseCollectionRows(kvGet(customAppCollectionKey(id, collection))));
+      }
+      // canonical rows last, so an existing built-in record wins an id collision.
+      sources.push(parseCollectionRows(kvGet(customAppCollectionKey(FOCUS_COMPANION_CANONICAL_DATA_ID, collection))));
+      // mergeHeartcraftRows 是通用的「按 id 去重 + 匿名行去重」归并，与具体应用无关。
+      const merged = mergeHeartcraftRows(sources);
+      if (merged.length > 0) {
+        await kvSetAsync(customAppCollectionKey(FOCUS_COMPANION_CANONICAL_DATA_ID, collection), JSON.stringify(merged));
+      }
+    }
+
+    const timelineIds = new Set<string>([...candidateIds, FOCUS_COMPANION_CANONICAL_DATA_ID]);
+    const timelineRows: CustomAppTimelineEntry[] = [];
+    for (const id of timelineIds) {
+      const raw = kvGet(`${CUSTOM_APP_TIMELINE_PREFIX}${id}`);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) timelineRows.push(...parsed.filter((row): row is CustomAppTimelineEntry => Boolean(row && typeof row === "object")));
+      } catch { /* 保留原时间线 key，不影响其他集合迁移。 */ }
+    }
+    if (timelineRows.length > 0) {
+      const seen = new Set<string>();
+      const merged = timelineRows.filter(row => {
+        const eventId = getCustomAppTimelineEventId(asRecord(row.data));
+        const key = eventId ? `${row.characterId}:${eventId}` : String(row.id ?? "");
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).map(row => ({ ...row, appId: FOCUS_COMPANION_CANONICAL_DATA_ID, appName: "角色陪伴专注" }))
+        .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")))
+        .slice(-500);
+      await kvSetAsync(`${CUSTOM_APP_TIMELINE_PREFIX}${FOCUS_COMPANION_CANONICAL_DATA_ID}`, JSON.stringify(merged));
+    }
+  })().catch(error => {
+    focusCompanionMigrationPromise = null;
+    throw error;
+  });
+  return focusCompanionMigrationPromise;
+}
+
 export function readCustomAppCollection(appId: string, collection: string): Array<Record<string, unknown>> {
   migrateLegacyCustomAppData(appId);
   const raw = kvGet(customAppCollectionKey(appId, collection));
@@ -921,6 +1167,27 @@ export function readCustomAppCollection(appId: string, collection: string): Arra
 export function writeCustomAppCollection(appId: string, collection: string, rows: Array<Record<string, unknown>>): void {
   migrateLegacyCustomAppData(appId);
   kvSet(customAppCollectionKey(appId, collection), JSON.stringify(rows));
+}
+
+/** Check installed and uninstalled-but-preserved APP data before deleting a shared media blob. */
+export function isCustomAppMediaRefReferenced(ref: string, excludingAppId?: string): boolean {
+  if (!ref) return false;
+  const appIds = new Set(loadInstalledCustomApps().map(app => app.id));
+  for (const key of kvKeysWithPrefix(CUSTOM_APP_DATA_PREFIX)) {
+    const suffix = key.slice(CUSTOM_APP_DATA_PREFIX.length);
+    const slash = suffix.indexOf("/");
+    if (slash > 0 && suffix.slice(slash + 1) === "__media_refs") {
+      appIds.add(suffix.slice(0, slash));
+    } else if (slash < 0 && suffix) {
+      // Legacy packed collection key; readCustomAppCollection migrates it on demand.
+      appIds.add(suffix);
+    }
+  }
+  if (excludingAppId) appIds.delete(cleanId(excludingAppId));
+  for (const appId of appIds) {
+    if (readCustomAppCollection(appId, "__media_refs").some(row => String(row.id) === ref)) return true;
+  }
+  return false;
 }
 
 function loadCustomAppTimelineForApp(appId: string): CustomAppTimelineEntry[] {
@@ -1060,6 +1327,7 @@ export function loadCustomAppTimelineEntries(
     "life",
     "watch",
     "photo_wall",
+    "heartcraft.doris",
     "phone_widget",
     "global_watch",
   ]);

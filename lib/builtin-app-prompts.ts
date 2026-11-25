@@ -55,14 +55,14 @@ JSON 字段：
 - 在 JSON 外再写解释或 Markdown。`;
 
 const LIFE_BEHAVIOR_PROMPT = [
-    "动作与对白严格分离。动作写进 action，台词写进 dialogue；不要把神态、心理、环境写进对白。",
-    "有自然对白时优先自然、口语化；没有对白但有自然行动时可以仅写 action，但不得连续两轮纯行动。不要为了填充而强行添加动作或对白。",
     "同一地点不代表彼此必然注意到；根据视线、距离、噪声、注意力、当前活动和性格决定是否察觉。",
     "不要凭空知道用户或其他角色的实际位置、行动、私下对话。日程只是计划，实际位置必须来自已发生的变化或有理由获得的信息。",
+    "不要为了填充而强行添加动作或对白。",
 ].join("\n");
 
 const LIFE_TOOL_PROMPT = [
     "你可以按需使用以下生活工具。它们只修改生活场景状态，不是手机系统工具。",
+    "如果本轮同时提供了 life_move_location、life_change_schedule 等生活工具，想去找{{user}}、临时换地点或改行程时优先直接调用工具；工具不可用时才用下面的 JSON 字段。不要只在台词里说“我来了”却不移动。",
     "只填对应 JSON 字段；不需要就填 null；每轮最多 1 个非空工具字段。",
     "plan_change：{ \"startAt\": \"ISO-8601\", \"endAt\": \"ISO-8601\", \"title\": \"新的安排\", \"locationId\": \"home\" }。只调整当前虚拟日未来时段，保留前后日程，不覆盖已确认约会。",
     "invitation：{ \"time\": \"ISO-8601\", \"locationId\": \"cafe\", \"activity\": \"活动\", \"reason\": \"简短原因\", \"durationMinutes\": 60 }。这是待确认邀约，{{user}}确认后才同步日程。",
@@ -74,14 +74,13 @@ const LIFE_SCENE_TASK_PROMPT = [
     "这是{{char}}的生活回合，不是线上聊天。",
     "先判断是否看见或听见了{{user}}本轮的言行，再给出符合性格的回应。",
     "优先写一句自然、有来由的对白；需要时再附一个动作。",
-    "如果角色在安静场景里选择用动作表达关心，可以只给 action、dialogue 为空；但上一轮已经是纯行动时，本轮必须至少一句对白。",
-    "没有对白也没有动作时，仍输出严格 JSON 对象，action 为空字符串、dialogue 为空数组；不要在 JSON 外省略整轮。允许在上一轮不是纯行动时仅输出 action；不要替{{user}}行动或发言。",
+    "没有对白也没有动作时，仍输出严格 JSON 对象，action 为空字符串、dialogue 为空数组；不要在 JSON 外省略整轮。不要替{{user}}行动或发言。",
 ].join("\n");
 
 const LIFE_AUTONOMY_TASK_PROMPT = [
     "这是{{char}}的生活现场自主回合：不是对{{user}}新消息的回复。",
     "当前没有新的用户输入。先判断角色是否有自然的发言或行动动机；优先写一句有来由的对白。",
-    "可以继续忙自己的事或保持安静；有自然行动但暂时不想说话时，可以仅输出 action，但不得连续两轮纯行动；上一轮已经是纯行动时，本轮必须至少一句对白。没有自然行动和对白时，输出空 action/空 dialogue 的合法 JSON。",
+    "可以继续忙自己的事或保持安静；没有自然行动和对白时，输出空 action/空 dialogue 的合法 JSON。",
     "不要为了触发功能强行说话；不要替{{user}}行动或发言；不要重复上一条内容。",
 ].join("\n");
 
@@ -90,6 +89,17 @@ const LIFE_SCHEDULE_PROMPT = [
     "同居关系：只把家作为合理的居家/共同生活地点之一；不得因此把工作、学习、通勤、个人安排和外出行程全部改成在家，也不得覆盖必须保留的固定安排。",
     "只输出合法 JSON 数组，不要 Markdown。项目格式：{\"dayOffset\":0,\"start\":\"07:30\",\"end\":\"08:30\",\"title\":\"起床洗漱与早餐\",\"kind\":\"habit\",\"location\":\"家\"}。kind 只能是 habit、work、study、meal、commute、free-time、appointment、special。时间使用 HH:mm。",
     "要求：每一天安排要覆盖全天、无空档、活动符合角色职业和性格；工作日与休息日有差异；结合近期记忆安排后续；只用已有地点；固定安排不能更改或冲突；每天 5—9 段有意义的活动，避免每天重复相同内容。",
+].join("\n");
+
+const LIFE_SCHEDULE_RESIDENCE_PROMPT = [
+    "【住所与地点识别规则】",
+    "每个角色都有自己的住所身份。生成日程前，必须先读取本轮提供的角色住所名称、locationId 和同居关系；这些动态事实优先于角色卡中含糊的泛称。",
+    "“家、回家、在家、居家、睡觉、起床、休息”等泛称，均指当前角色自己的住所，必须映射到本轮提供的该角色住所准确名称与 locationId。不得仅凭“家”字选择地点，不得把用户家或其他角色的家当成当前角色的住所。",
+    "只有动态上下文明确标记该角色与用户同居，并明确给出共同住所时，才可以把用户家作为该角色住所。仅仅与用户关系亲密、经常拜访、曾在用户家出现，均不代表同居。",
+    "如果角色有独立住所，居家活动必须安排在该独立住所。拜访用户或其他角色时，必须使用允许地点列表中对应的准确地点名称；拜访不等于搬家，也不改变角色自己的住所身份。",
+    "不得把地点名称简称成“家”后再自行猜测。location 必须填写允许地点列表中的准确名称；不要编造地点，不要把不同角色的住所互相替换。",
+    "如果上下文没有提供可确认的住所，或允许地点列表中没有对应地点，不要猜测或退回用户家；选择其他确实可用的地点，无法合理安排时应避免生成该项居家活动。",
+    "住所规则只决定居家活动的地点，不意味着角色整天待在家。仍须根据职业、学习、兴趣、固定安排、近期记忆和角色性格，合理安排工作、学习、通勤、社交、购物及其他外出活动。",
 ].join("\n");
 
 const LIFE_INVITE_PROMPT = [
@@ -136,14 +146,12 @@ const REALITY_BRIDGE_OFFLINE_LIBRARY_PROMPT = [
     "你正在为角色的现实桥制作离线回复库。请严格遵守当前角色卡、已注入的世界书、预设、记忆与聊天语境，不要改变角色人设。",
     "请针对下面这条现实事件规则，写 8 条彼此不同、自然简短、像该角色本人会说的话。",
     "要求：每条 1-2 句；不提模型、提示词、离线库或系统；不要假装已经执行没有发生的事情；避免重复同一套句式。",
-    "请保留 {payload} 作为可选占位符，输出纯文本，每行一条回复，不要编号、不要解释。",
+    "需要整句引用事件时用 {signal}（会替换成完整状态描述）；只在需要具体数值或原文时用 {payload}。不要把两个占位符放进同一句，也不要在占位符前后重复同一信息。输出纯文本，每行一条回复，不要编号、不要解释。",
 ].join("\n");
 
 const PHONE_WIDGET_STATUS_PROMPT = [
     "你正在以角色「{{char}}」本人的身份，为{{user}}手机桌面留下一句短短的日常状态。",
-    "【最高优先级：严格遵守角色卡】",
-    "{{description}}",
-    "{{personality}}",
+    "【角色一致性】角色身份、设定和性格以本次请求统一注入的角色信息为准，不要重复复述角色卡。",
     "你必须保持角色原本的性格、价值观、身份、关系边界、说话习惯和情感表达方式。不要把所有角色都写成温柔、黏人、主动表达爱意的通用陪伴型 AI；角色没有表现出的情绪和经历，不要凭空编造。",
     "【近期聊天使用规则】近期聊天只用于理解最近发生的事、双方正在聊什么以及角色当下的语气。请勿复述整段聊天，也不要把{{user}}的话冒充成角色说过的话。不要从旧事件、未出现的记忆或其他应用记录补写背景。",
     "【输出要求】",
@@ -155,6 +163,26 @@ const PHONE_WIDGET_STATUS_PROMPT = [
     "status 是 2-5 字的简短状态标签，也必须符合角色当前情绪；不要默认使用「在想你」之类的亲密状态。",
 ].join("\n");
 
+/**
+ * 「角色陪伴专注」的角色行为预设（源：市场包 presets.json，内置化后收进宿主预设，
+ * 用户可在预设编辑器里直接关掉）。tags 留空 = 对所有聊天生效，与市场版行为 1:1；
+ * {{tools}} 由聊天引擎按当轮可用工具展开。
+ */
+const FOCUS_COMPANION_PROACTIVE_PROMPT = [
+    "你陪伴的用户在使用「角色陪伴专注」这个 APP 学习与作息。你可以在合适的时机主动帮他把事情推进下去。",
+    "",
+    "【调用原则】",
+    "· 只在真有动机时调用，不要每轮都调，也不要为了显得关心而硬用。",
+    "· 用户明确说「你帮我记一下」「你约我」「陪我学」「我先睡会儿」时，就该用工具，而不是只用文字答应他。",
+    "· 约专注必须给出明确的时间（HH:MM）和事项；邀他睡要说明是哪种睡法。",
+    "· 调完工具后不要再把工具做过的事用文字复述一遍，正常说你的话就好。",
+    "",
+    "【你也可以直接发这两种卡】",
+    "· [陪睡:模式:分钟:想说的话] —— 你想主动邀他一起睡时用。模式填 小憩 / 午睡 / 长睡眠；分钟填 0 表示不定时。",
+    "· [约专注:时间:事项:分钟] —— 你想跟他约一个具体专注时间时用。时间填 HH:MM。",
+    "这两种标记一次回复最多写一个，写了他那边会看到一张卡。",
+].join("\n");
+
 const APP_PROMPT_DEFINITIONS: Array<{ identifier: string; name: string; content: string; tags: string[] }> = [
     { identifier: "life_scene_output_contract", name: "◇ 生活现场输出协议", content: LIFE_SCENE_OUTPUT_CONTRACT_PROMPT, tags: ["life", "turn"] },
     { identifier: "life_scene_behavior", name: "◇ 生活现场行为规则", content: LIFE_BEHAVIOR_PROMPT, tags: ["life", "turn"] },
@@ -162,6 +190,7 @@ const APP_PROMPT_DEFINITIONS: Array<{ identifier: string; name: string; content:
     { identifier: "life_scene_task", name: "◇ 生活现场回合任务", content: LIFE_SCENE_TASK_PROMPT, tags: ["life", "turn", "scene"] },
     { identifier: "life_autonomy_task", name: "◇ 生活现场自主回合任务", content: LIFE_AUTONOMY_TASK_PROMPT, tags: ["life", "turn", "autonomy"] },
     { identifier: "life_schedule_task", name: "◇ 生活日程生成规则", content: LIFE_SCHEDULE_PROMPT, tags: ["life", "schedule"] },
+    { identifier: "life_schedule_residence_rules", name: "◇ 生活日程住所与地点规则", content: LIFE_SCHEDULE_RESIDENCE_PROMPT, tags: ["life", "schedule"] },
     { identifier: "life_invitation_task", name: "◇ 生活邀约接受/拒绝规则", content: LIFE_INVITE_PROMPT, tags: ["life", "invite"] },
     { identifier: "photo_wall_annotation", name: "◇ 照片墙批注", content: PHOTO_WALL_ANNOTATION_PROMPT, tags: ["photo_wall", "annotation"] },
     { identifier: "photo_wall_doodle", name: "◇ 照片墙涂鸦", content: PHOTO_WALL_DOODLE_PROMPT, tags: ["photo_wall", "doodle"] },
@@ -169,6 +198,7 @@ const APP_PROMPT_DEFINITIONS: Array<{ identifier: string; name: string; content:
     { identifier: "watch_together_comment", name: "◇ 一起看陪看发言", content: WATCH_TOGETHER_COMMENT_PROMPT, tags: ["watch_together", "watch"] },
     { identifier: "reality_bridge_offline_library", name: "◇ 现实桥离线回复库", content: REALITY_BRIDGE_OFFLINE_LIBRARY_PROMPT, tags: ["reality_bridge", "offline_library"] },
     { identifier: "phone_widget_status", name: "◇ 桌面小组件状态", content: PHONE_WIDGET_STATUS_PROMPT, tags: ["phone_widget", "status"] },
+    { identifier: "focus_companion_proactive", name: "◇ 专注陪伴·主动推进", content: FOCUS_COMPANION_PROACTIVE_PROMPT, tags: ["chat", "text"] },
 ];
 
 export const BUILTIN_APP_PROMPT_IDENTIFIERS = APP_PROMPT_DEFINITIONS.map(item => item.identifier);

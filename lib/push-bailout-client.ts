@@ -33,7 +33,6 @@ import {
     type IdleReconnectRule,
 } from "./idle-reconnect-storage";
 import { loadCharacters } from "./character-storage";
-import { loadVirtualLifeState } from "./life/life-storage";
 import type { RegexConfig } from "./settings-types";
 import type { LLMMessage } from "./llm-prompt-assembler";
 
@@ -199,11 +198,6 @@ export async function armReplyBailout(params: {
     // The online chat's server fallback must not race the life-scene channel for a
     // character physically present with the player. Otherwise killing the app can
     // produce a chat notification for a turn that belongs to the life scene.
-    const replySession = loadChatSessions().find(item => item.id === params.sessionId);
-    if (replySession && !replySession.isGroup) {
-        const characterId = resolveSessionCharacterId(replySession);
-        if (characterId && isCharacterCoPresentInLifeScene(characterId)) return null;
-    }
     if (!(await hasAccountPushSubscription())) return null;
     if (params.signal?.aborted) return null;
 
@@ -345,7 +339,6 @@ export async function armFollowUpBailout(
         const session = loadChatSessions().find(s => s.id === sessionId);
         if (!session || session.isGroup) return; // 第一期只覆盖单聊追问
         const characterId = resolveSessionCharacterId(session);
-        if (characterId && isCharacterCoPresentInLifeScene(characterId)) return; // 同场时不再从线上聊天渠道主动追问
         // 正在通话中：不挂追问兜底。通话期间角色其实一直在说话，但系统看不到
         // 你的文字回复，会按沉默判成「对方没回」，到点生成一条主动消息弹通知——
         // 人明明在电话里聊着（用户实报）。通话本身就是最强的「在场」信号。
@@ -565,44 +558,6 @@ export async function cancelLifeSceneProactiveBailouts(sceneId: string, characte
     ));
 }
 
-/** Prevent a second proactive channel from talking while a character is physically co-present. */
-export function isCharacterCoPresentInLifeScene(characterId: string): boolean {
-    try {
-        const state = loadVirtualLifeState();
-        if (!state.settings.enabled) return false;
-        return state.scenes.some(scene => scene.status === "active"
-            && scene.participants.some(participant => participant.ownerType === "player" && participant.ownerId === "player")
-            && scene.participants.some(participant => participant.ownerType === "character" && participant.ownerId === characterId && participant.activity !== "离开"));
-    } catch {
-        return false;
-    }
-}
-
-/** Keep online cold-reconnect and life-scene autonomy mutually exclusive per character.
- * Re-evaluate persisted scene presence every time the life scene changes or resumes:
- * cancel queued online tasks only for genuinely co-present characters; re-arm the
- * existing online rule as soon as the character is no longer in the player's scene. */
-export async function reconcileIdleReconnectWithLifeScenes(characterIds?: string[]): Promise<void> {
-    if (!bailoutEnabled()) return;
-    const rules = loadIdleReconnectRules();
-    const filter = characterIds?.length ? new Set(characterIds) : null;
-    for (const rule of rules) {
-        if (filter && !filter.has(rule.characterId)) continue;
-        if (isCharacterCoPresentInLifeScene(rule.characterId)) {
-            await cancelBailoutPrefix("idle:" + rule.id + ":");
-            const session = loadChatSessions().find(item => item.id === rule.sessionId);
-            if (session) await cancelBailoutPrefix("followup:" + session.id + ":");
-        } else {
-            await armIdleReconnectBailout(rule);
-        }
-    }
-}
-
-/** Backward-compatible helper used when entering a life scene. */
-export async function suspendIdleReconnectForLifeScene(characterIds: string[]): Promise<void> {
-    if (!characterIds.length) return;
-    await reconcileIdleReconnectWithLifeScenes(characterIds);
-}
 /**
  * 通话开始/结束时处理这个会话的离线预约。
  *
@@ -645,7 +600,6 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
         const session = loadChatSessions().find(s => s.id === rule.sessionId);
         if (!session || session.isGroup || resolveSessionCharacterId(session) !== rule.characterId) return { ok: false, reason: "找不到对应的单聊会话" };
-        if (isCharacterCoPresentInLifeScene(rule.characterId)) return { ok: false, reason: "角色正在生活现场与玩家同场，已优先交给生活现场主动性" };
         // 正在通话中：不挂冷场重连。通话期间系统看不到文字回复，会误判成用户
         // 沉默了、按规则发来主动消息，只在通知里冒出来（用户实报）。
         if (isCallActiveForSession(session.id)) return { ok: false, reason: "会话正在通话中" };
