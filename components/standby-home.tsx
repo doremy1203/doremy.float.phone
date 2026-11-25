@@ -10,6 +10,7 @@ import {
   type StandbyHomeConfig,
 } from "@/lib/standby-storage";
 import {
+  buildFallbackStandbyLines,
   isStandbyBundleFresh,
   loadStandbyLines,
   pickRandomLine,
@@ -18,6 +19,8 @@ import {
   todayIsoDate,
   type StandbyLine,
 } from "@/lib/standby-lines";
+import { generateStandbyLinesForCharacter } from "@/lib/standby-lines-generator";
+import { STANDBY_REGENERATE_LINES_EVENT } from "@/lib/standby-storage";
 
 const WEEKDAYS = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
 
@@ -57,8 +60,6 @@ export type StandbyHomeProps = {
   onOpenSettings?: () => void;
   /** 角色切换 */
   onCharacterChange?: (characterId: string) => void;
-  /** 手动触发台词生成 / 换一批（由父组件决定如何调用 LLM） */
-  onRegenerateLines?: (character: Character, existing: StandbyLine[]) => Promise<string[]> | string[];
 };
 
 export function StandbyHome({
@@ -69,7 +70,6 @@ export function StandbyHome({
   onExitHome,
   onOpenSettings,
   onCharacterChange,
-  onRegenerateLines,
 }: StandbyHomeProps) {
   const now = useCurrentTime();
   const [config, setConfig] = useState<StandbyHomeConfig>(() => loadStandbyHomeConfig());
@@ -108,63 +108,53 @@ export function StandbyHome({
     return () => window.removeEventListener(evt, sync);
   }, []);
 
-  // 每次换角色 / 切天，加载 / 刷新台词
-  useEffect(() => {
-    if (!resolvedCharacter) return;
-    const bundle = loadStandbyLines(resolvedCharacter.id);
-    if (bundle && isStandbyBundleFresh(bundle) && bundle.lines.length > 0) {
-      setLines(bundle.lines);
-    } else {
-      // 异步刷新：有 onRegenerateLines 就让父组件生成，没有就生成兜底
-      void refreshLines(resolvedCharacter, bundle?.lines ?? []);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedCharacter?.id, todayIsoDate()]);
-
   const refreshLines = useCallback(
     async (character: Character, existingFallback: StandbyLine[]) => {
       setLineLoading(true);
       try {
-        let texts: string[] = [];
-        if (onRegenerateLines) {
-          texts = await Promise.resolve(onRegenerateLines(character, existingFallback));
-        }
-        if (!texts || texts.length === 0) {
-          texts = buildFallbackLines(character);
-        }
+        // 优先调用户配置的 API；不可用时退回本地兜底台词
+        const generated = await generateStandbyLinesForCharacter(
+          character,
+          existingFallback.map(line => line.text),
+        );
+        const texts = generated && generated.length > 0
+          ? generated
+          : buildFallbackStandbyLines(character.name);
         const saved = saveStandbyLines(character.id, texts);
         setLines(saved.lines);
         setCurrentLine(null);
       } catch {
-        const saved = saveStandbyLines(character.id, buildFallbackLines(character));
+        const saved = saveStandbyLines(character.id, buildFallbackStandbyLines(character.name));
         setLines(saved.lines);
       } finally {
         setLineLoading(false);
       }
     },
-    [onRegenerateLines],
+    [],
   );
 
-  // 台词兜底生成（无 LLM 配置时使用）
-  function buildFallbackLines(character: Character): string[] {
-    const name = character.name;
-    const now = new Date();
-    const hour = now.getHours();
-    const greeting =
-      hour < 6 ? "熬夜呢？" :
-      hour < 11 ? "早安呀。" :
-      hour < 14 ? "吃了吗？" :
-      hour < 18 ? "下午好。" :
-      hour < 22 ? "晚上在忙？" :
-      "还没睡？";
-    return [
-      `${greeting}我在这儿，想聊几句？`,
-      `今天的${greeting.replace(/。|？/g, "")}，${name}想你了。`,
-      `最近怎么样？有什么想聊的都可以说。`,
-      `天气${["不错","一般","有点闷","挺好"][Math.floor(Math.random() * 4)]}，适合说说话。`,
-      `${name}在等你，随时可以开始。`,
-    ];
-  }
+  // 每次换角色 / 切天：当天没生成过就刷新一批
+  useEffect(() => {
+    if (!resolvedCharacter) return;
+    const bundle = loadStandbyLines(resolvedCharacter.id);
+    if (bundle && isStandbyBundleFresh(bundle) && bundle.lines.length > 0) {
+      setLines(bundle.lines);
+      return;
+    }
+    void refreshLines(resolvedCharacter, bundle?.lines ?? []);
+  }, [resolvedCharacter, refreshLines]);
+
+  // 设置页点「换一批」时，如果待机首页正挂着，同步刷新
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ characterId?: string }>).detail;
+      if (!detail?.characterId || !resolvedCharacter) return;
+      if (detail.characterId !== resolvedCharacter.id) return;
+      void refreshLines(resolvedCharacter, lines);
+    };
+    window.addEventListener(STANDBY_REGENERATE_LINES_EVENT, handler);
+    return () => window.removeEventListener(STANDBY_REGENERATE_LINES_EVENT, handler);
+  }, [resolvedCharacter, lines, refreshLines]);
 
   // ---- 切换角色 ----
   const characterIndex = validCharacters.findIndex(c => c.id === resolvedCharacter?.id);
@@ -267,6 +257,8 @@ export function StandbyHome({
       };
 
   const spriteUrl = asset?.sprite || resolvedCharacter.avatar || "";
+  // 说话时优先用配套立绘（如害羞差分），没有就沿用普通立绘
+  const displaySprite = (currentLine && asset?.speakingSprite) ? asset.speakingSprite : spriteUrl;
 
   return (
     <div
@@ -315,12 +307,12 @@ export function StandbyHome({
           const pick = pickRandomLine({ characterId: resolvedCharacter.id, date: todayIsoDate(), lines, updatedAt: "" });
           setCurrentLine(pick);
         }}>
-          {spriteUrl ? (
-            <img
-              src={spriteUrl}
-              alt={resolvedCharacter.name}
+          {displaySprite ? (
+            <div
+              role="img"
+              aria-label={resolvedCharacter.name}
               className={`standby-home-sprite${currentLine ? " is-speaking" : ""}`}
-              draggable={false}
+              style={{ backgroundImage: `url("${displaySprite}")` }}
             />
           ) : (
             <div className="standby-home-sprite-fallback" aria-hidden="true">

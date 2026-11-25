@@ -135,7 +135,7 @@ import { WidgetRenderer } from "@/components/widgets/widget-renderer";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
-import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
+import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, createOrGetSession, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
 import { ensureGlobalBindingDefaults, resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
@@ -157,9 +157,7 @@ import { completePendingMcpOAuthCallback } from "@/lib/tool-executor";
 import {
   loadStandbyHomeConfig,
   saveStandbyHomeConfig,
-  STANDBY_HOME_UPDATED_EVENT,
   STANDBY_LOCK_NOW_EVENT,
-  type StandbyHomeConfig,
 } from "@/lib/standby-storage";
 import { StandbyHome } from "./standby-home";
 import type { Character } from "@/lib/character-types";
@@ -1222,28 +1220,18 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [desktopReady, setDesktopReady] = useState(false);
   const [glassPaintPass, setGlassPaintPass] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
-  const [standbyConfig, setStandbyConfig] = useState<StandbyHomeConfig>(() => loadStandbyHomeConfig());
-  const [showStandby, setShowStandby] = useState<boolean>(() => {
-    const config = loadStandbyHomeConfig();
-    return config.showOnLaunch;
-  });
-  const [standbyCharacterId, setStandbyCharacterId] = useState<string | null>(() => {
-    const config = loadStandbyHomeConfig();
-    return config.lastCharacterId || null;
-  });
+  const [showStandby, setShowStandby] = useState<boolean>(() => loadStandbyHomeConfig().showOnLaunch);
+  const [standbyCharacterId, setStandbyCharacterId] = useState<string | null>(
+    () => loadStandbyHomeConfig().lastCharacterId || null,
+  );
   const [characters, setCharacters] = useState<Character[]>(() => loadCharacters());
   useEffect(() => {
-    const syncStandby = () => {
-      setStandbyConfig(loadStandbyHomeConfig());
-      setCharacters(loadCharacters());
-    };
+    const syncCharacters = () => setCharacters(loadCharacters());
     const lockNow = () => setShowStandby(true);
-    window.addEventListener(STANDBY_HOME_UPDATED_EVENT, syncStandby);
-    window.addEventListener("characters-updated", syncStandby);
+    window.addEventListener("characters-updated", syncCharacters);
     window.addEventListener(STANDBY_LOCK_NOW_EVENT, lockNow);
     return () => {
-      window.removeEventListener(STANDBY_HOME_UPDATED_EVENT, syncStandby);
-      window.removeEventListener("characters-updated", syncStandby);
+      window.removeEventListener("characters-updated", syncCharacters);
       window.removeEventListener(STANDBY_LOCK_NOW_EVENT, lockNow);
     };
   }, []);
@@ -5539,14 +5527,23 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                   }}
                   onEnterChat={(charId) => {
                     if (charId) {
-                      setLifeFocusCharacterId(charId);
-                      // 私聊角色 → 直接开 chat app
+                      // 直接打开该角色的私聊会话
+                      const session = createOrGetSession(charId);
+                      saveStandbyHomeConfig({ lastCharacterId: charId });
                       setActiveApp("chat");
+                      setChatInitSessionId(session.id);
+                      window.setTimeout(() => {
+                        window.dispatchEvent(new CustomEvent(CHAT_OPEN_SESSION_EVENT, { detail: { sessionId: session.id } }));
+                      }, 0);
                     }
                     setShowStandby(false);
                   }}
                   onOpenSettings={() => {
-                    setActiveApp("settings");
+                    // 打开美化 App 的「待机」页
+                    try {
+                      sessionStorage.setItem("mascot-theme-section", "lock");
+                    } catch { /* best effort */ }
+                    setActiveApp("theme");
                     setShowStandby(false);
                   }}
                 />

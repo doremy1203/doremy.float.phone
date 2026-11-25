@@ -5,6 +5,8 @@ export type StandbyCharacterAsset = {
   characterId: string;
   /** 透明立绘 URL（data URL 或 http(s)）；空字符串表示未上传 */
   sprite: string;
+  /** 说话时临时切换的配套立绘；空字符串表示沿用 sprite */
+  speakingSprite: string;
   /** 背景图片 URL；空字符串表示跟随桌面壁纸 */
   background: string;
   updatedAt: string;
@@ -50,6 +52,7 @@ function normalizeAsset(value: unknown): StandbyCharacterAsset | null {
   return {
     characterId,
     sprite: normalizeAssetUrl(source.sprite),
+    speakingSprite: normalizeAssetUrl(source.speakingSprite),
     background: normalizeAssetUrl(source.background),
     updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : new Date().toISOString(),
   };
@@ -100,19 +103,23 @@ export function saveStandbyHomeConfig(patch: Partial<StandbyHomeConfig>): Standb
 /** 更新单个角色的立绘/背景 */
 export function saveStandbyCharacterAsset(
   characterId: string,
-  patch: Partial<Pick<StandbyCharacterAsset, "sprite" | "background">>,
+  patch: Partial<Pick<StandbyCharacterAsset, "sprite" | "speakingSprite" | "background">>,
 ): StandbyHomeConfig {
   if (!characterId) return loadStandbyHomeConfig();
   const current = loadStandbyHomeConfig();
   const prev = current.characters[characterId] ?? {
     characterId,
     sprite: "",
+    speakingSprite: "",
     background: "",
     updatedAt: "",
   };
   const nextAsset: StandbyCharacterAsset = {
     ...prev,
     sprite: "sprite" in patch ? normalizeAssetUrl(patch.sprite) : prev.sprite,
+    speakingSprite: "speakingSprite" in patch
+      ? normalizeAssetUrl(patch.speakingSprite)
+      : (prev.speakingSprite ?? ""),
     background: "background" in patch ? normalizeAssetUrl(patch.background) : prev.background,
     updatedAt: new Date().toISOString(),
   };
@@ -126,6 +133,7 @@ export function getStandbyCharacterAsset(config: StandbyHomeConfig, characterId:
     config.characters[characterId] ?? {
       characterId,
       sprite: "",
+      speakingSprite: "",
       background: "",
       updatedAt: "",
     }
@@ -138,6 +146,9 @@ export function requestStandbyNow(): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(STANDBY_LOCK_NOW_EVENT));
 }
+
+/** 设置页请求重新生成某个角色的待机台词（待机首页挂载时会响应） */
+export const STANDBY_REGENERATE_LINES_EVENT = "ai-phone-standby-regenerate-lines";
 
 /** 文件 → data URL（限大小） */
 export function readFileAsDataUrl(file: File, maxBytes = STANDBY_ASSET_MAX_BYTES): Promise<string> {

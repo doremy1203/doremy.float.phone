@@ -13,18 +13,30 @@ import {
   requestStandbyNow,
   saveStandbyCharacterAsset,
   saveStandbyHomeConfig,
+  STANDBY_REGENERATE_LINES_EVENT,
   type StandbyCharacterAsset,
   type StandbyHomeConfig,
 } from "@/lib/standby-storage";
 import {
   isStandbyBundleFresh,
+  buildFallbackStandbyLines,
   loadStandbyLines,
+  saveStandbyLines,
   STANDBY_LINES_PER_DAY,
   type StandbyLine,
 } from "@/lib/standby-lines";
+import { generateStandbyLinesForCharacter } from "@/lib/standby-lines-generator";
 
 type StandbySettingsPageProps = {
   onNotice: (text: string) => void;
+};
+
+type AssetKind = "sprite" | "speakingSprite" | "background";
+
+const ASSET_LABELS: Record<AssetKind, { saved: string; cleared: string }> = {
+  sprite: { saved: "立绘已保存", cleared: "已清除立绘" },
+  speakingSprite: { saved: "说话立绘已保存", cleared: "已清除说话立绘" },
+  background: { saved: "背景已保存", cleared: "已清除背景" },
 };
 
 export function StandbySettingsPage({ onNotice }: StandbySettingsPageProps) {
@@ -32,6 +44,7 @@ export function StandbySettingsPage({ onNotice }: StandbySettingsPageProps) {
   const [characters, setCharacters] = useState<Character[]>(() => loadCharacters());
   const [activeCharId, setActiveCharId] = useState<string | null>(null);
   const fileSpriteRef = useRef<HTMLInputElement>(null);
+  const fileSpeakingRef = useRef<HTMLInputElement>(null);
   const fileBgRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -63,7 +76,7 @@ export function StandbySettingsPage({ onNotice }: StandbySettingsPageProps) {
 
   const handleFile = useCallback(async (
     file: File | null,
-    kind: "sprite" | "background",
+    kind: AssetKind,
     activeId: string,
   ) => {
     if (!file || !activeId) return;
@@ -71,37 +84,46 @@ export function StandbySettingsPage({ onNotice }: StandbySettingsPageProps) {
       const dataUrl = await readFileAsDataUrl(file);
       const next = saveStandbyCharacterAsset(activeId, { [kind]: dataUrl });
       setConfig(next);
-      onNotice(kind === "sprite" ? "立绘已保存" : "背景已保存");
+      onNotice(ASSET_LABELS[kind].saved);
     } catch (err) {
       onNotice(err instanceof Error ? err.message : "读取图片失败");
     }
   }, [onNotice]);
 
-  const clearAsset = (activeId: string, kind: "sprite" | "background") => {
+  const clearAsset = (activeId: string, kind: AssetKind) => {
     const next = saveStandbyCharacterAsset(activeId, { [kind]: "" });
     setConfig(next);
-    onNotice(kind === "sprite" ? "已清除立绘" : "已清除背景");
+    onNotice(ASSET_LABELS[kind].cleared);
   };
 
-  const openFile = (kind: "sprite" | "background") => {
+  const openFile = (kind: AssetKind) => {
     if (kind === "sprite") fileSpriteRef.current?.click();
+    else if (kind === "speakingSprite") fileSpeakingRef.current?.click();
     else fileBgRef.current?.click();
   };
 
+  const [regenBusy, setRegenBusy] = useState(false);
   const regenLines = async (char: Character) => {
+    if (regenBusy) return;
+    setRegenBusy(true);
+    onNotice("正在生成今日台词…");
     try {
-      onNotice("生成中…");
-      // 复用 standby-home 的兜底逻辑；有 LLM 的话可以通过 window 事件触发
-      const evt = new CustomEvent("ai-phone-standby-regenerate-lines", {
+      const existing = (loadStandbyLines(char.id)?.lines ?? []).map(line => line.text);
+      const generated = await generateStandbyLinesForCharacter(char, existing);
+      const texts = generated && generated.length > 0
+        ? generated
+        : buildFallbackStandbyLines(char.name);
+      saveStandbyLines(char.id, texts);
+      // 待机首页正挂着时同步刷新
+      window.dispatchEvent(new CustomEvent(STANDBY_REGENERATE_LINES_EVENT, {
         detail: { characterId: char.id },
-      });
-      window.dispatchEvent(evt);
-      // 兜底：没监听到的话用本地
-      await new Promise(resolve => setTimeout(resolve, 400));
+      }));
       setConfig(loadStandbyHomeConfig());
-      onNotice("台词已刷新");
+      onNotice(generated ? "台词已刷新" : "已用本地台词兜底（未配置 API）");
     } catch {
       onNotice("台词刷新失败，请稍后再试");
+    } finally {
+      setRegenBusy(false);
     }
   };
 
@@ -165,7 +187,19 @@ export function StandbySettingsPage({ onNotice }: StandbySettingsPageProps) {
                   }}
                 >
                   {img ? (
-                    <img src={img} alt="" style={{ width: 20, height: 20, borderRadius: "50%", objectFit: "cover" }} />
+                    <span
+                      role="img"
+                      aria-label={char.name}
+                      style={{
+                        width: 20,
+                        height: 20,
+                        borderRadius: "50%",
+                        backgroundImage: `url("${img}")`,
+                        backgroundSize: "cover",
+                        backgroundPosition: "center",
+                        flexShrink: 0,
+                      }}
+                    />
                   ) : (
                     <span style={{ width: 20, height: 20, borderRadius: "50%", background: "rgba(255,255,255,0.08)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11 }}>
                       {char.name.slice(0, 1)}
@@ -191,6 +225,14 @@ export function StandbySettingsPage({ onNotice }: StandbySettingsPageProps) {
             onClear={() => clearAsset(activeChar.id, "sprite")}
           />
           <AssetCard
+            title={`${activeChar.name} 的说话立绘`}
+            desc="点击立绘说话时临时切换（如害羞 / 张嘴差分），说完自动恢复"
+            current={activeAsset.speakingSprite}
+            placeholder="未上传（说话时沿用普通立绘）"
+            onChoose={() => openFile("speakingSprite")}
+            onClear={() => clearAsset(activeChar.id, "speakingSprite")}
+          />
+          <AssetCard
             title={`${activeChar.name} 的待机背景`}
             desc="非立绘专用时可以留空，待机首页会回落到桌面壁纸"
             current={activeAsset.background}
@@ -213,9 +255,10 @@ export function StandbySettingsPage({ onNotice }: StandbySettingsPageProps) {
             </div>
             <button
               className="ui-btn ui-btn-ghost"
-              onClick={() => regenLines(activeChar)}
+              disabled={regenBusy}
+              onClick={() => void regenLines(activeChar)}
             >
-              <RefreshCw size={14} strokeWidth={1.8} /> 换一批
+              <RefreshCw size={14} strokeWidth={1.8} className={regenBusy ? "spin" : ""} /> {regenBusy ? "生成中…" : "换一批"}
             </button>
           </div>
 
@@ -262,6 +305,13 @@ export function StandbySettingsPage({ onNotice }: StandbySettingsPageProps) {
             accept="image/*"
             className="hidden"
             onChange={e => handleFile(e.target.files?.[0] ?? null, "sprite", activeChar.id)}
+          />
+          <input
+            ref={fileSpeakingRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={e => handleFile(e.target.files?.[0] ?? null, "speakingSprite", activeChar.id)}
           />
           <input
             ref={fileBgRef}

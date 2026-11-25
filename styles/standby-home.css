@@ -115,14 +115,16 @@
 }
 
 .standby-home-sprite {
-  max-height: 56vh;
-  max-width: 86%;
-  width: auto;
-  object-fit: contain;
+  height: 56vh;
+  width: 86%;
+  background-size: contain;
+  background-position: center bottom;
+  background-repeat: no-repeat;
   filter: drop-shadow(0 12px 32px rgba(0, 0, 0, 0.55));
   transform-origin: bottom center;
   animation: standby-breathe 4.4s ease-in-out infinite;
   transition: transform 0.25s ease;
+  pointer-events: none;
 }
 
 .standby-home-sprite.is-speaking {

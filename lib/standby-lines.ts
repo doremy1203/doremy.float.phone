@@ -125,3 +125,25 @@ export function pickRandomLine(bundle: StandbyLineBundle | null): StandbyLine | 
   if (!bundle || bundle.lines.length === 0) return null;
   return bundle.lines[Math.floor(Math.random() * bundle.lines.length)];
 }
+
+/** 没配 API 或请求失败时的本地兜底台词 */
+export function buildFallbackStandbyLines(characterName: string): string[] {
+  const name = (characterName || "").trim() || "ta";
+  const hour = new Date().getHours();
+  const greeting =
+    hour < 6 ? "熬夜呢？" :
+    hour < 11 ? "早安呀。" :
+    hour < 14 ? "吃了吗？" :
+    hour < 18 ? "下午好。" :
+    hour < 22 ? "晚上在忙？" :
+    "还没睡？";
+  const weather = ["不错", "一般", "有点闷", "挺好"][Math.floor(Math.random() * 4)];
+  return [
+    `${greeting}我在这儿，想聊几句？`,
+    `今天过得怎么样？${name}一直在。`,
+    "最近还好吗？有什么事都可以跟我说。",
+    `天气${weather}，适合说说话。`,
+    `${name}在等你，随时可以开始。`,
+  ];
+}
+
