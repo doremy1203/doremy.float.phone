@@ -47,7 +47,7 @@ import {
   saveDIYTemplates,
 } from "@/lib/widget-storage";
 import { WidgetRenderer } from "@/components/widgets/widget-renderer";
-import { LockScreenSettingsPage } from "@/components/settings/lock-screen-settings";
+import { StandbySettingsPage } from "@/components/settings/standby-settings";
 import { IconGlyph } from "@/components/icon-glyph";
 import {
   saveThemeAssetFromBlob,
@@ -559,7 +559,7 @@ export function PhoneThemeApp({
             onNotice={onNotice}
           />
         ) : section === "lock" ? (
-          <LockScreenSettingsPage onNotice={onNotice} />
+          <StandbySettingsPage onNotice={onNotice} />
         ) : section === "widgets" ? (
           <WidgetManagerPage
             widgets={widgets}

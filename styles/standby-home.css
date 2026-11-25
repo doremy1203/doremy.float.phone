@@ -1,0 +1,490 @@
+/* ========= 待机首页（StandbyHome） ========= */
+
+.standby-home {
+  position: absolute;
+  inset: 0;
+  z-index: 8000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: #fff;
+  user-select: none;
+  -webkit-user-select: none;
+  border-radius: inherit;
+}
+
+.standby-home-bg {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  will-change: transform;
+}
+
+.standby-home-scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.28) 0%,
+    rgba(0, 0, 0, 0.02) 22%,
+    rgba(0, 0, 0, 0.14) 60%,
+    rgba(0, 0, 0, 0.64) 100%
+  );
+  pointer-events: none;
+}
+
+/* --- 顶部 --- */
+
+.standby-home-top {
+  position: relative;
+  z-index: 2;
+  margin-top: calc(env(safe-area-inset-top, 0px) + 12px);
+  padding: 0 16px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.standby-home-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(255, 255, 255, 0.14);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.12s ease, transform 0.12s ease;
+}
+
+.standby-home-icon-btn:active {
+  background: rgba(255, 255, 255, 0.26);
+  transform: scale(0.96);
+}
+
+.standby-home-clock {
+  text-align: center;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.35);
+}
+
+.standby-home-time {
+  font-size: clamp(44px, 14vw, 68px);
+  font-weight: 200;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.standby-home-date {
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  opacity: 0.92;
+}
+
+/* --- 舞台（立绘区） --- */
+
+.standby-home-stage {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0;
+  pointer-events: none; /* 让手势穿透舞台背景 */
+}
+
+.standby-home-character {
+  pointer-events: auto;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  margin: 0;
+  cursor: pointer;
+  transition: transform 0.22s ease;
+}
+
+.standby-home-sprite {
+  max-height: 56vh;
+  max-width: 86%;
+  width: auto;
+  object-fit: contain;
+  filter: drop-shadow(0 12px 32px rgba(0, 0, 0, 0.55));
+  transform-origin: bottom center;
+  animation: standby-breathe 4.4s ease-in-out infinite;
+  transition: transform 0.25s ease;
+}
+
+.standby-home-sprite.is-speaking {
+  animation: standby-talk 0.5s ease-in-out infinite;
+}
+
+@keyframes standby-breathe {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-4px) scale(1.01); }
+}
+
+@keyframes standby-talk {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-2px) scale(1.02) rotate(-0.6deg); }
+}
+
+.standby-home-sprite-fallback {
+  width: 180px;
+  height: 180px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 72px;
+  font-weight: 300;
+  color: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.standby-home-character figcaption {
+  text-align: center;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+}
+
+.standby-home-char-name {
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.standby-home-char-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  opacity: 0.8;
+  letter-spacing: 0.04em;
+}
+
+/* 左右切换按钮 */
+.standby-home-nav {
+  pointer-events: auto;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: transparent;
+  cursor: pointer;
+  padding: 10px;
+  min-width: 40px;
+  transition: color 0.18s ease, opacity 0.18s ease;
+}
+
+.standby-home-nav-name {
+  color: rgba(255, 255, 255, 0);
+  font-size: 11px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.standby-home-nav:hover .standby-home-nav-name,
+.standby-home-nav:active .standby-home-nav-name {
+  color: rgba(255, 255, 255, 0.78);
+  opacity: 1;
+}
+
+.standby-home-prev { left: 2px; }
+.standby-home-next { right: 2px; }
+
+/* --- 台词气泡 --- */
+
+.standby-home-line-bubble {
+  position: relative;
+  z-index: 3;
+  margin: -10px 18px 0;
+  padding: 14px 16px 12px;
+  background: rgba(16, 18, 24, 0.88);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+  max-width: calc(100% - 36px);
+  animation: standby-bubble-in 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes standby-bubble-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.standby-home-line-text {
+  margin: 0 0 10px;
+  font-size: 15px;
+  line-height: 1.55;
+  color: #f3f3fa;
+  letter-spacing: 0.02em;
+}
+
+.standby-home-line-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.standby-home-line-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #e8e8f0;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.standby-home-line-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+/* --- 台词列表抽屉 --- */
+
+.standby-home-lines-panel {
+  position: relative;
+  z-index: 4;
+  margin: 10px 18px 0;
+  padding: 12px 14px 14px;
+  background: rgba(16, 18, 24, 0.9);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  max-height: 28vh;
+  overflow: hidden;
+  animation: standby-bubble-in 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.standby-home-lines-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: 8px;
+}
+
+.standby-home-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #e8e8f0;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.standby-home-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.standby-home-refresh-btn .spin {
+  animation: standby-spin 0.9s linear infinite;
+}
+
+@keyframes standby-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.standby-home-lines-panel ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: calc(28vh - 40px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.standby-home-lines-panel li {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 13px;
+  line-height: 1.5;
+  color: #e8e8f0;
+  cursor: pointer;
+  transition: background-color 0.12s ease, transform 0.12s ease;
+}
+
+.standby-home-lines-panel li.is-current {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.standby-home-lines-panel li.is-empty {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+  background: transparent;
+  cursor: default;
+}
+
+/* --- 底部 --- */
+
+.standby-home-bottom {
+  position: relative;
+  z-index: 2;
+  padding: 10px 18px calc(env(safe-area-inset-bottom, 0px) + 22px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.standby-home-hint {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.55);
+  text-align: center;
+}
+
+.standby-home-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.standby-home-chat-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 22px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.standby-home-chat-btn:active {
+  transform: scale(0.97);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.4);
+}
+
+.standby-home-desktop-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.1);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.12s ease;
+}
+
+.standby-home-desktop-btn:active {
+  transform: scale(0.92);
+}
+
+/* --- 手势反馈 --- */
+
+.standby-swipe-hint {
+  position: absolute;
+  z-index: 10;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  pointer-events: none;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+  transition: opacity 0.1s linear;
+}
+
+.standby-swipe-up {
+  left: 50%;
+  top: 12%;
+  transform: translateX(-50%);
+}
+
+.standby-swipe-left {
+  right: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.standby-swipe-right {
+  left: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* --- 空状态 --- */
+
+.standby-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 8000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  color: #fff;
+  border-radius: inherit;
+  background: linear-gradient(160deg, #0f1420 0%, #05070b 100%);
+}
+
+.standby-empty-copy h2 {
+  margin: 0 0 10px;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.standby-empty-copy p {
+  margin: 0 0 20px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .standby-home-sprite { animation: none; }
+  .standby-home-sprite.is-speaking { animation: none; }
+  .standby-home-line-bubble,
+  .standby-home-lines-panel { animation: none; }
+  .standby-home-character { transition: none; }
+}

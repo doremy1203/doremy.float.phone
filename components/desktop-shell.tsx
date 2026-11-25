@@ -154,8 +154,15 @@ import { sendBrowserNotification } from "@/lib/browser-notification";
 import { canSendShellNotification, sendShellNotification } from "@/lib/shell-notify";
 import type { ChatSharePayload } from "@/lib/chat-share";
 import { completePendingMcpOAuthCallback } from "@/lib/tool-executor";
-import { isLockScreenActive, loadLockScreenConfig, LOCK_SCREEN_CONFIG_UPDATED_EVENT, LOCK_SCREEN_LOCK_NOW_EVENT, type LockScreenConfig } from "@/lib/lock-screen-storage";
-import { LockScreen } from "./lock-screen";
+import {
+  loadStandbyHomeConfig,
+  saveStandbyHomeConfig,
+  STANDBY_HOME_UPDATED_EVENT,
+  STANDBY_LOCK_NOW_EVENT,
+  type StandbyHomeConfig,
+} from "@/lib/standby-storage";
+import { StandbyHome } from "./standby-home";
+import type { Character } from "@/lib/character-types";
 import { LayoutGrid, LoaderCircle, RefreshCw } from "lucide-react";
 
 const EMOJI_FONTS = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla"';
@@ -1215,25 +1222,29 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [desktopReady, setDesktopReady] = useState(false);
   const [glassPaintPass, setGlassPaintPass] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
-  const [lockConfig, setLockConfig] = useState<LockScreenConfig>(() => loadLockScreenConfig());
-  const [locked, setLocked] = useState<boolean>(() => isLockScreenActive(loadLockScreenConfig()));
+  const [standbyConfig, setStandbyConfig] = useState<StandbyHomeConfig>(() => loadStandbyHomeConfig());
+  const [showStandby, setShowStandby] = useState<boolean>(() => {
+    const config = loadStandbyHomeConfig();
+    return config.showOnLaunch;
+  });
+  const [standbyCharacterId, setStandbyCharacterId] = useState<string | null>(() => {
+    const config = loadStandbyHomeConfig();
+    return config.lastCharacterId || null;
+  });
+  const [characters, setCharacters] = useState<Character[]>(() => loadCharacters());
   useEffect(() => {
-    const syncLockConfig = () => setLockConfig(loadLockScreenConfig());
-    const lockNow = () => setLocked(true);
-    window.addEventListener(LOCK_SCREEN_CONFIG_UPDATED_EVENT, syncLockConfig);
-    window.addEventListener(LOCK_SCREEN_LOCK_NOW_EVENT, lockNow);
-    const onVisibilityChange = () => {
-      const config = loadLockScreenConfig();
-      setLockConfig(config);
-      if (document.visibilityState === "hidden" && isLockScreenActive(config)) {
-        setLocked(true);
-      }
+    const syncStandby = () => {
+      setStandbyConfig(loadStandbyHomeConfig());
+      setCharacters(loadCharacters());
     };
-    document.addEventListener("visibilitychange", onVisibilityChange);
+    const lockNow = () => setShowStandby(true);
+    window.addEventListener(STANDBY_HOME_UPDATED_EVENT, syncStandby);
+    window.addEventListener("characters-updated", syncStandby);
+    window.addEventListener(STANDBY_LOCK_NOW_EVENT, lockNow);
     return () => {
-      window.removeEventListener(LOCK_SCREEN_CONFIG_UPDATED_EVENT, syncLockConfig);
-      window.removeEventListener(LOCK_SCREEN_LOCK_NOW_EVENT, lockNow);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener(STANDBY_HOME_UPDATED_EVENT, syncStandby);
+      window.removeEventListener("characters-updated", syncStandby);
+      window.removeEventListener(STANDBY_LOCK_NOW_EVENT, lockNow);
     };
   }, []);
   const [activeApp, setActiveApp] = useState<DesktopIconId | null>(null);
@@ -5512,12 +5523,32 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                   (.phone-shell[data-icon-effect] etc.); follows pointer via ref */}
               <div ref={ghostRef} className="drag-ghost" />
 
-              {/* 锁屏：覆盖整个虚拟手机（含状态栏与已打开的应用） */}
-              {locked && (
-                <LockScreen
-                  config={lockConfig}
+              {/* 待机首页：App 启动先展示，上滑 / 按钮进桌面 */}
+              {showStandby && (
+                <StandbyHome
+                  characters={characters}
+                  characterId={standbyCharacterId ?? undefined}
                   fallbackBackground={wallpaperStyle}
-                  onUnlock={() => setLocked(false)}
+                  onCharacterChange={(id) => setStandbyCharacterId(id)}
+                  onExitHome={() => {
+                    // 记住当前角色，下次待机从这里继续
+                    if (standbyCharacterId) {
+                      saveStandbyHomeConfig({ lastCharacterId: standbyCharacterId });
+                    }
+                    setShowStandby(false);
+                  }}
+                  onEnterChat={(charId) => {
+                    if (charId) {
+                      setLifeFocusCharacterId(charId);
+                      // 私聊角色 → 直接开 chat app
+                      setActiveApp("chat");
+                    }
+                    setShowStandby(false);
+                  }}
+                  onOpenSettings={() => {
+                    setActiveApp("settings");
+                    setShowStandby(false);
+                  }}
                 />
               )}
             </div>
