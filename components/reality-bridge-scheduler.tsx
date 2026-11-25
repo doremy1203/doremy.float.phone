@@ -4,7 +4,7 @@ import { useEffect } from "react";
 
 import { bgSetTimeout } from "@/lib/bg-timer";
 import { hydrateKvDb } from "@/lib/kv-db";
-import { processBridgeItem, runDueDelayedTasks, runDueScheduledRules } from "@/lib/reality-bridge/engine";
+import { processBridgeItem, runDueDelayedTasks, runDueScheduledRules, syncNativeOfflineBridgeMessages } from "@/lib/reality-bridge/engine";
 import { bridgeConnection, loadBridgeSettings, pullBridgeInbox } from "@/lib/reality-bridge/storage";
 
 export const REALITY_BRIDGE_FEED_UPDATED_EVENT = "reality-bridge-feed-updated";
@@ -16,6 +16,8 @@ async function pollOnce(force = false): Promise<number> {
   pollRunning = true;
   try {
     await hydrateKvDb();
+    // 原生离线通知在 Android 端持久化；WebView 恢复后写入角色聊天室并触发现有消息横幅。
+    const nativeImported = await syncNativeOfflineBridgeMessages();
     const settings = loadBridgeSettings();
     const { config, ready } = bridgeConnection();
 
@@ -41,7 +43,7 @@ async function pollOnce(force = false): Promise<number> {
     }
 
     // 任一有动静就通知界面刷新（历史页/概览都要跟着变）
-    if ((pulled > 0 || localFired > 0) && typeof window !== "undefined") {
+    if ((pulled > 0 || localFired > 0 || nativeImported > 0) && typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent(REALITY_BRIDGE_FEED_UPDATED_EVENT));
     }
     return pulled;

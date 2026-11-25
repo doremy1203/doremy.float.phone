@@ -1,4 +1,4 @@
-import { loadInstalledCustomApps } from "./custom-app-storage";
+import { loadAllCustomApps } from "./builtin-apps/registry";
 import { loadCustomAppToolsForContext, type RegisteredCustomAppExtension } from "./custom-app-sdk-registry";
 import type { CustomAppToolDefinition, InstalledCustomApp } from "./custom-app-types";
 import { toolNameMatches, type ToolNameMacroContext } from "./tool-storage";
@@ -125,7 +125,7 @@ function findCustomAppToolForCall(
   appId?: string,
   macroContext?: ToolNameMacroContext,
 ): { app: InstalledCustomApp; tool: RegisteredCustomAppExtension<CustomAppToolDefinition> } | null {
-  const apps = loadInstalledCustomApps();
+  const apps = loadAllCustomApps();
   for (const tool of loadCustomAppToolsForContext(appId)) {
     if (!toolNameMatches(tool.name, name, macroContext)) continue;
     const app = apps.find(item => item.id === tool.appId);

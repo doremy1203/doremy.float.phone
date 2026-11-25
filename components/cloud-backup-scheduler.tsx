@@ -54,12 +54,24 @@ export function CloudBackupScheduler() {
       });
     };
 
+    // WebView timers can be suspended in the background. Re-check immediately
+    // after resume so an overdue backup is not postponed for another full interval.
+    const onResume = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    window.addEventListener("focus", onResume);
+    window.addEventListener("pageshow", onResume);
+    document.addEventListener("visibilitychange", onResume);
+
     const interval = window.setInterval(tick, 5 * 60_000);
     const initial = window.setTimeout(tick, 30_000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
       window.clearTimeout(initial);
+      window.removeEventListener("focus", onResume);
+      window.removeEventListener("pageshow", onResume);
+      document.removeEventListener("visibilitychange", onResume);
     };
   }, []);
 

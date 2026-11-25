@@ -31,6 +31,7 @@ const NAMESPACES = new Set([
   "app", "db", "ai", "user", "network", "tools", "events", "chat",
   "characters", "ui", "notifications", "tasks", "wallet", "memory",
   "voice", "calendar", "world", "media", "geo", "room", "cloud", "bridge",
+  "device",
 ]);
 
 // ---------- 1. SDK 外壳：方法 -> 它发送的 action ----------

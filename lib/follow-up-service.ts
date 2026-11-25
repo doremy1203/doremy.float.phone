@@ -20,7 +20,7 @@ import {
 } from "./chat-storage";
 import type { ChatChannel, ChatMessage, StateValue } from "./chat-storage";
 import { generateChatCompletion, flattenCompletionResult } from "./chat-engine";
-import { armFollowUpBailout, armIdleReconnectBailout, cancelBailoutKey, cancelBailoutPrefix, cancelFollowUpBailout, isCharacterCoPresentInLifeScene, startBailoutHeartbeat } from "./push-bailout-client";
+import { armFollowUpBailout, armIdleReconnectBailout, cancelBailoutKey, cancelBailoutPrefix, cancelFollowUpBailout, startBailoutHeartbeat } from "./push-bailout-client";
 import { hasAccountPushSubscription, isWithinPushQuietHours } from "./push-client";
 import {
     IDLE_RECONNECT_MAX_CONSECUTIVE,
@@ -32,6 +32,7 @@ import {
 } from "./idle-reconnect-storage";
 import { loadFollowUpConfig } from "./settings-storage";
 import { beginTurn, type TurnHandle } from "./turn-coordinator";
+import { readLifeSceneForegroundLease } from "./life/life-scheduler-coordinator";
 import { parseAIResponse } from "./rich-message-parser";
 import type { ParsedMessagePart } from "./rich-message-parser";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "./chat-status-region";
@@ -82,7 +83,7 @@ function isLifeCharacterSleeping(sessionId: string): boolean {
     const character = characterId ? loadCharacters().find(item => item.id === characterId) : undefined;
     if (!character) return false;
     const loaded = loadVirtualLifeState();
-    if (!loaded.settings.enabled || !loaded.settings.allowCharactersToStaySilent) return false;
+    if (!loaded.settings.enabled || loaded.settings.allowOnlineChatDuringSleep || !loaded.settings.allowCharactersToStaySilent) return false;
     const settled = settleActorTimelineToNow(loaded, "character", character.id);
     const life = settled === loaded ? loaded : saveVirtualLifeState(settled);
     const clock = getActorClock(life, "character", character.id);
@@ -208,24 +209,32 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
         return;
     }
     const config = loadFollowUpConfig();
+    const session = loadChatSessions().find(item => item.id === sessionId);
+    const characterId = session && !session.isGroup ? resolveSessionCharacterId(session) : undefined;
 
-    if (!stateValues || stateValues.length === 0) {
-        console.log(`[FollowUp] No state values, not scheduling.`);
-        clearFollowUpSchedule(sessionId);
-        cancelFollowUpBailout(sessionId);
-        return;
-    }
+    // 优先使用刚刚解析出的本轮状态；角色本轮没输出焦虑值时，
+    // 回退到该角色跨私聊会话的最近一次状态，避免因本轮漏字段直接丢失追发。
+    const currentAnxiety = stateValues?.find(
+        value => value.name === config.anxietyFieldName && Number.isFinite(value.value),
+    );
+    const latestCharacterValues = !currentAnxiety && characterId
+        ? getLatestCharacterStateValues(characterId)
+        : [];
+    const latestAnxiety = latestCharacterValues.find(
+        value => value.name === config.anxietyFieldName && Number.isFinite(value.value),
+    );
+    const anxietyEntry = currentAnxiety ?? latestAnxiety;
+    const anxietySource = currentAnxiety ? "current_reply" : latestAnxiety ? "latest_character_state" : "missing";
 
-    const anxietyEntry = stateValues.find(sv => sv.name === config.anxietyFieldName);
     if (!anxietyEntry) {
-        console.log(`[FollowUp] No "${config.anxietyFieldName}" field found, not scheduling.`);
+        console.log(`[FollowUp] No valid "${config.anxietyFieldName}" value for session=${sessionId}, character=${characterId ?? "unknown"}, source=missing; not scheduling.`);
         clearFollowUpSchedule(sessionId);
         cancelFollowUpBailout(sessionId);
         return;
     }
 
     if (anxietyEntry.value < config.anxietyThreshold) {
-        console.log(`[FollowUp] Anxiety ${anxietyEntry.value} < threshold ${config.anxietyThreshold}, not scheduling.`);
+        console.log(`[FollowUp] Anxiety ${anxietyEntry.value} < threshold ${config.anxietyThreshold}, source=${anxietySource}, session=${sessionId}; not scheduling.`);
         clearFollowUpSchedule(sessionId);
         cancelFollowUpBailout(sessionId);
         return;
@@ -236,7 +245,7 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
     const t = range > 0 ? (anxietyEntry.value - config.anxietyThreshold) / range : 1;
     const delaySec = Math.round(config.anxietyMaxDelay + t * (config.anxietyMinDelay - config.anxietyMaxDelay));
     const fireAt = Date.now() + delaySec * 1000;
-    console.log(`[FollowUp] Anxiety-driven: value=${anxietyEntry.value}, delay=${delaySec}s, session=${sessionId}, count=${count}`);
+    console.log(`[FollowUp] Anxiety-driven: value=${anxietyEntry.value}, source=${anxietySource}, character=${characterId ?? "unknown"}, delay=${delaySec}s, session=${sessionId}, count=${count}`);
     saveFollowUpSchedule({ sessionId, fireAt, count, delaySec });
     // 离线推送兜底：把本轮追问的完整请求快照预约到服务端，App 被杀时由服务端接管
     void armFollowUpBailout(sessionId, count, delaySec, fireAt);
@@ -407,42 +416,13 @@ async function saveBackgroundCompletionRounds(
     return { hasVisible, newCount, stateValues };
 }
 
-// ── 查岗轮询 ──────────────────────────────────────────────
-//
-// 挂在这里而不是另起一套定时器：本服务的 pollSchedules 每 3 秒跑一次，
-// 桌面壳已经把它启动了，查岗只是搭个便车。
-//
-// 两个节流：
-//  · 60 秒才检查一次（查岗间隔是分钟级，3 秒一次纯属浪费）；
-//  · 「上一轮还没跑完」时直接跳过——runCheckIn 会一直等用户在浮层上做决定
-//    （最长 90 秒），不锁的话下一轮又弹一个浮层，两个叠一起根本没法处理。
-const CHECK_IN_POLL_INTERVAL_MS = 60_000;
-let lastCheckInPollAt = 0;
-let checkInPolling = false;
-
-function pollCheckIn(now: number) {
-    if (now - lastCheckInPollAt < CHECK_IN_POLL_INTERVAL_MS) return;
-    lastCheckInPollAt = now;
-    if (checkInPolling) return;
-    checkInPolling = true;
-    // 动态 import：查岗引擎反过来要用本模块的 requestBackgroundChatReply，
-    // 静态 import 会形成循环依赖，运行时解析才是安全的。
-    void import("./screenshot/checkin-engine")
-        .then(async module => {
-            const { hasAnyCheckInEnabled, prepareCheckInService } = await import("./screenshot");
-            if (!hasAnyCheckInEnabled()) return;
-            // App 重启后常驻服务会没掉，而配置里还开着——这时补一次预热。
-            // 只有 App 在前台时才能合法启动前台服务，后台时会失败并等下一轮，
-            // 这是系统限制，不是可以绕过的 bug。
-            prepareCheckInService();
-            await module.pollDueCheckIns();
-        })
-        .catch(() => undefined)
-        .finally(() => { checkInPolling = false; });
-}
+// 查岗调度由 CheckInScheduler 统一负责，避免此处 3 秒轮询与桌面调度器重复触发。
 
 function pollSchedules() {
     try {
+        // 用户正在看生活现场时，线上主动消息不抢当前回合；排期保留，
+        // 切到后台或离开现场后自动继续触发，不会被清掉。
+        if (readLifeSceneForegroundLease()) return;
         const schedules = loadAllFollowUpSchedules();
         const now = Date.now();
         for (const sched of schedules) {
@@ -458,7 +438,6 @@ function pollSchedules() {
         pollTimedWakeSchedules(now);
         pollMenstrualPeriodCare(now);
         pollIdleReconnect(now);
-        pollCheckIn(now);
     } catch (e) {
         console.error("[FollowUp] pollSchedules error:", e);
     }
@@ -528,7 +507,7 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
         const session = sessions.find(s => s.id === sched.sessionId);
         if (!session) return;
         const characterId = resolveSessionCharacterId(session);
-        if (!characterId || isCharacterCoPresentInLifeScene(characterId)) return;
+        if (!characterId) return;
         turn = beginTurn({ kind: "followup", characterId, sessionId: session.id });
         if (!turn) return;
 
@@ -734,10 +713,6 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             void cancelBailoutPrefix(`idle:${rule.id}:`);
             return;
         }
-        if (isCharacterCoPresentInLifeScene(rule.characterId)) {
-            void cancelBailoutPrefix(`idle:${rule.id}:`);
-            return;
-        }
         turn = beginTurn({ kind: "idle_reconnect", characterId: rule.characterId, sessionId: session.id });
         if (!turn) return;
 
@@ -832,10 +807,6 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
             void cancelBailoutKey(`timedwake:${sched.id}`);
             return;
         }
-        if (isCharacterCoPresentInLifeScene(sched.characterId)) {
-            void cancelBailoutKey(`timedwake:${sched.id}`);
-            return;
-        }
         turn = beginTurn({ kind: "timed_wake", characterId: sched.characterId, sessionId: session.id });
         if (!turn) return;
 
@@ -924,7 +895,6 @@ async function fireMenstrualPeriodCare(input: {
         const session = sessions.find(s => s.id === input.sessionId);
         if (!session || session.isGroup || resolveSessionCharacterId(session) !== input.characterId) return;
         if (hasMenstrualPeriodCareTriggered(input.characterId, input.event.cycleKey)) return;
-        if (isCharacterCoPresentInLifeScene(input.characterId)) return;
         turn = beginTurn({ kind: "period_care", characterId: input.characterId, sessionId: session.id });
         if (!turn) return;
 

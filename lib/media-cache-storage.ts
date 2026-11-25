@@ -11,6 +11,10 @@ interface MediaCacheEntry {
     createdAt: number;
     /** Persistent references held by features; generic media cleanup must not remove these. */
     retainedBy?: string[];
+    /** SHA-256 of image bytes; used for content-addressed deduplication. */
+    sha256?: string;
+    /** Indexed byte length, backfilled for legacy records in DB v2. */
+    byteLength?: number;
 }
 
 class MediaCacheDatabase extends Dexie {
@@ -21,6 +25,11 @@ class MediaCacheDatabase extends Dexie {
         this.version(1).stores({
             entries: "id, createdAt",
         });
+        this.version(2).stores({
+            entries: "id, createdAt, sha256, [mediaCategory+byteLength]",
+        }).upgrade((transaction) => transaction.table("entries").toCollection().modify((entry: MediaCacheEntry) => {
+            entry.byteLength = entry.blob?.size ?? 0;
+        }));
     }
 }
 
@@ -92,9 +101,62 @@ function generateId(): string {
     return `mc_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+async function sha256Blob(blob: Blob): Promise<string | null> {
+    if (typeof crypto === "undefined" || !crypto.subtle) return null;
+    try {
+        const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+        return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join("");
+    } catch {
+        // If hashing is unavailable, preserve the old unique-write behavior.
+        return null;
+    }
+}
+
+async function blobsHaveSameBytes(left: Blob, right: Blob): Promise<boolean> {
+    if (left.size !== right.size) return false;
+    const [a, b] = await Promise.all([left.arrayBuffer(), right.arrayBuffer()]);
+    const aa = new Uint8Array(a);
+    const bb = new Uint8Array(b);
+    for (let index = 0; index < aa.length; index++) if (aa[index] !== bb[index]) return false;
+    return true;
+}
+
 export async function storeMediaBlob(blob: Blob, mimeType: string, category: MediaCacheEntry["mediaCategory"]): Promise<string> {
+    const table = getDb().entries;
+    let imageHash: string | null = null;
+    // Image generation frequently returns byte-identical images. Deduplicate only
+    // images, where this saves meaningful space without changing audio/video semantics.
+    if (category === "image" && blob.size > 0) {
+        imageHash = await sha256Blob(blob);
+        if (imageHash) {
+            const candidates = await table.where("[mediaCategory+byteLength]").equals([category, blob.size]).toArray();
+            for (const candidate of candidates) {
+                if (candidate.mimeType !== mimeType) continue;
+                let candidateHash = candidate.sha256;
+                // Legacy rows are fingerprinted lazily the first time a same-size image arrives.
+                if (!candidateHash) {
+                    candidateHash = (await sha256Blob(candidate.blob)) ?? undefined;
+                    if (candidateHash) {
+                        await table.update(candidate.id, { sha256: candidateHash, byteLength: candidate.blob.size });
+                    }
+                }
+                if (candidateHash !== imageHash) continue;
+                if (await blobsHaveSameBytes(candidate.blob, blob)) {
+                    return `${MEDIA_STORE_PROTOCOL}${candidate.id}`;
+                }
+            }
+        }
+    }
     const id = generateId();
-    await getDb().entries.put({ id, blob, mimeType, mediaCategory: category, createdAt: Date.now() });
+    await table.put({
+        id,
+        blob,
+        mimeType,
+        mediaCategory: category,
+        createdAt: Date.now(),
+        byteLength: blob.size,
+        ...(category === "image" && imageHash ? { sha256: imageHash } : {}),
+    });
     return `${MEDIA_STORE_PROTOCOL}${id}`;
 }
 
@@ -155,6 +217,24 @@ export async function deleteMediaRef(ref: string | undefined): Promise<void> {
     } catch { /* If a damaged storage record cannot be read, still honor explicit retention metadata. */ }
     if (entry?.retainedBy?.length || referencedByPhotoWall) return;
     await table.delete(id);
+}
+
+/**
+ * Remove legacy/corrupt media rows that no longer contain any bytes.
+ *
+ * Older builds sometimes left metadata-only rows behind after a Blob could not
+ * be restored. They can never be displayed or downloaded and only make the
+ * archive look like it contains hundreds of unreferenced files. This is a
+ * metadata cleanup, not a media deletion; real files are never touched.
+ */
+export async function deleteEmptyMediaEntries(): Promise<number> {
+    const table = getDb().entries;
+    const ids: string[] = [];
+    await table.each((entry) => {
+        if (!entry.blob || entry.blob.size <= 0) ids.push(entry.id);
+    });
+    if (ids.length > 0) await table.bulkDelete(ids);
+    return ids.length;
 }
 
 export async function loadMediaObjectUrl(ref: string): Promise<string | null> {

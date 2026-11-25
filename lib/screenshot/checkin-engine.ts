@@ -15,7 +15,7 @@
 //  - **失败如实说**：没能截图时写的是「截屏失败」而不是「对方没给看」，
 //    免得角色误以为用户拒绝、做出委屈的反应。
 
-import { pushChatMessage, loadChatSessions } from "../chat-storage";
+import { pushChatMessage, loadChatSessions, getActiveChatSessionId } from "../chat-storage";
 import { loadCharacters } from "../character-storage";
 import { recordUserShot } from "./engine";
 import { requestBackgroundChatReply } from "../follow-up-service";
@@ -24,11 +24,12 @@ import {
   loadCharacterCheckIn,
   loadCheckInConfig,
   markCheckInFired,
+  ensureCheckInDueTime,
   readCharacterRuntime,
   shouldFireCheckIn,
   type CheckInCharacterConfig,
 } from "./checkin-config";
-import { consumePendingUserShot, hasCheckInBridge, readCheckInCapabilities, requestCheckIn } from "./checkin";
+import { cancelNativeCheckIn, consumePendingUserShot, consumePendingFocusPassCheckIn, hasCheckInBridge, readCheckInAppState, readCheckInCapabilities, requestCheckIn, scheduleNativeCheckIn } from "./checkin";
 import { resolveCheckInGuidance } from "./checkin-guidance";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
 import type { CheckInOutcome } from "./types";
@@ -40,7 +41,6 @@ import { getActorClock, getCurrentActorSchedule, resolveActorLifeNow } from "../
 function isCheckInAllowedByLifeContext(characterId: string): boolean {
   const life = loadVirtualLifeState();
   if (!life.settings.enabled) return true; // Preserve legacy check-in behavior when the life engine is off.
-  if (!life.settings.enableCharacterAutonomy) return false;
   const now = resolveActorLifeNow(getActorClock(life, "character", characterId));
   const schedule = getCurrentActorSchedule(life, "character", characterId, now);
   const actor = life.actorStates.find(item => item.ownerType === "character" && item.ownerId === characterId);
@@ -133,9 +133,12 @@ export async function runCheckIn(
   const name = character?.name?.trim() || "TA";
   const avatar = character?.avatar || "";
 
+  // 清掉原生到期提醒；实际截图仍由现有确认浮层负责。
+  cancelNativeCheckIn(characterId);
   // 先记一次触发：无论用户最终给不给看，这次查岗都已经发生过，
   // 都该计入当日上限——否则用户一直点「不给」就等于没有上限。
-  markCheckInFired(characterId);
+  const appState = readCheckInAppState();
+  markCheckInFired(characterId, cfg, appState.backgroundElapsedMs);
 
   const outcome = await requestCheckIn(characterId, name, avatar);
 
@@ -287,6 +290,76 @@ export async function flushPendingUserShot(): Promise<boolean> {
 }
 
 /**
+ * 处理原生定时器送回的「专注通行证查岗」结果。
+ *
+ * 原生闹钟可能在 WebView 已被回收时弹浮层；结果先落 SharedPreferences，
+ * 网页下次挂载/收到 checkIn 事件时消费。这里负责把图送进聊天室并请求角色
+ * 调用 pass-verdict 工具，通行证和信任分仍由专注 App 的 handler 更新。
+ */
+export async function flushPendingFocusPassCheckIn(): Promise<boolean> {
+  const pending = consumePendingFocusPassCheckIn();
+  if (!pending) return false;
+  const characterId = pending.characterId || "";
+  const session = loadChatSessions()
+    .filter(item => !item.isGroup && (!characterId || item.contactId === characterId))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  if (!session) return false;
+  const name = loadCharacters().find(item => item.id === characterId)?.name?.trim() || "TA";
+  const app = pending.app || "该应用";
+  const instruction = `[白名单通行证查岗] 应用：${app}。接下来你会收到用户当前屏幕的截图。`
+    + "请判断他是在学习/查资料还是在娱乐；看完后必须调用「判定通行证查岗」工具，app 填「" + app + "」："
+    + "合规传 verdict=pass；画面违规、用户拒绝给看或超时没交传 verdict=violation。不要只口头说。";
+  try {
+    pushChatMessage({ sessionId: session.id, role: "system", content: instruction, status: "sent" });
+    if (pending.accepted && pending.base64) {
+      if (pending.reply) {
+        pushChatMessage({ sessionId: session.id, role: "user", content: pending.reply, status: "sent" });
+      }
+      pushChatMessage({
+        sessionId: session.id,
+        role: "system",
+        content: `[${name}想看看你现在在做什么，你把屏幕给它看了]`,
+        status: "sent",
+      });
+      const stored = await storeMediaBase64(pending.base64, "image/png");
+      pushChatMessage({
+        sessionId: session.id,
+        role: "user",
+        content: "",
+        mediaType: "image",
+        mediaUrl: stored.ref,
+        mediaData: { label: "通行证查岗自证" },
+        status: "sent",
+      });
+      void requestBackgroundChatReply(session.id, {
+        appId: "checkin",
+        appTags: ["checkin", "screenshot", "focus_pass", "accepted"],
+      }).catch(() => undefined);
+      return true;
+    }
+    if (pending.reply) {
+      pushChatMessage({ sessionId: session.id, role: "user", content: pending.reply, status: "sent" });
+    }
+    const declined = pending.reason === "user_rejected";
+    const timedOut = pending.reason === "timeout";
+    const note = declined
+      ? `[${name}想看看你现在在做什么，你没有给它看${pending.reply ? "，但回了一句话" : ""}]`
+      : timedOut
+        ? `[${name}想看看你现在在做什么，你没有回应]`
+        : `[${name}想看看你现在的屏幕，但没能截到（${pending.reason || "未知原因"}）]`;
+    pushChatMessage({ sessionId: session.id, role: "system", content: note, status: "sent" });
+    const guidanceKind = declined ? "declined" : timedOut ? "timeout" : "failed";
+    void requestBackgroundChatReply(session.id, {
+      appId: "checkin",
+      appTags: ["checkin", "screenshot", "focus_pass", guidanceKind],
+    }).catch(() => undefined);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 启动「用户主动截屏」的接收端：页面挂载时补发一次，之后收到 checkIn 事件再拉一次。
  *
  * 必须挂在桌面壳这种「一直在跑」的地方，而不是设置页——用户点球时
@@ -300,13 +373,15 @@ export function startUserShotBridge(): () => void {
   if (typeof window === "undefined") return () => { /* noop */ };
   if (!hasCheckInBridge()) return () => { /* noop */ };
 
-  // 挂载时补发：点球那一刻页面若已被系统回收，事件是丢的，只能靠这里捞回来
+  // 挂载时补发：点球那一刻/原生查岗结果落盘时页面若已被系统回收，只能靠这里捞回来
   void flushPendingUserShot().catch(() => undefined);
+  void flushPendingFocusPassCheckIn().catch(() => undefined);
 
   ensureShellOverlayListener();
   return subscribeShellOverlayEvents((event) => {
     if (event.action !== "checkIn") return;
     void flushPendingUserShot().catch(() => undefined);
+    void flushPendingFocusPassCheckIn().catch(() => undefined);
   });
 }
 
@@ -359,8 +434,11 @@ export async function requestCheckInForTool(characterId: string): Promise<CheckI
   const name = character?.name?.trim() || "TA";
   const avatar = character?.avatar || "";
 
+  // 手动工具请求也清掉同一角色的到期提醒，避免重复通知。
+  cancelNativeCheckIn(characterId);
   // 先记一次：请求已经发出去了，无论用户最终给不给看。
-  markCheckInFired(characterId);
+  const appState = readCheckInAppState();
+  markCheckInFired(characterId, cfg, appState.backgroundElapsedMs);
 
   const outcome = await requestCheckIn(characterId, name, avatar);
 
@@ -433,10 +511,44 @@ export async function requestCheckInForTool(characterId: string): Promise<CheckI
  */
 export async function pollDueCheckIns(): Promise<number> {
   const all = loadCheckInConfig();
+  const appState = readCheckInAppState();
+  const activeSessionId = typeof document !== "undefined" && document.visibilityState === "visible"
+    ? getActiveChatSessionId()
+    : null;
+  const activeSession = activeSessionId
+    ? loadChatSessions().find(session => session.id === activeSessionId)
+    : undefined;
   let fired = 0;
+  const characters = loadCharacters();
   for (const [characterId, config] of Object.entries(all)) {
-    if (!shouldFireCheckIn(characterId, config)) continue;
-    if (!isCheckInAllowedByLifeContext(characterId)) continue;
+    if (!config.enabled) {
+      cancelNativeCheckIn(characterId);
+      continue;
+    }
+    // 在前台也先初始化本轮目标时间，这样后台累计从 Activity 真正进入后台时开始。
+    const runtime = ensureCheckInDueTime(characterId, config, Date.now(), appState);
+    // 不在正在进行的同角色私聊或生活情境禁止状态下安排提醒。
+    const chattingWithTarget = Boolean(activeSession && !activeSession.isGroup && activeSession.contactId === characterId);
+    if (chattingWithTarget || !isCheckInAllowedByLifeContext(characterId)) {
+      cancelNativeCheckIn(characterId);
+      continue;
+    }
+    // 原生闹钟只负责到期提醒/唤起机会，不会在后台直接截图或调用 AI。
+    const characterName = characters.find(item => item.id === characterId)?.name ?? "角色";
+    if (config.triggerMode === "background") {
+      if (appState.available && runtime.nextDueBackgroundMs > appState.backgroundElapsedMs + 1000) {
+        scheduleNativeCheckIn(
+          characterId, characterName, 0,
+          Math.max(0, runtime.nextDueBackgroundMs - appState.backgroundElapsedMs),
+          true,
+        );
+      }
+      // 旧 APK / 无法确认原生生命周期时宁可不触发。
+      if (!appState.available || appState.foreground) continue;
+    } else if (runtime.nextDueAt > Date.now() + 1000) {
+      scheduleNativeCheckIn(characterId, characterName, runtime.nextDueAt, 0, false);
+    }
+    if (!shouldFireCheckIn(characterId, config, Date.now(), appState)) continue;
     const result = await runCheckIn(characterId, config);
     if (result.ok) fired += 1;
   }

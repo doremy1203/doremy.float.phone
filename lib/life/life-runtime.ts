@@ -1,4 +1,5 @@
-import type { LifeActorClock, LifeActorState, LifeEvent, LifeInvitation, LifeLocation, LifeOwnerType, LifeScheduleSlot, LifeSceneState, VirtualLifeState } from "./life-types";
+import type { LifeActorClock, LifeActorState, LifeEvent, LifeInvitation, LifeLocation, LifeOwnerType, LifeScheduleSlot, LifeSceneParticipant, LifeSceneState, VirtualLifeState } from "./life-types";
+import { findLifeSceneForLocation, mergeLifeSceneParticipants } from "./life-engine";
 
 export const lifeActorKey = (ownerType: LifeOwnerType, ownerId: string) => `${ownerType}:${ownerId}`;
 
@@ -18,10 +19,44 @@ export function resolveActorLifeNow(_legacyClock: LifeActorClock, realNow = new 
 export function findActorState(state: VirtualLifeState, ownerType: LifeActorState["ownerType"], ownerId: string) {
   return state.actorStates.find(actor => actor.ownerType === ownerType && actor.ownerId === ownerId);
 }
-export function upsertActorState(state: VirtualLifeState, nextActor: LifeActorState): VirtualLifeState {
+export function upsertActorState(
+  state: VirtualLifeState,
+  nextActor: Pick<LifeActorState, "ownerType" | "ownerId" | "activity"> & Partial<Omit<LifeActorState, "ownerType" | "ownerId" | "activity">>,
+): VirtualLifeState {
+  const existing = state.actorStates.find(actor => actor.ownerType === nextActor.ownerType && actor.ownerId === nextActor.ownerId);
   const actorStates = state.actorStates.filter(actor => !(actor.ownerType === nextActor.ownerType && actor.ownerId === nextActor.ownerId));
-  actorStates.push({ ...nextActor, updatedAt: new Date().toISOString() });
+  // Merge instead of replacing the whole record: callers that only change one
+  // field must not silently drop scheduleSlotId, locationSource or manualSetAt.
+  actorStates.push({
+    ...existing,
+    ...nextActor,
+    updatedAt: nextActor.updatedAt ?? new Date().toISOString(),
+  });
   return { ...state, actorStates };
+}
+
+/** A user-picked location takes precedence over the schedule for two hours. */
+export const MANUAL_LOCATION_TTL_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * A manual location override is active only while the explicit manual marker is
+ * present and its TTL has not elapsed. `updatedAt` is deliberately ignored: it is
+ * refreshed by ordinary settlement and would renew the override forever.
+ */
+export function isManualLocationOverrideActive(actor: LifeActorState | undefined, now = new Date()): boolean {
+  if (!actor?.actualLocationId || actor.locationSource !== "manual" || !actor.manualSetAt || actor.actualLocationUntil != null) return false;
+  // 用户明确选择「一直停留」时不看时间，直到再次手动改动地点。
+  if (actor.manualPinned) return true;
+  const setAt = Date.parse(actor.manualSetAt);
+  return Number.isFinite(setAt) && now.getTime() - setAt < MANUAL_LOCATION_TTL_MS;
+}
+
+/** The manual marker is present but its 2-hour TTL has elapsed; the schedule owns presence again. */
+export function isManualLocationOverrideExpired(actor: LifeActorState | undefined, now = new Date()): boolean {
+  if (!actor?.actualLocationId || actor.locationSource !== "manual" || !actor.manualSetAt || actor.actualLocationUntil != null) return false;
+  if (actor.manualPinned) return false;
+  const setAt = Date.parse(actor.manualSetAt);
+  return Number.isFinite(setAt) && now.getTime() - setAt >= MANUAL_LOCATION_TTL_MS;
 }
 
 /**
@@ -32,14 +67,16 @@ export function resolveActorLocation(
   state: VirtualLifeState,
   ownerType: LifeOwnerType,
   ownerId: string,
-  now = resolveActorLifeNow(getActorClock(state, ownerType, ownerId)),
+  now = new Date(),
 ): { id: string; name: string } | null {
   const actor = state.actorStates.find(item => item.ownerType === ownerType && item.ownerId === ownerId);
   const slot = getCurrentActorSchedule(state, ownerType, ownerId, now);
   const until = actor?.actualLocationUntil ? Date.parse(actor.actualLocationUntil) : Number.NaN;
-  const temporaryOverride = Boolean(actor?.actualLocationId && Number.isFinite(until) && until > now.getTime());
-  const manualOverride = Boolean(actor?.actualLocationId && actor.actualLocationUntil == null && actor.actualLocationId !== slot?.plannedLocationId);
-  const useActual = temporaryOverride || manualOverride;
+  const temporaryStay = Boolean(actor?.actualLocationId && Number.isFinite(until) && until > now.getTime());
+  // Shared TTL rule: an expired manual choice is treated exactly like no override,
+  // so UI, snapshots and diagnostics all fall back to the current schedule.
+  const manualOverride = Boolean(actor?.actualLocationId && isManualLocationOverrideActive(actor, now));
+  const useActual = temporaryStay || manualOverride;
   const locationId = (useActual ? actor?.actualLocationId : slot?.plannedLocationId) || actor?.actualLocationId || "";
   if (!locationId) return null;
   const locationName = (useActual ? actor?.actualLocationName : slot?.plannedLocationName)
@@ -62,22 +99,28 @@ export function synchronizeCharacterHomeSchedule(
   if (!characterId || !destinationHomeId || !destinationHomeName || !Number.isFinite(nowMs)) {
     return { state, synchronizedScheduleCount: 0 };
   }
-  const knownHomeNames = state.locations
-    .filter(location => location.id === "home" || location.id.startsWith("home-"))
-    .map(location => location.name.trim())
-    .filter(Boolean);
+  const currentActor = state.actorStates.find(actor => actor.ownerType === "character" && actor.ownerId === characterId);
+  const currentActualId = currentActor?.actualLocationId ?? "";
+  const isHomeActivity = (slot: LifeScheduleSlot) =>
+    slot.source === "weekly-generation"
+    && ["habit", "meal", "free-time"].includes(slot.kind)
+    && /回家|在家|居家|家中|家里|家庭|家务|整理房间|打扫房间|睡前/.test(slot.title);
+  const isActorResidenceId = (locationId: string) => locationId === "home-" + characterId
+    || Boolean(state.locations.find(location => location.id === locationId)?.residents?.includes(characterId));
   const isHomeSlot = (slot: LifeScheduleSlot): boolean => {
     if (slot.source === "manual") return false;
     const plannedId = slot.plannedLocationId ?? "";
     const plannedName = (slot.plannedLocationName ?? "").trim();
-    const explicitHomeActivity = slot.source === "weekly-generation"
-      && ["habit", "meal", "free-time"].includes(slot.kind)
-      && /回家|在家|居家|家中|家里|家庭|家务|整理房间|打扫房间|睡前/.test(slot.title);
-    return plannedId === "home" || plannedId.startsWith("home-")
-      || knownHomeNames.includes(plannedName)
-      || plannedName === "家" || plannedName === "家里" || plannedName === "家中"
-      || plannedName === "自己的家"
-      || explicitHomeActivity;
+    const legacyUnresolvedHome = !plannedId
+      && ["家", "家里", "家中", "自己的家"].includes(plannedName);
+    // During a residence change, the actor's actual home may no longer list
+    // them as a resident (the UI has already changed the residents array).
+    // Accept that prior ID only when the current generated activity explicitly
+    // describes being at home; "去 B 家吃饭" remains a visit, not a home slot.
+    const currentGeneratedHome = Boolean(plannedId && plannedId === currentActualId
+      && (plannedId === "home" || plannedId.startsWith("home-")) && isHomeActivity(slot));
+    return plannedId === destinationHomeId || isActorResidenceId(plannedId)
+      || currentGeneratedHome || legacyUnresolvedHome || (!plannedId && isHomeActivity(slot));
   };
   let synchronizedScheduleCount = 0;
   let schedulesChanged = false;
@@ -91,17 +134,17 @@ export function synchronizeCharacterHomeSchedule(
     return { ...slot, plannedLocationId: destinationHomeId, plannedLocationName: destinationHomeName, updatedAt: now.toISOString() };
   });
   const activeSlot = getCurrentActorSchedule(state, "character", characterId, now);
-  const currentActor = state.actorStates.find(actor => actor.ownerType === "character" && actor.ownerId === characterId);
-  const currentActualId = currentActor?.actualLocationId ?? "";
   const currentActualName = (currentActor?.actualLocationName ?? "").trim();
-  const actualIsHome = currentActualId === "home" || currentActualId.startsWith("home-")
-    || knownHomeNames.includes(currentActualName)
-    || currentActualName === "家" || currentActualName === "家里" || currentActualName === "家中";
+  const actualIsHome = currentActualId === destinationHomeId
+    || isActorResidenceId(currentActualId)
+    || Boolean(activeSlot && activeSlot.plannedLocationId === currentActualId
+      && (currentActualId === "home" || currentActualId.startsWith("home-")) && isHomeActivity(activeSlot))
+    || (!currentActualId && ["家", "家里", "家中", "自己的家"].includes(currentActualName));
   let actorStates = state.actorStates;
   if (activeSlot && isHomeSlot(activeSlot) && actualIsHome && currentActor
     && (currentActor.actualLocationId !== destinationHomeId || currentActor.actualLocationName !== destinationHomeName)) {
     actorStates = state.actorStates.map(actor => actor.ownerType === "character" && actor.ownerId === characterId
-      ? { ...actor, actualLocationId: destinationHomeId, actualLocationName: destinationHomeName, actualLocationUntil: undefined, updatedAt: now.toISOString() }
+      ? { ...actor, actualLocationId: destinationHomeId, actualLocationName: destinationHomeName, actualLocationUntil: undefined, locationSource: "schedule" as const, manualSetAt: undefined, updatedAt: now.toISOString() }
       : actor);
   }
   if (!schedulesChanged && actorStates === state.actorStates) return { state, synchronizedScheduleCount };
@@ -114,14 +157,32 @@ export function synchronizeCharacterHomeSchedule(
  */
 export function reserveCharacterLocationStay(
   state: VirtualLifeState,
-  input: { characterId: string; locationId: string; locationName: string; startAt: Date; endAt: Date; title: string },
+  input: {
+    characterId: string; locationId: string; locationName: string; startAt: Date; endAt: Date; title: string;
+    /** 角色工具发起的移动用 character-tool，玩家手动改地点保持 manual。 */
+    slotSource?: LifeScheduleSlot["source"];
+    locationSource?: LifeActorState["locationSource"];
+  },
 ): VirtualLifeState {
   const { characterId, locationId, locationName, startAt, endAt, title } = input;
   const startMs = startAt.getTime();
-  const endMs = endAt.getTime();
-  if (!characterId || !locationId || !locationName || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return state;
+  const requestedEndMs = endAt.getTime();
+  if (!characterId || !locationId || !locationName || !Number.isFinite(startMs) || !Number.isFinite(requestedEndMs) || requestedEndMs <= startMs) return state;
+
+  const ownerSlots = state.schedules.filter(slot => slot.ownerType === "character" && slot.ownerId === characterId);
+  const activeSlot = getCurrentActorSchedule(state, "character", characterId, startAt);
+  const nextBoundaryMs = activeSlot
+    ? new Date(activeSlot.endAt).getTime()
+    : ownerSlots.map(slot => new Date(slot.startAt).getTime())
+      .filter(value => Number.isFinite(value) && value > startMs)
+      .sort((a, b) => a - b)[0];
+  // A manual trip replaces only the activity currently in progress. Its end is
+  // bounded by the next planned activity, so future itinerary entries stay intact.
+  const endMs = Math.min(requestedEndMs, Number.isFinite(nextBoundaryMs) ? nextBoundaryMs! : requestedEndMs);
+  if (endMs <= startMs) return state;
+
   const startIso = startAt.toISOString();
-  const endIso = endAt.toISOString();
+  const endIso = new Date(endMs).toISOString();
   const updatedAt = new Date().toISOString();
   const retainedSlots: LifeScheduleSlot[] = [];
   for (const slot of state.schedules) {
@@ -135,8 +196,9 @@ export function reserveCharacterLocationStay(
       retainedSlots.push(slot);
       continue;
     }
+    // Keep only the elapsed prefix of an interrupted activity. Never resurrect
+    // its unfinished tail after the user has explicitly replaced that activity.
     if (slotStart < startMs) retainedSlots.push({ ...slot, endAt: startIso, updatedAt });
-    if (slotEnd > endMs) retainedSlots.push({ ...slot, id: makeId("resume-after-location-stay"), startAt: endIso, updatedAt });
   }
   retainedSlots.push({
     id: makeId("companion-follow"),
@@ -148,7 +210,7 @@ export function reserveCharacterLocationStay(
     plannedLocationId: locationId,
     plannedLocationName: locationName,
     kind: "free-time",
-    source: "manual",
+    source: input.slotSource ?? "manual",
     updatedAt,
   });
   const existing = state.actorStates.find(actor => actor.ownerType === "character" && actor.ownerId === characterId);
@@ -158,6 +220,8 @@ export function reserveCharacterLocationStay(
     actualLocationId: locationId,
     actualLocationName: locationName,
     actualLocationUntil: endIso,
+    locationSource: input.locationSource ?? ("companion" as const),
+    manualSetAt: undefined,
     updatedAt,
   };
   return {
@@ -166,6 +230,152 @@ export function reserveCharacterLocationStay(
     actorStates: [...state.actorStates.filter(actor => !(actor.ownerType === "character" && actor.ownerId === characterId)), nextActor],
   };
 }
+/**
+ * Characters own no manual location override: a player-picked position is always
+ * expressed as a schedule slot, so the plan and the actual location stay equal.
+ * stay-* inserts a time-bounded protected `companion-follow-*` slot, pin keeps
+ * that slot until the next protected plan (or the end of the day), and follow
+ * cancels the not-yet-ended companion segments and returns to the current plan.
+ */
+export function moveCharacterBySchedule(
+  state: VirtualLifeState,
+  input: {
+    characterId: string;
+    locationId: string;
+    locationName: string;
+    mode: "stay-30" | "stay-60" | "stay-120" | "pin" | "follow";
+    now: Date;
+  },
+): { state: VirtualLifeState; error?: string } {
+  const { characterId, locationId, locationName, mode } = input;
+  const nowDate = input.now;
+  const nowMs = nowDate instanceof Date ? nowDate.getTime() : Number.NaN;
+  if (!characterId || !Number.isFinite(nowMs)) return { state, error: "缺少有效的角色或时间。" };
+  const nowIso = nowDate.toISOString();
+  const locations = state.locations ?? [];
+  const residence = locations.find(location => location.id === "home-" + characterId)
+    ?? locations.find(location => (location.residents ?? []).includes(characterId));
+  const isCompanionSegment = (slot: LifeScheduleSlot) =>
+    slot.ownerType === "character"
+    && slot.ownerId === characterId
+    && slot.id.startsWith("companion-follow-");
+
+  if (mode === "follow") {
+    // Only unfinished companion segments are cancelled; elapsed ones stay as history.
+    const schedules = state.schedules.filter(slot => {
+      if (!isCompanionSegment(slot)) return true;
+      const endMs = new Date(slot.endAt).getTime();
+      return !Number.isFinite(endMs) || endMs <= nowMs;
+    });
+    const nextState = schedules.length === state.schedules.length ? state : { ...state, schedules };
+    const current = getCurrentActorSchedule(nextState, "character", characterId, nowDate);
+    const plannedId = current?.plannedLocationId ?? "";
+    const target = plannedId
+      ? {
+          id: plannedId,
+          name: (current?.plannedLocationName ?? "").trim()
+            || (nextState.locations ?? []).find(location => location.id === plannedId)?.name
+            || plannedId,
+        }
+      : residence ? { id: residence.id, name: residence.name } : undefined;
+    if (!target) return { state: nextState, error: "找不到可恢复的日程地点。" };
+    return {
+      state: upsertActorState(nextState, {
+        ownerType: "character",
+        ownerId: characterId,
+        activity: current?.title ?? findActorState(nextState, "character", characterId)?.activity ?? "自由活动",
+        scheduleSlotId: current?.id ?? null,
+        actualLocationId: target.id,
+        actualLocationName: target.name,
+        actualLocationUntil: null,
+        locationSource: "schedule",
+        manualSetAt: undefined,
+        manualPinned: undefined,
+        updatedAt: nowIso,
+      }),
+    };
+  }
+
+  if (!locationId || !locationName) return { state, error: "缺少有效的目的地。" };
+  const stayMinutes = mode === "stay-30" ? 30 : mode === "stay-60" ? 60 : mode === "stay-120" ? 120 : 0;
+  const ownerSlots = state.schedules.filter(slot => slot.ownerType === "character" && slot.ownerId === characterId && !isCompanionSegment(slot));
+  let requestedEndMs = nowMs + stayMinutes * 60_000;
+  if (mode === "pin") {
+    // 一直停留：到下一段受保护日程（约会 / 事件 / 用户手写安排）开始为止；没有则到当天结束。
+    const protectedStarts = ownerSlots
+      .filter(slot => slot.kind === "appointment" || slot.source === "event" || (slot.source === "manual" && slot.kind !== "free-time"))
+      .map(slot => new Date(slot.startAt).getTime())
+      .filter(startMs => Number.isFinite(startMs) && startMs > nowMs)
+      .sort((a, b) => a - b);
+    if (protectedStarts.length) {
+      requestedEndMs = protectedStarts[0];
+    } else {
+      const dayEnd = new Date(nowDate);
+      dayEnd.setHours(23, 59, 0, 0);
+      // 23:59 已过（深夜）时停到当天结束的午夜，保证时段仍然有效。
+      if (dayEnd.getTime() > nowMs) requestedEndMs = dayEnd.getTime();
+      else {
+        const midnight = new Date(nowDate);
+        midnight.setHours(24, 0, 0, 0);
+        requestedEndMs = midnight.getTime();
+      }
+    }
+  }
+  // 不跨越已有安排：与当前日程的第一个未来边界（当前时段结束 / 下一时段开始）取较早者。
+  const firstBoundaryMs = ownerSlots
+    .flatMap(slot => [new Date(slot.startAt).getTime(), new Date(slot.endAt).getTime()])
+    .filter(boundaryMs => Number.isFinite(boundaryMs) && boundaryMs > nowMs)
+    .sort((a, b) => a - b)[0];
+  const endMs = typeof firstBoundaryMs === "number" ? Math.min(requestedEndMs, firstBoundaryMs) : requestedEndMs;
+  if (!Number.isFinite(endMs) || endMs <= nowMs) return { state, error: "日程时间无效，结束时间必须晚于开始时间。" };
+
+  // 上一次“停留”是系统写入的同行段：再次改地点时先把它收束到此刻，否则会被当成
+  // 外来手动安排而永久冲突。真正的约会 / 事件 / 用户安排仍会阻止插入。
+  const baseState: VirtualLifeState = {
+    ...state,
+    schedules: state.schedules.flatMap(slot => {
+      if (!isCompanionSegment(slot)) return [slot];
+      const slotStart = new Date(slot.startAt).getTime();
+      const slotEnd = new Date(slot.endAt).getTime();
+      if (!Number.isFinite(slotStart) || !Number.isFinite(slotEnd) || slotEnd <= nowMs) return [slot];
+      return slotStart < nowMs ? [{ ...slot, endAt: nowIso, updatedAt: nowIso }] : [];
+    }),
+  };
+  const slot: LifeScheduleSlot = {
+    id: "companion-follow-" + characterId + "-" + Date.now(),
+    ownerType: "character",
+    ownerId: characterId,
+    startAt: nowIso,
+    endAt: new Date(endMs).toISOString(),
+    title: "你在" + locationName,
+    kind: "special",
+    source: "manual",
+    plannedLocationId: locationId,
+    plannedLocationName: locationName,
+    updatedAt: nowIso,
+  };
+  const inserted = insertManualLifeScheduleSlot(baseState, slot);
+  if (inserted.error) return { state, error: inserted.error };
+  if (inserted.conflict) {
+    return { state, error: "该时段与「" + inserted.conflict.title + "」冲突，暂时无法安排停留。" };
+  }
+  return {
+    state: upsertActorState(inserted.state, {
+      ownerType: "character",
+      ownerId: characterId,
+      activity: slot.title,
+      scheduleSlotId: slot.id,
+      actualLocationId: locationId,
+      actualLocationName: locationName,
+      actualLocationUntil: slot.endAt,
+      locationSource: "schedule",
+      manualSetAt: undefined,
+      manualPinned: undefined,
+      updatedAt: nowIso,
+    }),
+  };
+}
+
 export function upsertLifeEvent(state: VirtualLifeState, nextEvent: LifeEvent): VirtualLifeState {
   return { ...state, events: [...state.events.filter(event => event.id !== nextEvent.id), nextEvent].sort((a,b) => (a.startsAt || a.createdAt).localeCompare(b.startsAt || b.createdAt)) };
 }
@@ -219,13 +429,23 @@ export function generateWeeklyLifePlan(
   };
   if (ownerType === "character") {
     const now = Date.now();
-    const migratedSchedules = state.schedules.map(slot =>
-      slot.ownerType === "character" && slot.ownerId === ownerId &&
-      new Date(slot.endAt).getTime() > now &&
-      ((slot.plannedLocationId && slot.plannedLocationId !== personalHomeId && (slot.plannedLocationId === "home" || slot.plannedLocationId.startsWith("home-"))) || (!slot.plannedLocationId && slot.plannedLocationName === "家"))
+    const actorResidenceIds = new Set([
+      "home-" + ownerId,
+      ...currentLocations.filter(location => (location.residents ?? []).includes(ownerId)).map(location => location.id),
+    ]);
+    const migratedSchedules = state.schedules.map(slot => {
+      const plannedId = slot.plannedLocationId ?? "";
+      const unresolvedLegacyHome = !plannedId
+        && ["家", "家里", "家中", "自己的家"].includes((slot.plannedLocationName ?? "").trim());
+      // Migrate only the actor's canonical previous residence or an unresolved
+      // legacy "home" label. Other known home IDs are explicit visit destinations.
+      const actorOwnPreviousHome = Boolean(plannedId && actorResidenceIds.has(plannedId) && plannedId !== personalHomeId);
+      return slot.ownerType === "character" && slot.ownerId === ownerId
+        && new Date(slot.endAt).getTime() > now
+        && (actorOwnPreviousHome || unresolvedLegacyHome)
         ? { ...slot, plannedLocationId: personalHomeId, plannedLocationName: personalHome.name }
-        : slot
-    );
+        : slot;
+    });
     const migratedLocations = currentLocations.some(location => location.id === personalHomeId) ? currentLocations : [...currentLocations, personalHome];
     if (migratedSchedules.some((slot,index) => slot !== state.schedules[index]) || migratedLocations !== currentLocations) {
       state = { ...state, schedules: migratedSchedules, locations: migratedLocations };
@@ -438,7 +658,11 @@ export function generateWeeklyLifePlan(
     canteen: ["食堂", "附近餐馆", "餐馆", "餐厅", "饭店", "canteen"],
     studio: ["音乐创作空间", "音乐空间", "创作空间", "录音室", "studio"],
   };
-  const locations: LifeLocation[] = [...existingLocations, ...discoveredLocations];
+  const locations: LifeLocation[] = [
+    ...existingLocations,
+    ...(existingLocations.some(location => location.id === personalHome.id) ? [] : [personalHome]),
+    ...discoveredLocations,
+  ];
   const resolveCanonical = (slot: LifeScheduleSlot): LifeScheduleSlot => {
     const rawName = (slot.plannedLocationName ?? "").trim();
     if (!rawName || /跟随玩家的实际地点|地点待定|未知地点/i.test(rawName)) return slot;
@@ -492,15 +716,31 @@ export function syncScheduleLocationsToLibrary(state: VirtualLifeState): Virtual
   const byId = new Map(locations.map(location => [location.id, location]));
   const findByName = (name: string) => {
     const key = normalize(name);
-    return locations.find(location => normalize(location.name) === key
-      || (location.aliases ?? []).some(alias => normalize(alias) === key));
+    const matches = (location: LifeLocation) => normalize(location.name) === key
+      || (location.aliases ?? []).some(alias => normalize(alias) === key);
+    // Prefer a rich imported/manual dossier over an older schedule-only stub.
+    return locations.find(location => !location.id.startsWith("schedule-place-") && matches(location))
+      ?? locations.find(matches);
   };
   let changed = false;
+  const idRemap = new Map<string, string>();
+  const resolveSchedulePlaceholder = (locationId: string | null | undefined, locationName: string | null | undefined) => {
+    if (!locationId?.startsWith("schedule-place-")) return undefined;
+    const oldLocation = byId.get(locationId);
+    const target = findByName((locationName ?? oldLocation?.name ?? "").trim());
+    return target && target.id !== locationId ? target : undefined;
+  };
   const schedules = state.schedules.map(slot => {
+    // A deleted destination is intentionally detached from the library. Keep the
+    // historical name on the itinerary, but never recreate it from this snapshot.
+    if (slot.plannedLocationDeleted) return slot;
     const name = (slot.plannedLocationName ?? "").trim();
     if (!name) return slot;
     let location = slot.plannedLocationId ? byId.get(slot.plannedLocationId) : undefined;
-    if (!location) location = findByName(name);
+    const namedLocation = findByName(name);
+    if (!location || (location.id.startsWith("schedule-place-") && namedLocation && namedLocation.id !== location.id)) {
+      location = namedLocation;
+    }
     if (!location) {
       const base = "schedule-place-" + normalize(name).normalize("NFKD")
         .replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "").slice(0, 48) || "place";
@@ -516,13 +756,131 @@ export function syncScheduleLocationsToLibrary(state: VirtualLifeState): Virtual
       changed = true;
     }
     const canonicalName = location.name;
+    if (slot.plannedLocationId && slot.plannedLocationId !== location.id && slot.plannedLocationId.startsWith("schedule-place-")) {
+      idRemap.set(slot.plannedLocationId, location.id);
+    }
     if (slot.plannedLocationId !== location.id || slot.plannedLocationName !== canonicalName) {
       changed = true;
       return { ...slot, plannedLocationId: location.id, plannedLocationName: canonicalName };
     }
     return slot;
   });
-  return changed ? { ...state, locations, schedules } : state;
+  const actorStates = (state.actorStates ?? []).map(actor => {
+    const locationId = actor.actualLocationId ?? "";
+    const target = idRemap.has(locationId)
+      ? byId.get(idRemap.get(locationId)!)
+      : resolveSchedulePlaceholder(locationId, actor.actualLocationName);
+    if (!target || target.id === locationId) return actor;
+    changed = true;
+    return { ...actor, actualLocationId: target.id, actualLocationName: target.name };
+  });
+  const scenes = (state.scenes ?? []).map(scene => {
+    if (scene.status === "completed") return scene;
+    const target = idRemap.has(scene.locationId)
+      ? byId.get(idRemap.get(scene.locationId)!)
+      : resolveSchedulePlaceholder(scene.locationId, scene.locationName);
+    if (!target || target.id === scene.locationId) return scene;
+    changed = true;
+    return { ...scene, locationId: target.id, locationName: target.name };
+  });
+  return changed ? { ...state, locations, schedules, actorStates, scenes } : state;
+}
+
+/** 「临时起意」命中概率：角色按日程搬迁时，有一定概率先改去别处一段时间。 */
+export const SPONTANEOUS_DEVIATION_PROBABILITY = 0.3;
+/** 临时起意窗口的最短 / 最长分钟数；时段剩余不足最短值时直接跳过。 */
+export const SPONTANEOUS_DEVIATION_MIN_MINUTES = 20;
+export const SPONTANEOUS_DEVIATION_MAX_MINUTES = 45;
+const SPONTANEOUS_DEVIATION_DAILY_LIMIT_DEFAULT = 2;
+const SPONTANEOUS_DEVIATION_DAILY_LIMIT_CAP = 5;
+
+/** FNV-1a 32 位字符串哈希：同一输入永远得到同一结果，不依赖运行环境随机源。 */
+function hashLifeSeed(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+/** mulberry32：以固定种子生成 [0,1) 伪随机序列，反复结算得到同一串数值。 */
+function createLifeSeededRandom(seed: number): () => number {
+  let state = seed || 1;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 本地日历日 key（YYYY-MM-DD），让「每天最多几次」按角色所在时区自然跨天。 */
+function lifeLocalDayKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function resolveDeviationDailyLimit(settings: VirtualLifeState["settings"] | undefined): number {
+  const configured = settings?.deviationDailyLimit;
+  if (typeof configured !== "number" || !Number.isFinite(configured)) return SPONTANEOUS_DEVIATION_DAILY_LIMIT_DEFAULT;
+  return Math.max(0, Math.min(SPONTANEOUS_DEVIATION_DAILY_LIMIT_CAP, Math.floor(configured)));
+}
+
+type SpontaneousDeviationPlan = {
+  locationId: string;
+  locationName: string;
+  until: string;
+  dayKey: string;
+  count: number;
+};
+
+/**
+ * 判断当前时段是否发生一次「临时起意」。随机种子固定为
+ * hash(actorId + slot.id + 当天日期)，因此同一角色、同一时段、同一天内反复结算
+ * 得到完全一致的结果；当天已触发次数由 actor 上的 deviationDayKey/deviationCount 持久化。
+ * 返回 undefined 时保持原有日程行为。
+ */
+function planSpontaneousDeviation(input: {
+  state: VirtualLifeState;
+  actor: LifeActorState | undefined;
+  slot: LifeScheduleSlot | undefined;
+  now: Date;
+}): SpontaneousDeviationPlan | undefined {
+  const { state, actor, slot, now } = input;
+  // 只有角色（不是玩家）会「临时起意」，且必须存在正在执行的日程时段。
+  if (!actor || actor.ownerType !== "character" || !slot) return undefined;
+  if (state.settings?.enableSpontaneousDeviation === false) return undefined;
+  const dailyLimit = resolveDeviationDailyLimit(state.settings);
+  if (dailyLimit <= 0) return undefined;
+  // 本时段已经临时起意过一次：窗口结束后回到计划，而不是立刻再次偏离。
+  if (actor.locationSource === "spontaneous" && actor.scheduleSlotId === slot.id) return undefined;
+  const nowMs = now.getTime();
+  const slotEndMs = new Date(slot.endAt).getTime();
+  if (!Number.isFinite(nowMs) || !Number.isFinite(slotEndMs)) return undefined;
+  // 窗口必须完整落在当前时段内：剩余不足 20 分钟就不打扰计划。
+  if (slotEndMs - nowMs < SPONTANEOUS_DEVIATION_MIN_MINUTES * 60_000) return undefined;
+  const dayKey = lifeLocalDayKey(now);
+  const usedToday = actor.deviationDayKey === dayKey ? Math.max(0, actor.deviationCount ?? 0) : 0;
+  if (usedToday >= dailyLimit) return undefined;
+  const random = createLifeSeededRandom(hashLifeSeed(actor.ownerId + "/" + slot.id + "/" + dayKey));
+  if (random() >= SPONTANEOUS_DEVIATION_PROBABILITY) return undefined;
+  const durationMinutes = SPONTANEOUS_DEVIATION_MIN_MINUTES
+    + Math.floor(random() * (SPONTANEOUS_DEVIATION_MAX_MINUTES - SPONTANEOUS_DEVIATION_MIN_MINUTES + 1));
+  const untilMs = Math.min(slotEndMs, nowMs + durationMinutes * 60_000);
+  if (untilMs - nowMs < SPONTANEOUS_DEVIATION_MIN_MINUTES * 60_000) return undefined;
+  // 只去公开地点，并且不去日程原本安排的地点。
+  const plannedLocationId = slot.plannedLocationId ?? "";
+  const candidates = (state.locations ?? []).filter(location => location.visibility === "public" && location.id !== plannedLocationId);
+  if (!candidates.length) return undefined;
+  const target = candidates[Math.floor(random() * candidates.length)];
+  return {
+    locationId: target.id,
+    locationName: target.name,
+    until: new Date(untilMs).toISOString(),
+    dayKey,
+    count: usedToday + 1,
+  };
 }
 
 export function settleActorTimelineToNow(
@@ -579,90 +937,77 @@ export function settleActorTimelineToNow(
     });
     const started = allAtOrAfter(event.startsAt);
     const ended = allAtOrAfter(event.endsAt);
-    const characterId = event.participantIds.find(participantId => participantId !== "player");
-    // An event-linked scene remains the canonical scene even if a previous
-    // partial save left its status out of sync with the event. Reuse it first
-    // to avoid duplicate scene records during recovery.
-    let matchingScene = scenes.find(scene => scene.eventId === event.id)
-      ?? scenes.find(scene =>
-        (scene.status === "active" || scene.status === "paused")
-        && !scene.eventId
-        && (event.locationId
-          ? scene.locationId === event.locationId
-          : event.locationName ? scene.locationName === event.locationName : true)
-        && event.participantIds.every(participantId => scene.participants.some(participant =>
-          participant.ownerId === participantId
-          && participant.ownerType === (participantId === "player" ? "player" : "character")
-        ))
-      );
 
-    // Catch-up must settle the whole real-time interval, even if the app was not
-    // opened until after the appointment ended. Otherwise a confirmed event
-    // would be incorrectly marked "missed" simply because no page timer ran.
-    if (started && (event.status === "confirmed" || event.status === "active") && event.details !== "follow-player") {
+    // Invitations describe an activity at a location; they do not own a separate
+    // chat room. Reuse the location's canonical room (including legacy event rooms)
+    // and keep its active/paused state untouched so schedule settlement cannot
+    // steal the room the user is currently viewing.
+    const playerPresence = findActorState(state, "player", "player");
+    const characterPresence = event.participantIds
+      .filter(participantId => participantId !== "player")
+      .map(participantId => findActorState(state, "character", participantId))
+      .find(Boolean);
+    const eventLocation = state.locations.find(location => location.id === event.locationId)
+      ?? state.locations.find(location => location.name === event.locationName || (location.aliases ?? []).includes(event.locationName || ""));
+    const locationId = eventLocation?.id ?? event.locationId ?? playerPresence?.actualLocationId ?? characterPresence?.actualLocationId ?? "home";
+    const locationName = eventLocation?.name
+      ?? event.locationName
+      ?? playerPresence?.actualLocationName
+      ?? characterPresence?.actualLocationName
+      ?? "家";
+    const matchingScene = findLifeSceneForLocation(
+      scenes,
+      locationId,
+      eventLocation || event.locationId ? undefined : event.locationName || locationName,
+    );
+
+    if (started && event.details !== "follow-player") {
+      const eventParticipants: LifeSceneParticipant[] = event.participantIds.map(participantId => {
+        const participantType: LifeOwnerType = participantId === "player" ? "player" : "character";
+        return {
+          ownerType: participantType,
+          ownerId: participantId,
+          activity: event.title,
+          awarenessByActorId: Object.fromEntries(
+            event.participantIds.filter(otherId => otherId !== participantId).map(otherId => [otherId, "aware" as const]),
+          ),
+        };
+      });
       if (matchingScene) {
-        // Reuse an already-recorded shared scene at the agreed location rather
-        // than losing the event merely because the scene was opened manually.
-        const attachedScene: LifeSceneState = {
+        const updatedScene: LifeSceneState = {
           ...matchingScene,
-          eventId: event.id,
-          status: ended ? "completed" : "active",
+          locationId,
+          locationName,
+          // eventId is legacy metadata only; clear it when folding an old event room
+          // back into the single canonical room for this location.
+          eventId: undefined,
+          status: matchingScene.status === "completed" ? "paused" : matchingScene.status,
+          participants: mergeLifeSceneParticipants(matchingScene.participants, eventParticipants),
           updatedAt: nowIso,
         };
-        if (matchingScene.eventId !== event.id || matchingScene.status !== attachedScene.status) {
-          matchingScene = attachedScene;
-          scenes = scenes.map(scene => scene.id === attachedScene.id ? attachedScene : scene);
+        if (updatedScene !== matchingScene) {
+          scenes = scenes.map(scene => scene.id === matchingScene.id ? updatedScene : scene);
         }
       } else {
-        const playerPresence = findActorState(state, "player", "player");
-        const characterPresence = event.participantIds
-          .filter(participantId => participantId !== "player")
-          .map(participantId => findActorState(state, "character", participantId))
-          .find(Boolean);
-        const locationId = event.locationId ?? playerPresence?.actualLocationId ?? characterPresence?.actualLocationId ?? "home";
-        const locationName = event.locationName
-          ?? state.locations.find(location => location.id === locationId)?.name
-          ?? playerPresence?.actualLocationName
-          ?? characterPresence?.actualLocationName
-          ?? "家";
-        const participants = event.participantIds.map(participantId => {
-          const participantType: LifeOwnerType = participantId === "player" ? "player" : "character";
-          return {
-            ownerType: participantType,
-            ownerId: participantId,
-            activity: event.title,
-            awarenessByActorId: Object.fromEntries(
-              event.participantIds.filter(otherId => otherId !== participantId).map(otherId => [otherId, "aware" as const]),
-            ),
-          };
-        });
-        matchingScene = {
+        const locationScene: LifeSceneState = {
           id: makeId("scene"),
           locationId,
           locationName,
           startedAt: event.startsAt,
           updatedAt: nowIso,
-          status: ended ? "completed" : "active",
-          eventId: event.id,
-          participants,
+          // A scheduled activity must not become the user's foreground room.
+          status: "paused",
+          participants: eventParticipants,
           lastSettledEventIds: [],
         };
-        scenes = [...scenes, matchingScene];
-      }
-      // If an already-active appointment is being recovered while it is still
-      // underway, its scene takes precedence over any stale active scene. For
-      // historical appointments (ended=true), do not disturb today's scene.
-      if (!ended && event.status === "active" && matchingScene) {
-        scenes = scenes.map(scene => scene.id !== matchingScene!.id && scene.status === "active"
-          ? { ...scene, status: "paused" as const, updatedAt: nowIso }
-          : scene);
+        scenes = [...scenes, locationScene];
       }
     }
 
     if (ended) {
       const actuallyOccurred = event.details === "follow-player"
         ? event.status === "active" && !!findActorState(state, "player", "player")?.actualLocationId
-        : scenes.some(scene => scene.eventId === event.id);
+        : event.status === "active" || !!matchingScene || started;
       const nextStatus = actuallyOccurred ? "completed" as const : "cancelled" as const;
       const updated = { ...event, status: nextStatus, updatedAt: nowIso, ...(actuallyOccurred ? { completedAt: nowIso } : { cancelledAt: nowIso }), settlementKey: "invitation:" + event.id, details: actuallyOccurred ? event.details : "missed:no-shared-scene-before-end" };
       events = events.map(item => item.id === event.id ? updated : item);
@@ -675,59 +1020,8 @@ export function settleActorTimelineToNow(
         }, ...memories].slice(0, 500);
       }
     } else if (started && event.status === "confirmed") {
-      if (event.details === "follow-player") {
-        events = events.map(item => item.id === event.id ? { ...item, status: "active" as const, updatedAt: nowIso } : item);
-      } else if (matchingScene) {
-        scenes = scenes.map(scene => scene.id === matchingScene.id
-          ? { ...scene, eventId: event.id, status: "active" as const, updatedAt: nowIso }
-          : scene.status === "active" ? { ...scene, status: "paused" as const, updatedAt: nowIso } : scene);
-        events = events.map(item => item.id === event.id ? { ...item, status: "active" as const, updatedAt: nowIso } : item);
-      } else {
-        // A confirmed appointment is a real transition, not just a label in the
-        // calendar. If the actors have both reached its start time, create the
-        // shared scene automatically rather than cancelling it later because
-        // the user had not manually opened the destination.
-        const playerPresence = findActorState(state, "player", "player");
-        const characterPresence = event.participantIds
-          .filter(participantId => participantId !== "player")
-          .map(participantId => findActorState(state, "character", participantId))
-          .find(Boolean);
-        const locationId = event.locationId ?? playerPresence?.actualLocationId ?? characterPresence?.actualLocationId ?? "home";
-        const locationName = event.locationName
-          ?? state.locations.find(location => location.id === locationId)?.name
-          ?? playerPresence?.actualLocationName
-          ?? characterPresence?.actualLocationName
-          ?? "家";
-        const participants = event.participantIds.map(participantId => {
-          const participantType: LifeOwnerType = participantId === "player" ? "player" : "character";
-          return {
-            ownerType: participantType,
-            ownerId: participantId,
-            activity: event.title,
-            awarenessByActorId: Object.fromEntries(
-              event.participantIds.filter(otherId => otherId !== participantId).map(otherId => [otherId, "aware" as const]),
-            ),
-          };
-        });
-        const newScene: LifeSceneState = {
-          id: makeId("scene"),
-          locationId,
-          locationName,
-          startedAt: event.startsAt,
-          updatedAt: nowIso,
-          status: "active",
-          eventId: event.id,
-          participants,
-          lastSettledEventIds: [],
-        };
-        scenes = [
-          ...scenes.map(scene => scene.status === "active" ? { ...scene, status: "paused" as const, updatedAt: nowIso } : scene),
-          newScene,
-        ];
-        events = events.map(item => item.id === event.id ? { ...item, status: "active" as const, updatedAt: nowIso } : item);
-      }
+      events = events.map(item => item.id === event.id ? { ...item, status: "active" as const, updatedAt: nowIso } : item);
     }
-    void characterId;
   }
   const current = getCurrentActorSchedule(state, ownerType, ownerId, realNow);
   const previous = findActorState(state, ownerType, ownerId);
@@ -746,45 +1040,103 @@ export function settleActorTimelineToNow(
         && new Date(event.endsAt).getTime() > realNow.getTime()
       )
     : undefined;
-  const nextActivity = activeAppointment
-    ? current.title
-    : stayExpired
-      ? current?.title ?? previous?.activity ?? "自由活动"
-      : current && slotChanged
-        ? current.title
-        : !current && previous?.scheduleSlotId
-          ? "自由活动"
-          : previous?.activity ?? current?.title ?? "自由活动";
   // A missing current slot must clear the old slot reference. Otherwise deleting
   // or editing a schedule can leave an actor permanently attached to stale activity.
   const manualStayActive = !!previous?.actualLocationUntil && new Date(previous.actualLocationUntil).getTime() > realNow.getTime();
-  const scheduleMovementDue = !!current && !manualStayActive && (slotChanged || stayExpired || !previous?.actualLocationId);
-  const nextLocationId = activeAppointment || scheduleMovementDue
+  // 手动地点的有效期：只看 locationSource/manualSetAt（仅手动写入时设置、结算永不刷新），
+  // 不再用 updatedAt 或 actual!=planned 推断——否则日程自己搬迁会被误判成手动覆盖，
+  // 而 settle 刷新 updatedAt 又会让覆盖无限续期。
+  const manualOverrideActive = isManualLocationOverrideActive(previous, realNow);
+  const manualOverrideExpired = !manualOverrideActive && isManualLocationOverrideExpired(previous, realNow);
+  // 到期后落到当前日程地点；没有 current slot 时回落到住处（玩家为默认家，角色为
+  // home-<id>），再退化为原地。这样即使日程刚被删除，过期的手动地点也会解除。
+  const residenceFallback = ownerType === "player"
+    ? state.locations.find(location => location.id === "home") ?? state.locations.find(location => location.residents?.includes(ownerId))
+    : state.locations.find(location => location.id === "home-" + ownerId) ?? state.locations.find(location => location.residents?.includes(ownerId));
+  const expiredOverrideLocationId = current
+    ? current.plannedLocationId ?? previous?.actualLocationId ?? null
+    : residenceFallback?.id ?? previous?.actualLocationId ?? null;
+  const expiredOverrideLocationName = current
+    ? current.plannedLocationName ?? previous?.actualLocationName ?? null
+    : residenceFallback?.name ?? previous?.actualLocationName ?? null;
+  const scheduleMovementDue = !manualStayActive && !manualOverrideActive
+    && (manualOverrideExpired || Boolean(current && (slotChanged || stayExpired || !previous?.actualLocationId)));
+  let nextActivity = activeAppointment
+    ? current.title
+    : manualStayActive || manualOverrideActive
+      ? previous?.activity ?? current?.title ?? "自由活动"
+      : scheduleMovementDue || stayExpired
+        ? current?.title ?? "自由活动"
+        : current && slotChanged
+          ? current.title
+          : !current && previous?.scheduleSlotId
+            ? "自由活动"
+            : previous?.activity ?? current?.title ?? "自由活动";
+  let nextLocationId = activeAppointment
     ? current?.plannedLocationId ?? previous?.actualLocationId ?? null
-    : previous?.actualLocationId ?? current?.plannedLocationId ?? null;
-  const nextLocationName = activeAppointment || scheduleMovementDue
+    : scheduleMovementDue
+      ? manualOverrideExpired
+        ? expiredOverrideLocationId
+        : current?.plannedLocationId ?? previous?.actualLocationId ?? null
+      : previous?.actualLocationId ?? current?.plannedLocationId ?? null;
+  let nextLocationName = activeAppointment
     ? current?.plannedLocationName ?? previous?.actualLocationName ?? null
-    : previous?.actualLocationName ?? current?.plannedLocationName ?? null;
-  const nextLocationUntil = activeAppointment
+    : scheduleMovementDue
+      ? manualOverrideExpired
+        ? expiredOverrideLocationName
+        : current?.plannedLocationName ?? previous?.actualLocationName ?? null
+      : previous?.actualLocationName ?? current?.plannedLocationName ?? null;
+  let nextLocationUntil = activeAppointment
     ? current?.endAt ?? previous?.actualLocationUntil ?? null
     : scheduleMovementDue ? null : previous?.actualLocationUntil ?? null;
   const nextSlotId = current?.id ?? null;
-  const actorChanged = !previous || previous.activity !== nextActivity || (previous.actualLocationId ?? null) !== nextLocationId || (previous.actualLocationName ?? null) !== nextLocationName || (previous.actualLocationUntil ?? null) !== nextLocationUntil || (previous.scheduleSlotId ?? null) !== nextSlotId;
+  // 写回时只保留既有 manualSetAt（绝不刷新），并按这次位置的来源打标。
+  let nextLocationSource: LifeActorState["locationSource"] = activeAppointment
+    ? "appointment"
+    : scheduleMovementDue
+      ? "schedule"
+      : manualOverrideActive
+        ? "manual"
+        : manualStayActive
+          ? previous?.locationSource === "stay" || previous?.locationSource === "companion" || previous?.locationSource === "appointment"
+            ? previous.locationSource
+            : "stay"
+          : previous?.locationSource;
+  // 「临时起意」只在角色走按日程搬迁分支时评估：没有约会、临时停留或手动地点
+  // 覆盖，并且确实有正在执行的日程时段。日程本身永远不改，只改变实际位置。
+  const deviation = !activeAppointment && !manualStayActive && !manualOverrideActive && scheduleMovementDue
+    ? planSpontaneousDeviation({ state, actor: previous, slot: current, now: realNow })
+    : undefined;
+  let nextDeviationDayKey = previous?.deviationDayKey;
+  let nextDeviationCount = previous?.deviationCount;
+  if (deviation) {
+    nextActivity = "临时起意：去" + deviation.locationName;
+    nextLocationId = deviation.locationId;
+    nextLocationName = deviation.locationName;
+    nextLocationUntil = deviation.until;
+    nextLocationSource = "spontaneous";
+    nextDeviationDayKey = deviation.dayKey;
+    nextDeviationCount = deviation.count;
+  }
+  const nextManualSetAt = nextLocationSource === "manual" ? previous?.manualSetAt : undefined;
+  // 固定停留只在手动地点生效；切到日程/约会/陪伴后立即失效，避免以后误判为永不过期。
+  const nextManualPinned = nextLocationSource === "manual" ? previous?.manualPinned : undefined;
+  const actorChanged = !previous || previous.activity !== nextActivity || (previous.actualLocationId ?? null) !== nextLocationId || (previous.actualLocationName ?? null) !== nextLocationName || (previous.actualLocationUntil ?? null) !== nextLocationUntil || (previous.scheduleSlotId ?? null) !== nextSlotId || (previous.locationSource ?? null) !== (nextLocationSource ?? null) || (previous.manualSetAt ?? null) !== (nextManualSetAt ?? null) || (previous.manualPinned ?? null) !== (nextManualPinned ?? null) || (previous.deviationDayKey ?? null) !== (nextDeviationDayKey ?? null) || (previous.deviationCount ?? null) !== (nextDeviationCount ?? null);
   const actorStates = actorChanged
     ? [...state.actorStates.filter(actor => !(actor.ownerType === ownerType && actor.ownerId === ownerId)), {
+        ...(previous ?? {}),
         ownerType, ownerId, activity: nextActivity, scheduleSlotId: nextSlotId,
         actualLocationId: nextLocationId, actualLocationName: nextLocationName,
-        actualLocationUntil: nextLocationUntil, updatedAt: nowIso,
+        actualLocationUntil: nextLocationUntil,
+        locationSource: nextLocationSource, manualSetAt: nextManualSetAt, manualPinned: nextManualPinned,
+        deviationDayKey: nextDeviationDayKey, deviationCount: nextDeviationCount,
+        updatedAt: nowIso,
       }]
     : state.actorStates;
   let timeline = state.timeline;
-  if (stayExpired && ownerType === "player" && nextLocationId && nextLocationName && previous?.actualLocationId !== nextLocationId) {
-    const activeScene = scenes.find(scene => scene.status === "active");
-    if (activeScene) {
-      scenes = scenes.map(scene => scene.id === activeScene.id
-        ? { ...scene, locationId: nextLocationId, locationName: nextLocationName, updatedAt: nowIso }
-        : scene);
-    }
+  if ((stayExpired || manualOverrideExpired) && ownerType === "player" && nextLocationId && nextLocationName && previous?.actualLocationId !== nextLocationId) {
+    // Timeline/presence follows the schedule, but the location room is a separate
+    // durable history and must never be renamed or moved by schedule settlement.
     timeline = [...timeline, {
       id: makeId("timeline"),
       category: "location",
@@ -795,7 +1147,6 @@ export function settleActorTimelineToNow(
       actorId: ownerId,
       actorName: state.settings.playerDisplayName || "我",
       locationName: nextLocationName,
-      sceneId: activeScene?.id,
     }];
   }
   let finalActorStates = actorStates;
@@ -807,7 +1158,8 @@ export function settleActorTimelineToNow(
     if (!characterId || !playerState?.actualLocationId || !playerState.actualLocationName || !characterState) continue;
     if (characterState.actualLocationId === playerState.actualLocationId
       && characterState.activity === "正在陪伴玩家"
-      && characterState.actualLocationUntil === event.endsAt) continue;
+      && characterState.actualLocationUntil === event.endsAt
+      && characterState.locationSource === "companion") continue;
     finalActorStates = [
       ...finalActorStates.filter(actor => !(actor.ownerType === "character" && actor.ownerId === characterId)),
       {
@@ -816,6 +1168,8 @@ export function settleActorTimelineToNow(
         actualLocationId: playerState.actualLocationId,
         actualLocationName: playerState.actualLocationName,
         actualLocationUntil: event.endsAt,
+        locationSource: "companion",
+        manualSetAt: undefined,
         updatedAt: nowIso,
       },
     ];
@@ -887,7 +1241,10 @@ export function insertManualLifeScheduleSlot(
     return Number.isFinite(a) && Number.isFinite(b) && a < end && b > start;
   });
   const conflict = overlapping.find(existing =>
-    existing.kind === "appointment" || existing.source === "manual" || existing.source === "event" || existing.source === "character-tool"
+    existing.kind === "appointment"
+    || (existing.source === "manual" && existing.kind !== "free-time")
+    || existing.source === "event"
+    || (existing.source === "character-tool" && existing.kind !== "free-time")
   );
   if (conflict) return { state, conflict };
 
@@ -932,16 +1289,42 @@ export function overlayScheduleSlotsOverFreeTime(
   candidates: LifeScheduleSlot[],
 ): VirtualLifeState {
   let schedules = [...state.schedules];
+  const acceptedCandidates: LifeScheduleSlot[] = [];
   for (const candidate of candidates) {
     const start = new Date(candidate.startAt).getTime();
     const end = new Date(candidate.endAt).getTime();
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    const protectedOverlap = schedules.some(existing => {
+      const sameOwner = existing.ownerType === candidate.ownerType && existing.ownerId === candidate.ownerId;
+      const a = new Date(existing.startAt).getTime();
+      const b = new Date(existing.endAt).getTime();
+      // Free-time is an open placeholder even when legacy/user-edited records
+      // carry source=manual. A character-tool free-time slot is a cancellation
+      // tombstone and must survive automatic weekly generation.
+      // A companion stay is a time-bounded user instruction, not an open
+      // free-time placeholder. Keep it intact against weekly and character plans.
+      const companionStay = existing.id.startsWith("companion-follow-");
+      const replaceableFreeTime = existing.kind === "free-time"
+        && !companionStay
+        && (candidate.source !== "weekly-generation" || existing.source !== "character-tool");
+      return sameOwner && !replaceableFreeTime && Number.isFinite(a) && Number.isFinite(b) && a < end && b > start;
+    });
+    // A protected overlap rejects the candidate entirely. Merely skipping the
+    // overlay loop is insufficient: pushing all candidates at the end would
+    // still resurrect the cancelled interval.
+    if (protectedOverlap) continue;
     const next: LifeScheduleSlot[] = [];
     for (const existing of schedules) {
       const sameOwner = existing.ownerType === candidate.ownerType && existing.ownerId === candidate.ownerId;
       const a = new Date(existing.startAt).getTime();
       const b = new Date(existing.endAt).getTime();
-      if (!sameOwner || existing.kind !== "free-time" || !Number.isFinite(a) || !Number.isFinite(b) || b <= start || a >= end) {
+      // A companion stay is a time-bounded user instruction, not an open
+      // free-time placeholder. Keep it intact against weekly and character plans.
+      const companionStay = existing.id.startsWith("companion-follow-");
+      const replaceableFreeTime = existing.kind === "free-time"
+        && !companionStay
+        && (candidate.source !== "weekly-generation" || existing.source !== "character-tool");
+      if (!sameOwner || !replaceableFreeTime || !Number.isFinite(a) || !Number.isFinite(b) || b <= start || a >= end) {
         next.push(existing);
         continue;
       }
@@ -949,15 +1332,16 @@ export function overlayScheduleSlotsOverFreeTime(
       if (b > end) next.push({ ...existing, id: existing.id + "-after-ai-" + candidate.id, startAt: candidate.endAt, updatedAt: new Date().toISOString() });
     }
     schedules = next;
+    acceptedCandidates.push(candidate);
   }
-  schedules.push(...candidates);
+  schedules.push(...acceptedCandidates);
   return { ...state, schedules: schedules.sort((a, b) => a.startAt.localeCompare(b.startAt)) };
 }
 
 /**
  * Apply a character-authored schedule change through one shared business rule.
- * It may reshape generated or previous character-tool slots, but never silently
- * overwrites user-authored plans or confirmed events.
+ * It may reshape generated or previous character-tool slots in the next seven days,
+ * but never overwrites any manual slot (including manual free-time), events or appointments.
  */
 export function applyCharacterLifeScheduleChange(
   state: VirtualLifeState,
@@ -972,14 +1356,9 @@ export function applyCharacterLifeScheduleChange(
     return { state, error: "需要有效的活动内容和开始/结束时间，且结束时间必须晚于开始时间。" };
   }
   const characterNow = realNow;
-  const sameDay = startAt.getFullYear() === characterNow.getFullYear()
-    && startAt.getMonth() === characterNow.getMonth()
-    && startAt.getDate() === characterNow.getDate()
-    && endAt.getFullYear() === characterNow.getFullYear()
-    && endAt.getMonth() === characterNow.getMonth()
-    && endAt.getDate() === characterNow.getDate();
-  if (!sameDay || startAt <= characterNow) {
-    return { state, error: "只能调整角色当前现实日期中尚未开始的时段。" };
+  const horizonEnd = new Date(characterNow.getTime() + 7 * 24 * 60 * 60_000);
+  if (startAt <= characterNow || endAt > horizonEnd) {
+    return { state, error: "只能安排角色未来 7 天内、尚未开始的日程。" };
   }
 
   const startMs = startAt.getTime();
@@ -989,15 +1368,34 @@ export function applyCharacterLifeScheduleChange(
     const slotStart = new Date(slot.startAt).getTime();
     const slotEnd = new Date(slot.endAt).getTime();
     if (!Number.isFinite(slotStart) || !Number.isFinite(slotEnd)) return false;
-    return slot.kind !== "free-time"
-      && (slot.kind === "appointment" || slot.source === "manual" || slot.source === "event")
+    const isAlreadyInProgress = slotStart <= characterNow.getTime() && slotEnd > characterNow.getTime();
+    const protectedManualActivity = slot.kind !== "free-time" && slot.source === "manual";
+    const protectedCompanionStay = slot.id.startsWith("companion-follow-");
+    return (isAlreadyInProgress || slot.kind === "appointment" || protectedManualActivity || protectedCompanionStay || slot.source === "event")
       && slotStart < endMs
       && slotEnd > startMs;
   });
   if (conflict) return { state, error: "该时段与「" + conflict.title + "」冲突；没有覆盖用户安排或已确认约会。" };
 
   const locationId = input.locationId?.trim();
-  const location = state.locations.find(item => item.id === locationId) ?? state.locations.find(item => item.id === "home");
+  const characterHome = state.locations.find(item =>
+    (item.id === "home" || item.id.startsWith("home-")) && (item.residents ?? []).includes(characterId)
+  ) ?? state.locations.find(item => item.id === "home-" + characterId) ?? {
+    id: "home-" + characterId,
+    name: "角色的家",
+    description: "角色自己的住处；可通过地点库的 residents 设置同居关系。",
+    atmosphere: "熟悉、私密、可以放松的空间。",
+    layout: "有自己的起居区域与休息空间。",
+    props: ["沙发", "茶几", "水杯", "床头灯"],
+    visibility: "private" as const,
+  };
+  const location = locationId ? state.locations.find(item => item.id === locationId) : characterHome;
+  if (!location) {
+    return { state, error: "指定地点 ID「" + (locationId || "角色自己的家") + "」不存在。请使用地点库中的规范地点 ID；不会自动改去玩家家。" };
+  }
+  const locations = state.locations.some(item => item.id === location.id)
+    ? state.locations
+    : [...state.locations, location];
   const schedules: LifeScheduleSlot[] = [];
   const updatedAt = realNow.toISOString();
   for (const slot of state.schedules) {
@@ -1007,6 +1405,8 @@ export function applyCharacterLifeScheduleChange(
       slot.ownerType !== "character"
       || slot.ownerId !== characterId
       || slot.kind === "appointment"
+      || (slot.source === "manual" && slot.kind !== "free-time")
+      || slot.source === "event"
       || !Number.isFinite(slotStart)
       || !Number.isFinite(slotEnd)
       || slotEnd <= startMs
@@ -1035,7 +1435,7 @@ export function applyCharacterLifeScheduleChange(
     source: "character-tool",
     updatedAt,
   });
-  return { state: { ...state, schedules: schedules.sort((a, b) => a.startAt.localeCompare(b.startAt)) } };
+  return { state: { ...state, locations, schedules: schedules.sort((a, b) => a.startAt.localeCompare(b.startAt)) } };
 }
 
 export function confirmLifeInvitation(state: VirtualLifeState, invitationId: string): VirtualLifeState {

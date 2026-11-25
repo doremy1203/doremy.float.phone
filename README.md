@@ -28,7 +28,7 @@ Float Phone 是一个以 Next.js、React、TypeScript 构建的手机式 AI 互�
 | 模块 | 当前代码入口 | 使用与验证边界 |
 |---|---|---|
 | 聊天与角色 | `components/chat/*`、`lib/chat-engine.ts`、提示词与记忆相关 `lib/*` | 需要在应用中配置可用模型；生成质量和上下文效果受模型、提示词、用户数据影响 |
-| 生活系统 | `components/life/life-engine-app.tsx`、`lib/life/*`、`supabase/functions/life-scheduler/index.ts` | 包含七日日程、场景、邀约、共同经历、观察和诊断等代码；云端日程评估需要个人 Supabase 部署。主动消息生成当前由多个代码开关固定关闭，不应视为后台主动消息已启用 |
+| 生活系统 | `components/life/life-engine-app.tsx`、`lib/life/*`、`supabase/functions/life-scheduler/index.ts` | 包含七日日程、场景、邀约、共同经历、观察和诊断；主动消息开关默认开启，但后台生成/通知依赖个人 Supabase 部署。前台与后台的让行规则见[云端生活日程说明](./docs/cloud-life-scheduler.md) |
 | 照片墙 | `components/photo-wall-app.tsx`、`components/photo-wall/*`、`lib/photo-wall-*.ts` | 包含画布、素材、贴纸/涂鸦、模板和导出逻辑；存储、性能、手势与导出效果需在目标浏览器/WebView 验证 |
 | 一起看 | `components/watch-together-app.tsx`、`lib/watch-resolver.ts`、`app/api/watch-resolver/*` | 包含链接处理、播放入口、观看记录、讨论和视频理解相关代码；第三方平台受登录态、风控、地区、DRM 和接口变化限制，不保证所有链接可解析 |
 | 视频处理工具 | `tools/video-resolver`、`tools/video-transcriber`、`tools/cloudflare-video-transcriber` | 属于可选工具/服务，不等于网页部署后自动具备本地解析或转写能力 |
@@ -36,11 +36,18 @@ Float Phone 是一个以 Next.js、React、TypeScript 构建的手机式 AI 互�
 | 现实桥与设备联动 | `components/reality-bridge-app.tsx`、`lib/reality-bridge/*`、Android 原生桥 | 具体动作受平台 API、权限、设备能力和外部服务限制；桥接接口存在不代表每项动作已实机验收 |
 | Android Shell | `android-shell/app/src/main` | WebView 壳及原生通知、回复、通话、小组件、截屏、设备感知/动作等入口；需安装对应 APK 并按设备逐项验收 |
 
-### 生活系统：必须了解的当前限制
+### 生活系统：主动消息的启用条件与边界
 
-当前源码中，`components/life/life-engine-app.tsx` 与 `lib/life/life-proactive-scheduler.ts` 的 `LIFE_PROACTIVE_MESSAGES_ENABLED` 为 `false`，`lib/life/life-schedule-cloud.ts` 同步的 `proactiveEnabled` 也为 `false`。因此当前不能宣传角色会在后台自动生成并主动发送生活消息。
+源码中的 `LIFE_PROACTIVE_MESSAGES_ENABLED` 已恢复为 `true`，生活设置里也有独立的「后台主动消息」开关、消息间隔和现场安静时长。但**代码开启不等于你的设备已经能收到后台消息**，实际送达取决于：
 
-云端 `life-scheduler` 是日程快照评估/运行态更新链路，不等同于主动消息生成与通知投递。需要个人 Supabase Schema、Edge Function、Cron、密钥及网络条件配合；网页部署不会自动更新用户自己的 Supabase 项目。详见[云端生活日程说明](./docs/cloud-life-scheduler.md)。
+1. 个人 Supabase 已部署匹配版本的推送 SQL/Schema、`life-scheduler`、`push-generate` 和 Cron；
+2. 设备有有效推送订阅，Android 壳的 `PushService` 能连上 Realtime；
+3. 系统通知权限、电池优化白名单和厂商自启动策略允许后台存活；
+4. 生活快照持续同步，且角色与玩家处于同一现场、未睡眠、无正在进行的私聊租约。
+
+前台判定只认「生活现场页面可见」的租约（约 120 秒过期）。现场可见时，线上主动消息暂停触发但排期保留；服务端也会把非生活任务延后到现场结束后，避免两条叙事同时推送。App 切到后台或被杀后，已存在的服务端任务可继续；第一次任务模板仍需要在打开现场时创建。
+
+生活场景的后台通知标题为「生活现场 · 主动消息」，带「回复行动 / 回复对话」；普通线上消息按角色名分条展示，点击直达会话。详见[云端生活日程说明](./docs/cloud-life-scheduler.md)。
 
 ## 本地开发
 

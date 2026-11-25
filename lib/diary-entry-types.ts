@@ -12,6 +12,17 @@ export type DiaryEntryBlock =
   | { type: "todo"; title?: string; items: DiaryEntryTodoItem[] }
   | { type: "image"; caption?: string; description: string };
 
+export type DiaryEntryRevision = {
+  title: string;
+  dateLabel: string;
+  mood: string;
+  weather: string;
+  tags: string[];
+  body: string;
+  blocks: DiaryEntryBlock[];
+  savedAt: string;
+};
+
 export type DiaryEntry = {
   id: string;
   characterId: string;
@@ -26,6 +37,10 @@ export type DiaryEntry = {
   trigger: DiaryEntryTrigger;
   createdAt: string;
   updatedAt: string;
+  /** User-curated state; optional for backwards compatibility with existing entries. */
+  isFavorite?: boolean;
+  /** Previous content snapshots, newest last. */
+  revisionHistory?: DiaryEntryRevision[];
 };
 
 export type DiaryEntryInput = {

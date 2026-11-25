@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, Clipboard, Download, RefreshCw, ShieldCheck, Smartphone, Wifi, XCircle } from "lucide-react";
+import { AlertTriangle, Bell, CheckCircle2, Clipboard, Download, RefreshCw, ShieldCheck, Smartphone, Wifi, XCircle } from "lucide-react";
 import { getQaErrorEntries, type QaErrorEntry } from "@/lib/qa-error-log";
 import { loadVirtualLifeState } from "@/lib/life/life-storage";
 import { hasNotificationReplyBridge } from "@/lib/notification-reply";
@@ -24,6 +24,7 @@ type AndroidShellDiagnostics = {
   getGlobalWatchDiagnostics?: () => string;
   getDeviceActionCapabilities?: () => string;
   getPerceptionCapabilities?: () => string;
+  getNativePerceptionDiagnostics?: () => string;
   getLocationCapabilities?: () => string;
   getHealthCapabilities?: () => string;
   getCalendarCapabilities?: () => string;
@@ -63,6 +64,7 @@ export function RuntimeDiagnostics({ onNotice }: { onNotice?: (message: string) 
     }
   };
   const [busy, setBusy] = useState(false);
+  const [pushProbeBusy, setPushProbeBusy] = useState(false);
   const [lastRun, setLastRun] = useState<number | null>(null);
   const [errors, setErrors] = useState<QaErrorEntry[]>([]);
   const [nativeInfo, setNativeInfo] = useState<Record<string, unknown> | null>(null);
@@ -88,6 +90,7 @@ export function RuntimeDiagnostics({ onNotice }: { onNotice?: (message: string) 
         ["getGlobalWatchDiagnostics", shell!.getGlobalWatchDiagnostics ? () => shell!.getGlobalWatchDiagnostics!() : undefined],
         ["getDeviceActionCapabilities", shell!.getDeviceActionCapabilities ? () => shell!.getDeviceActionCapabilities!() : undefined],
         ["getPerceptionCapabilities", shell!.getPerceptionCapabilities ? () => shell!.getPerceptionCapabilities!() : undefined],
+        ["getNativePerceptionDiagnostics", shell!.getNativePerceptionDiagnostics ? () => shell!.getNativePerceptionDiagnostics!() : undefined],
         ["getLocationCapabilities", shell!.getLocationCapabilities ? () => shell!.getLocationCapabilities!() : undefined],
         ["getHealthCapabilities", shell!.getHealthCapabilities ? () => shell!.getHealthCapabilities!() : undefined],
         ["getCalendarCapabilities", shell!.getCalendarCapabilities ? () => shell!.getCalendarCapabilities!() : undefined],
@@ -111,6 +114,61 @@ export function RuntimeDiagnostics({ onNotice }: { onNotice?: (message: string) 
           : "已实际调用诊断/能力方法，未抛 Java exception。",
         fix: failures.length > 0 ? "更新到包含“UI 线程缓存页面 URL”修复的 APK；若仍失败，复制完整报告检查具体方法。" : undefined,
       });
+
+      if (shell!.getNativePerceptionDiagnostics) {
+        try {
+          const queue = JSON.parse(shell!.getNativePerceptionDiagnostics!()) as {
+            error?: string;
+            serviceConnected?: boolean;
+            pendingCount?: number;
+            cloudAcceptedCount?: number;
+            fallbackSentCount?: number;
+            oldestQueuedAt?: number;
+          };
+          const pending = Math.max(0, Number(queue.pendingCount) || 0);
+          const oldestAt = Number(queue.oldestQueuedAt) || 0;
+          const oldestMinutes = oldestAt > 0 ? Math.max(0, Math.floor((Date.now() - oldestAt) / 60_000)) : 0;
+          const stale = pending > 0 && oldestMinutes >= 6;
+          const queueStatus: CheckStatus = queue.error
+            ? "fail"
+            : pending > 0 && (!queue.serviceConnected || stale)
+              ? "warn"
+              : pending > 0
+                ? "info"
+                : queue.serviceConnected
+                  ? "ok"
+                  : "info";
+          result.push({
+            id: "native-perception-queue",
+            title: "Android 现实桥上传与回执队列",
+            status: queueStatus,
+            detail: queue.error
+              ? queue.error
+              : `无障碍服务${queue.serviceConnected ? "已连接" : "未连接"}；待处理 ${pending} 条，云端已接收 ${Number(queue.cloudAcceptedCount) || 0} 条，本机兜底已提交 ${Number(queue.fallbackSentCount) || 0} 条${oldestAt > 0 ? `；最早事件已等待约 ${oldestMinutes} 分钟` : ""}。`,
+            fix: queue.error
+              ? "更新 APK 并重新读取原生诊断。"
+              : pending > 0 && !queue.serviceConnected
+                ? "检查 Android 无障碍设置，确认小手机的后台感知服务已启用。"
+                : stale
+                  ? "事件已等待超过 6 分钟；检查服务端现实桥扫描任务、Realtime 回执与系统通知权限。"
+                  : undefined,
+          });
+        } catch (error) {
+          result.push({
+            id: "native-perception-queue",
+            title: "Android 现实桥上传与回执队列",
+            status: "warn",
+            detail: "读取原生队列状态失败：" + (error instanceof Error ? error.message : String(error)),
+          });
+        }
+      } else {
+        result.push({
+          id: "native-perception-queue",
+          title: "Android 现实桥上传与回执队列",
+          status: "warn",
+          detail: "当前 APK 尚未提供队列诊断接口，需要安装本次更新后的 APK。",
+        });
+      }
     }
 
     result.push({ id: "online", title: "网络状态", status: navigator.onLine ? "ok" : "fail", detail: navigator.onLine ? "浏览器报告网络在线；不代表云端 API 一定可访问。" : "浏览器报告当前离线。", fix: !navigator.onLine ? "检查 Wi-Fi / 移动数据后重试。" : undefined });
@@ -120,6 +178,43 @@ export function RuntimeDiagnostics({ onNotice }: { onNotice?: (message: string) 
       result.push({ id: "site", title: "站点连通性", status: response.ok ? "ok" : "warn", detail: response.ok ? "同源静态资源可访问。" : "同源请求返回 HTTP " + response.status, fix: !response.ok ? "检查站点部署、网络代理或静态资源路径。" : undefined });
     } catch (error) {
       result.push({ id: "site", title: "站点连通性", status: "fail", detail: "同源请求失败：" + (error instanceof Error ? error.message : String(error)), fix: "检查网络、域名和站点部署状态。" });
+    }
+
+    // Notification chain: server-side checks are read-only here (probe=0 avoids sending a test notification).
+    try {
+      const response = await fetch("/api/push/selfcheck?probe=0&diag=" + Date.now(), { cache: "no-store" });
+      const data = await response.json().catch(() => ({})) as {
+        summary?: string;
+        steps?: Array<{ key?: string; label?: string; status?: string; detail?: string; hint?: string }>;
+      };
+      if (!response.ok || !Array.isArray(data.steps)) {
+        result.push({
+          id: "push-chain-selfcheck",
+          title: "通知服务端链路",
+          status: "fail",
+          detail: "服务端自检接口不可用" + (data.summary ? "：" + data.summary : "（HTTP " + response.status + "）。"),
+          fix: "检查站点部署与 /api/push/selfcheck 路由；复制完整诊断报告继续排查。",
+        });
+      } else {
+        for (const step of data.steps) {
+          const status: CheckStatus = step.status === "ok" ? "ok" : step.status === "fail" ? "fail" : "warn";
+          result.push({
+            id: "push-chain-" + String(step.key || result.length),
+            title: "通知链路 · " + String(step.label || "服务端检查"),
+            status,
+            detail: String(step.detail || data.summary || "服务端未返回详细信息。"),
+            fix: step.hint || undefined,
+          });
+        }
+      }
+    } catch (error) {
+      result.push({
+        id: "push-chain-selfcheck",
+        title: "通知服务端链路",
+        status: "fail",
+        detail: "无法调用服务端自检：" + (error instanceof Error ? error.message : String(error)),
+        fix: "检查网络、站点 API 与当前账号会话。",
+      });
     }
 
     // Life-scene notification/reply chain: reuse the production outbox consumer so
@@ -253,6 +348,38 @@ export function RuntimeDiagnostics({ onNotice }: { onNotice?: (message: string) 
     setBusy(false);
   }, []);
 
+  const runPushProbe = useCallback(async () => {
+    setPushProbeBusy(true);
+    try {
+      const response = await fetch("/api/push/selfcheck?probe=1&diag=" + Date.now(), { cache: "no-store" });
+      const data = await response.json().catch(() => ({})) as {
+        summary?: string;
+        steps?: Array<{ key?: string; label?: string; status?: string; detail?: string; hint?: string }>;
+      };
+      if (!Array.isArray(data.steps)) throw new Error(data.summary || "服务端未返回检查结果。");
+      const items: CheckItem[] = data.steps.map((step, index) => ({
+        id: "push-chain-" + String(step.key || index),
+        title: "通知链路 · " + String(step.label || "服务端检查"),
+        status: step.status === "ok" ? "ok" : step.status === "fail" ? "fail" : "warn",
+        detail: String(step.detail || data.summary || "服务端未返回详细信息。"),
+        fix: step.hint || undefined,
+      }));
+      setChecks(current => [...current.filter(item => !item.id.startsWith("push-chain-")), ...items]);
+      const broadcast = data.steps.find(step => step.key === "broadcast");
+      onNotice?.(broadcast?.status === "ok"
+        ? "Realtime 测试广播已提交，请检查 Android 通知栏。"
+        : "Realtime 测试广播未成功，请查看通知链路诊断结果。");
+    } catch (error) {
+      setChecks(current => [
+        ...current.filter(item => item.id !== "push-chain-probe-error"),
+        { id: "push-chain-probe-error", title: "通知链路测试广播", status: "fail", detail: error instanceof Error ? error.message : String(error) },
+      ]);
+      onNotice?.("测试广播失败，请查看诊断结果。");
+    } finally {
+      setPushProbeBusy(false);
+    }
+  }, [onNotice]);
+
   useEffect(() => { void runChecks(); }, [runChecks]);
 
   const report = useMemo(() => {
@@ -302,8 +429,9 @@ export function RuntimeDiagnostics({ onNotice }: { onNotice?: (message: string) 
     <section style={{ borderRadius: 18, padding: 16, background: "var(--surface-secondary, rgba(128,128,128,.08))", border: "1px solid var(--border, rgba(128,128,128,.18))" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <Smartphone size={22} />
-        <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontWeight: 700, fontSize: 16 }}>运行诊断与故障排查</div><div style={{ fontSize: 12, opacity: .72, marginTop: 3 }}>只在本机检查，不会自动上传诊断信息。</div></div>
+        <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontWeight: 700, fontSize: 16 }}>运行诊断与故障排查</div><div style={{ fontSize: 12, opacity: .72, marginTop: 3 }}>检查本机状态与云端通知链路；诊断报告不会自动上传，测试通知需手动触发。</div></div>
         <button type="button" onClick={() => void runChecks()} disabled={busy} aria-label="重新检查" title="重新检查" style={{ border: "1px solid var(--border, #ddd)", borderRadius: 10, padding: 9, background: "transparent" }}><RefreshCw size={17} className={busy ? "animate-spin" : ""} /></button>
+        {typeof window !== "undefined" && window.AndroidShell && <button type="button" onClick={() => void runPushProbe()} disabled={pushProbeBusy} style={{ display: "inline-flex", alignItems: "center", gap: 6, border: "1px solid var(--border, #ddd)", borderRadius: 10, padding: "8px 10px", background: "transparent", color: "inherit", fontSize: 11 }}><Bell size={14} />{pushProbeBusy ? "发送中" : "测试通知"}</button>}
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
         <span style={{ fontSize: 12, borderRadius: 99, padding: "5px 9px", background: "rgba(22,163,74,.12)" }}>正常 {checks.filter(x => x.status === "ok").length}</span>

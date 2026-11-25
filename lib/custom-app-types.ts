@@ -45,6 +45,7 @@ export type CustomAppPermission =
   | "memory.suggest"
   | "media.pick"
   | "media.save"
+  | "media.download"
   | "geo.read"
   | "geo.watch"
   | "notifications.read"
@@ -58,6 +59,12 @@ export type CustomAppPermission =
   | "wallet.pay"
   | "bridge.send"
   | "bridge.read"
+  | "device.alarm.set"
+  | "device.assist"
+  | "device.dnd.set"
+  | "device.apps.list"
+  | "device.brightness.set"
+  | "device.screenshot"
   | "online.play";
 
 export type CustomAppSdkVersion = "1.0" | string;

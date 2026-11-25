@@ -1228,6 +1228,9 @@ export async function generateMomentPhotoUrl(
             characterId,
             appId: "moments",
             useReferenceImage,
+            // 朋友圈图片会以 theme asset 存进帖子；这里不要再在媒体缓存
+            // 留一份无引用的副本，否则每张配图都会变成“未引用生成图”。
+            storeInMediaCache: false,
             signal,
         });
         throwIfAborted(signal);

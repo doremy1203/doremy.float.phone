@@ -89,13 +89,14 @@ export function CheckInScheduler() {
       schedule();
     }, FIRST_SCAN_DELAY_MS);
 
-    // 回到前台立刻补一次：后台期间定时器被冻结，该触发的那几次就靠这一刻补上。
-    // 与查岗「不做隐蔽触发」的约定不冲突——这里只是把已经到点的补上，
-    // 每一次仍然会弹浮层让用户当场决定。
+    // 回到前台立刻补扫：只用于更新状态与处理「不限制前后台」模式；
+    // 「仅后台」模式会由原生生命周期门禁拒绝在前台补发，避免退出 App 后回来反而弹窗。
     const onResume = () => { void scan(); };
     const onVisible = () => { if (document.visibilityState === "visible") void scan(); };
+    const onConfigChange = () => { void scan(); };
     window.addEventListener("focus", onResume);
     window.addEventListener("pageshow", onResume);
+    window.addEventListener("check-in-config-changed", onConfigChange);
     document.addEventListener("visibilitychange", onVisible);
 
     return () => {
@@ -105,6 +106,7 @@ export function CheckInScheduler() {
       stopUserShotBridge();
       window.removeEventListener("focus", onResume);
       window.removeEventListener("pageshow", onResume);
+      window.removeEventListener("check-in-config-changed", onConfigChange);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);

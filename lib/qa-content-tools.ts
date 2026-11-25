@@ -46,6 +46,7 @@ import {
 import { loadQaGithubConfig } from "./qa-github";
 import { loadUploadConfig } from "./resource-hub-upload";
 import { CUSTOM_APP_CREATOR_GUIDE_MD } from "./custom-app-creator-guide";
+import { APK_APP_CREATOR_GUIDE_MD } from "./apk-app-creator-guide";
 import { fetchCustomAppMarketItems, fetchMyCustomAppMarketItems } from "./custom-app-market-client";
 import { buildMarketItemByAppId, classifyInstalledApp, type MarketOwnershipData } from "./custom-app-ownership";
 import type { CustomAppPermission, InstalledCustomApp } from "./custom-app-types";
@@ -172,17 +173,17 @@ const contentGuideTool: QaContentTool = {
     name: "创作指南",
     nativeName: "read_creation_guide",
     description:
-        "读取三类本机内容的官方制作说明（自定义APP / 小游戏 / 黑市剧场）。动手写内容前必读：包含运行时协议、可用 API、字段含义与限制。",
+        "读取本机内容的官方制作说明（自定义APP / APK环境差异 / 小游戏 / 黑市剧场）。动手写内容前必读：包含运行时协议、可用 API、字段含义与限制。在 APK 壳内做 APP 时，type=app 和 type=apk 两份都要读。",
     schemaLines: [
         "  参数：",
-        "    · type (必填) — app / game / theater",
+        "    · type (必填) — app / apk / game / theater",
         "    · page (可选) — 指南较长时分页返回，默认第 1 页",
-        '  调用：[执行动作:创作指南({"type":"game"})]',
+        '  调用：[执行动作:创作指南({"type":"apk"})]',
     ],
     parameters: {
         type: "object",
         properties: {
-            type: { type: "string", enum: ["app", "game", "theater"], description: "内容类型" },
+            type: { type: "string", enum: ["app", "apk", "game", "theater"], description: "内容类型" },
             page: { type: "number", description: "页码，默认 1" },
         },
         required: ["type"],
@@ -191,10 +192,11 @@ const contentGuideTool: QaContentTool = {
         const type = text(args.type, 20);
         const guide =
             type === "app" ? CUSTOM_APP_CREATOR_GUIDE_MD
+            : type === "apk" ? APK_APP_CREATOR_GUIDE_MD
             : type === "game" ? GAME_CREATOR_GUIDE_MD
             : type === "theater" ? THEATER_GUIDE_MD
             : null;
-        if (!guide) return "type 需为 app / game / theater 之一。";
+        if (!guide) return "type 需为 app / apk / game / theater 之一。";
         const pageSize = getQaPageChars();
         const pages = Math.max(1, Math.ceil(guide.length / pageSize));
         const page = Math.min(pages, Math.max(1, typeof args.page === "number" ? Math.floor(args.page) : 1));
@@ -244,7 +246,7 @@ const installAppTool: QaContentTool = {
         required: ["name", "html"],
     },
     description:
-        "把写好的单文件 HTML 自定义 APP 直接安装到用户的小手机桌面（等同用户手动导入单 HTML）。同名应用会原地更新（保留应用数据）。写之前先读「创作指南」type=app 了解宿主 API。",
+        "把写好的单文件 HTML 自定义 APP 直接安装到用户的小手机桌面（等同用户手动导入单 HTML）。同名应用会原地更新（保留应用数据）。写之前先读「创作指南」type=app 了解宿主 API；在 APK 壳内还要读 type=apk 了解原生能力与降级要求。",
     schemaLines: [
         "  参数：",
         "    · name (必填) — 应用名（会显示在桌面）",
@@ -377,7 +379,7 @@ const stageAppFileTool: QaContentTool = {
         required: ["path", "content"],
     },
     description:
-        "把应用包文件写入暂存区（不落盘）。大 HTML 超过单次输出上限时分多轮写：第一轮写骨架，后续轮 append=true 追加，绝不会被 max_tokens 截断。完整包需要 manifest.json（含 id/name/version/entry/permissions，可声明 chat.tools 等权限与 extensions.tools 工具）+ 入口 HTML；presets.json、图标等资源文件也可暂存。全部就绪后用「安装暂存应用」组包安装。",
+        "把应用包文件写入暂存区（不落盘）。大 HTML 超过单次输出上限时分多轮写：第一轮写骨架，后续轮 append=true 追加，绝不会被 max_tokens 截断。完整包需要 manifest.json（含 id/name/version/entry/permissions，可声明 chat.tools 等权限与 extensions.tools 工具）+ 入口 HTML；presets.json、图标等资源文件也可暂存。全部就绪后用「安装暂存应用」组包安装。写包前先读「创作指南」type=app；在 APK 壳内还要读 type=apk，按原生能力/降级要求设计。",
     schemaLines: [
         "  参数：",
         "    · path (必填) — 包内路径（manifest.json / index.html / presets.json / icon.png…）",

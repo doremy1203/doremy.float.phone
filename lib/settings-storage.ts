@@ -183,7 +183,22 @@ function preserveCustomAppPresetPrompts(fresh: PresetConfig, previous: PresetCon
  */
 function mergeMissingBuiltinAppPrompts(existing: PresetConfig): PresetConfig {
     const freshPrompts = createBuiltinAppPrompts();
-    const existingIds = new Set((existing.prompts ?? []).map(prompt => prompt.identifier));
+    /* 先按 identifier / 名称去重：历史版本可能把同一条内置条目写了两份 */
+    const seenId = new Set<string>();
+    const seenName = new Set<string>();
+    const dedupedPrompts = (existing.prompts ?? []).filter((prompt) => {
+        const key = String(prompt.identifier || "");
+        const nameKey = String(prompt.name || "").trim();
+        if (key && seenId.has(key)) return false;
+        if (nameKey && seenName.has(nameKey)) return false;
+        if (key) seenId.add(key);
+        if (nameKey) seenName.add(nameKey);
+        return true;
+    });
+    if (dedupedPrompts.length !== (existing.prompts ?? []).length) {
+        existing = { ...existing, prompts: dedupedPrompts };
+    }
+    const existingIds = new Set(dedupedPrompts.map(prompt => prompt.identifier));
     const missing = freshPrompts.filter(prompt => !existingIds.has(prompt.identifier));
     if (missing.length === 0) return existing;
 
@@ -215,16 +230,56 @@ export function loadPresets(): PresetConfig[] {
             presets.unshift(builtin);
             savePresets(presets);
             shouldPersistCleanup = false;
-        } else if ((existingBuiltin.builtInVersion ?? 0) < BUILTIN_PRESET_VERSION) {
+        } else {
+            /* 内置副本的定向迁移：只修「专注陪伴」条目的作用域/名称/顺序，
+               不动用户改过的内容，也不需要升版本号（升版本会重写出厂内容）。 */
+            const focusEntry = (existingBuiltin.prompts ?? []).find(p => p.identifier === "focus_companion_proactive");
+            if (focusEntry && (focusEntry.tags ?? []).length === 0) {
+                focusEntry.tags = ["chat", "text"];
+                focusEntry.name = "◇ 专注陪伴·主动推进";
+                const order = [...(existingBuiltin.prompt_order ?? [])];
+                const idx = order.findIndex(o => o.identifier === "focus_companion_proactive");
+                const toolsIdx = order.findIndex(o => o.identifier === "chat_tools");
+                if (idx >= 0 && toolsIdx >= 0 && idx !== toolsIdx - 1) {
+                    const [entry] = order.splice(idx, 1);
+                    const newToolsIdx = order.findIndex(o => o.identifier === "chat_tools");
+                    order.splice(newToolsIdx >= 0 ? newToolsIdx : order.length, 0, entry);
+                    existingBuiltin.prompt_order = order;
+                }
+                savePresets(presets);
+                shouldPersistCleanup = false;
+            }
+            if ((existingBuiltin.builtInVersion ?? 0) < BUILTIN_PRESET_VERSION) {
             const fresh = preserveCustomAppPresetPrompts(createBuiltinPreset(), existingBuiltin);
             fresh.id = existingBuiltin.id;
             const idx = presets.indexOf(existingBuiltin);
             presets[idx] = fresh;
             savePresets(presets);
             shouldPersistCleanup = false;
-        } else if (shouldPersistCleanup) {
-            savePresets(presets);
+            } else if (shouldPersistCleanup) {
+                savePresets(presets);
+            }
         }
+
+        /* 归一化：清掉历史遗留的「专注陪伴」重复条目（旧名含「角色陪伴专注」），
+           并把保留的那条统一成新名称与线上聊天作用域。 */
+        let normalizedAny = false;
+        for (const preset of presets) {
+            const prompts = preset.prompts ?? [];
+            const focus = prompts.find(p => p.identifier === "focus_companion_proactive");
+            const legacy = prompts.find(p => p.identifier !== "focus_companion_proactive" && String(p.name || "").indexOf("角色陪伴专注") >= 0);
+            if (legacy) {
+                const legacyId = legacy.identifier;
+                preset.prompts = prompts.filter(p => p.identifier !== legacyId);
+                preset.prompt_order = (preset.prompt_order ?? []).filter(o => o.identifier !== legacyId);
+                normalizedAny = true;
+            }
+            if (focus) {
+                if ((focus.tags ?? []).length === 0) { focus.tags = ["chat", "text"]; normalizedAny = true; }
+                if (String(focus.name || "").indexOf("专注陪伴") < 0) { focus.name = "◇ 专注陪伴·主动推进"; normalizedAny = true; }
+            }
+        }
+        if (normalizedAny) savePresets(presets);
 
         // 内置 APP 的提示词条目按需补齐（只追加缺失项，保留用户已改内容）。
         const builtinPreset = presets.find(p => p.builtIn);

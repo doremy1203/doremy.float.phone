@@ -1,11 +1,10 @@
 // lib/chat-engine.ts
 
 import { createSseJsonParser } from "./sse-json";
+import { makeNativeToolName } from "./native-tool-name";
 import { maybeAppendShortcutCapability, maybeAppendPerceptionStatus } from "./offline-shortcut-capability";
 import { maybeBuildStatusInjection } from "./perception/describe";
 import { loadCharacters } from "./character-storage";
-import { createBuiltinPreset } from "./builtin-preset";
-import { IMAGE_CHARACTER_NAMING_RULE } from "./image-prompt-rules";
 import { buildLifeMemoryContext, buildLifePresenceContext } from "./life/life-memory-bridge";
 import { buildScreenEffectPromptHint } from "./chat-screen-effects";
 import { emitChatPluginEvent, runChatPluginTransform } from "./chat-plugin-hooks";
@@ -87,6 +86,7 @@ import { pushApiLog } from "./api-log-store";
 export { getApiLogs, clearApiLogs, type DebugInfo } from "./api-log-store";
 import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { getInternalCapability, getInternalCapabilitySubToolDefinitions } from "./internal-capability-storage";
+import { buildMemoPromptDigest } from "./memo-archive-storage";
 import { isMediaStoreRef, loadMediaBlob } from "./media-cache-storage";
 import {
     DEFAULT_CHAT_BILINGUAL_PROMPT,
@@ -1587,37 +1587,14 @@ type NativeChatToolBuildOptions = {
     userName?: string;
 };
 
-function stableToolHash(value: string): string {
-    let hash = 0;
-    for (const char of value) {
-        hash = ((hash * 31) + char.charCodeAt(0)) >>> 0;
-    }
-    return hash.toString(36).slice(0, 6);
-}
-
-function makeNativeToolName(displayName: string, used: Set<string>): string {
-    const base = displayName
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, "_")
-        .replace(/^_+|_+$/g, "")
-        .slice(0, 40);
-    const prefix = base && /^[a-zA-Z_]/.test(base) ? base : "action";
-    let name = `${prefix}_${stableToolHash(displayName)}`.slice(0, 64);
-    let index = 2;
-    while (used.has(name)) {
-        name = `${prefix}_${stableToolHash(displayName)}_${index}`.slice(0, 64);
-        index += 1;
-    }
-    used.add(name);
-    return name;
-}
-
 export function nativeToolSourceKey(tool: EnabledTool): string {
     return `${tool.source}:${tool.sourceId}`;
 }
 
 export function isNativeSingleTool(tool: EnabledTool): boolean {
+    // Life tools already carry their own parameter schema; registering them as
+    // expandable packages creates an empty loader and hides the real actions.
+    if (tool.source === "life") return true;
     if (tool.source === "rest") return true;
     if (tool.source === "composite") return true;
     if (tool.source === "custom_app") return true;
@@ -1933,12 +1910,41 @@ export async function buildChatPromptMessages(
     const promptTimestampOptions = getPromptTimestampOptionsForTimeContext(promptTimeContext);
     const memConfig = loadMemoryConfig();
     const isOfflineMode = options?.appTags?.includes("offline") === true;
-    const effectiveAppTags = mergeAppTags(options?.appTags, promptProfile?.appTags, resolvedAppId);
+    const memoCapability = getInternalCapability("memo_archive");
+    const memoPromptEnabled = resolvedAppId === "chat" && !session.isGroup && !isOfflineMode
+        && memConfig.shortTermAllowedSources?.memo !== false
+        && memoCapability?.enabled === true && memoCapability.mode !== "off";
+    const baseAppTags = mergeAppTags(options?.appTags, promptProfile?.appTags, resolvedAppId) ?? [];
+    const effectiveAppTags = memoPromptEnabled
+        ? [...new Set([...baseAppTags, "memo"])]
+        : baseAppTags.filter(tag => tag !== "memo");
+    if (memoPromptEnabled && preset) {
+        const memoPrompt = {
+            identifier: "memo_behavior",
+            name: "▸ 私人备忘录记录规则",
+            role: "system" as const,
+            content: [
+                "你拥有只属于当前角色的私人备忘录。它用于保存你认为未来值得回看的具体信息，而不是逐轮记录聊天。",
+                "当对话出现明确承诺、共同计划与待办、重要日期、关系进展、稳定习惯偏好、用户明确要求记住的事项，或你自己希望以后继续的话题时，你可以主动判断是否值得记录，不必等待用户提醒。",
+                "写入前先搜索现有备忘录；已有主题优先补充或更新，避免重复建档。用户分享给你的备忘录只读；你只能修改自己的记录。不要记录琐碎闲聊、短暂情绪、猜测或敏感推断。",
+                "记录操作不必逐次向用户播报；只有在确实相关时自然提及。工具不可用或写入失败时，不要声称已经记录。",
+            ].join("\\n"),
+            injection_position: 0,
+            injection_depth: 0,
+            enabled: true,
+            tags: ["chat", "memo"],
+        };
+        preset = {
+            ...preset,
+            prompts: [...(preset.prompts ?? []).filter(item => item.identifier !== "memo_behavior"), memoPrompt],
+            prompt_order: [...(preset.prompt_order ?? []).filter(item => item.identifier !== "memo_behavior"), { identifier: "memo_behavior", enabled: true }],
+        };
+    }
     const toolsAllowed = options?.toolsAllowed !== false && !isOfflineMode;
     const enabledTools = toolsAllowed ? getEnabledTools(resolvedAppId) : [];
     const hasLifeTools = enabledTools.some(tool => tool.source === "life");
     const toolsEnabled = enabledTools.length > 0
-        && (options?.forceEnableTools === true || hasLifeTools || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
+        && (options?.forceEnableTools === true || hasLifeTools || memoPromptEnabled || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
     const usesNativeActions = Boolean(toolsEnabled && nativeToolProtocolForConfig(config));
     // 多图必须在 prepareShortTermContext 之前展开：后者的 unifiedRecentItems 下标
     // 指向传入的 history 数组；先展开才能保证下标和最终 promptHistory 一致。
@@ -1968,8 +1974,13 @@ export async function buildChatPromptMessages(
         buildMusicCloudMacro(),
     ]);
 
+    const memoDigest = !session.isGroup && resolvedAppId === "chat" && memConfig.shortTermAllowedSources?.memo !== false && memoCapability?.enabled && memoCapability.mode !== "off"
+        && toolsEnabled ? await buildMemoPromptDigest(character.id).catch(() => "")
+        : "";
+
     const longTermMemories = [
         memResults ? formatLongTermMemories(memResults) : "",
+        memoDigest,
         buildLifeMemoryContext(character.id),
         buildLifePresenceContext(character.id),
     ].filter(Boolean).join("\n\n");
@@ -2042,26 +2053,15 @@ export async function buildChatPromptMessages(
         offlineSummaryTag: preset?.story_summary_tag?.trim() || "summary",
         nativeToolHistory: usesNativeActions,
     });
-    // Tool-use policy: keep the model proactive for real app actions without forcing tools on ordinary conversation.
-    if (toolsEnabled) {
+    if (memoDigest) {
         llmMessages.push({
             role: "system",
             content: [
-                "【工具调用策略】你可以使用当前会话已提供的工具完成真实查询和操作。不要只因为能用自然语言回答就跳过工具。",
-                "应主动调用工具的情况：用户要求查询/读取应用中的真实数据或当前状态；要求搜索外部/本地资料；要求保存、修改、删除、创建或发送内容；要求控制设备、日历、音乐、组件、快捷动作或其他已提供能力；以及完成任务必须依赖工具返回结果时。",
-                "优先级：真实数据以工具查询结果为准；实际操作必须执行对应工具后才能声称完成；不得把猜测当作查询结果，也不得把工具失败说成没有数据。",
-                "工具选择：先选择职责最匹配的已启用工具；如果工具套件/MCP 需要展开说明，遇到明确相关的任务时主动展开并继续执行，不要仅因为工具名称不熟悉就放弃。参数不确定时先读取说明或查询必要信息。",
-                "工具结果：执行后检查成功/失败及返回内容；失败时如有安全且合理的修复方式可调整参数重试一次，否则如实说明。不要重复执行已经成功且没有必要重复的操作。",
-                "不应滥用工具：纯闲聊、创作、解释常识、仅提出想法而未要求查询或保存时，可以直接回答；不要为了展示能力调用无关工具。涉及删除、对外发送、付费或其他高影响操作时，遵循工具权限和必要的用户确认。",
-                "如果当前提供的是文本动作协议，必须按可用动作说明中的格式先获取所需参数规范，再输出执行动作指令；如果使用原生工具调用，直接调用对应工具，不要把工具调用伪装成普通文字。",
+                "【私人备忘录维护】本轮包含到期手记。你不是只把它们读一遍：要结合近期对话和已有内容逐条核对，必要时使用「阅读备忘录」「修改备忘录」「新建备忘录」「整理待办」「删除备忘录」等工具实际维护。",
+                "优先修正旧内容、补充新进展、合并重复信息、清理明确过期的待办；不确定的信息保留并标注待确认，不要凭猜测覆盖事实。删除只移入回收站，用户分享的笔记只读。",
+                "最后必须调用「完成备忘录维护」登记本轮实际检查的 noteId、结论和真实变更。只有该工具成功返回，系统才会把对应笔记标记为已维护；普通聊天生成成功不代表维护完成。",
             ].join("\n"),
         });
-    }
-
-    // 全局生图身份规则：所有非生活场景的文本生成都带一条，避免朋友圈/聊天/
-    // 自定义 App 的照片描述只写代词，导致其他角色参考图无法匹配。
-    if (!options?.appTags?.includes("life")) {
-        llmMessages.push({ role: "system", content: IMAGE_CHARACTER_NAMING_RULE });
     }
 
     const avatarChangeIntent = !session.isGroup
@@ -2694,7 +2694,8 @@ export async function generateChatCompletion(
         shortcutCancelled: false,
     };
     try {
-        return await generateChatCompletionCore(session, history, options, callbacks, bailoutRef);
+        const result = await generateChatCompletionCore(session, history, options, callbacks, bailoutRef);
+        return result;
     } catch (err) {
         if (options?.signal?.aborted) bailoutRef.shortcutCancelled = true;
         throw err;

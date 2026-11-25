@@ -18,9 +18,16 @@ type CheckInBridgeLike = {
   stopCheckIn?: () => void;
   requestCheckIn?: (characterId: string, name: string, avatar: string) => void;
   getCheckInDiagnostics?: () => string;
+  getCheckInAppState?: () => string;
+  getBackgroundEnhancementDiagnostics?: () => string;
+  scheduleBackgroundCheckIn?: (characterId: string, characterName: string, dueAtMillis: number, remainingBackgroundMs: number, backgroundOnly: boolean) => boolean;
+  cancelBackgroundCheckIn?: (characterId: string) => boolean;
   getDiagnosticsSnapshot?: () => string;
   openAccessibilitySettings?: () => void;
   consumePendingUserShot?: () => string;
+  scheduleFocusPassCheckIn?: (json: string) => string;
+  cancelFocusPassCheckIn?: (passId: string) => boolean;
+  consumePendingFocusPassCheckIn?: () => string;
   setScreenshotShareTargets?: (json: string) => boolean;
   getScreenshotShareTargets?: () => string;
   /** 查岗 / 截屏确认浮层的配色（老 APK 没有） */
@@ -32,6 +39,43 @@ function bridge(): CheckInBridgeLike | null {
   if (typeof window === "undefined") return null;
   const candidate = (window as unknown as { AndroidShell?: CheckInBridgeLike }).AndroidShell;
   return candidate && typeof candidate === "object" ? candidate : null;
+}
+
+/** 读取原生 Activity 生命周期与累计后台时长。旧 APK 返回 unavailable。 */
+/** Schedule/cancel native one-shot wake-up reminders. Old APKs safely no-op. */
+export function scheduleNativeCheckIn(
+  characterId: string,
+  characterName: string,
+  dueAtMillis: number,
+  remainingBackgroundMs: number,
+  backgroundOnly: boolean,
+): boolean {
+  try {
+    return bridge()?.scheduleBackgroundCheckIn?.(
+      characterId, characterName, dueAtMillis, remainingBackgroundMs, backgroundOnly,
+    ) === true;
+  } catch {
+    return false;
+  }
+}
+
+export function cancelNativeCheckIn(characterId: string): void {
+  try { bridge()?.cancelBackgroundCheckIn?.(characterId); } catch { /* old APK / bridge unavailable */ }
+}
+
+export function readCheckInAppState(): import("./checkin-config").CheckInAppState {
+  try {
+    const raw = bridge()?.getCheckInAppState?.();
+    if (!raw) return { available: false, foreground: true, backgroundElapsedMs: 0 };
+    const parsed = JSON.parse(raw) as Partial<import("./checkin-config").CheckInAppState>;
+    return {
+      available: parsed.available === true,
+      foreground: parsed.foreground !== false,
+      backgroundElapsedMs: Number.isFinite(parsed.backgroundElapsedMs) ? Math.max(0, Number(parsed.backgroundElapsedMs)) : 0,
+    };
+  } catch {
+    return { available: false, foreground: true, backgroundElapsedMs: 0 };
+  }
 }
 
 /** 壳是否提供查岗浮层（老 APK 没有）。 */
@@ -88,6 +132,66 @@ export function consumePendingUserShot(): CheckInOutcome | null {
 export function supportsShareTargets(): boolean {
   return typeof bridge()?.setScreenshotShareTargets === "function";
 }
+
+/** 专注通行证查岗的原生结果（浮层在进程被杀时也能弹，结果先落盘）。 */
+export type FocusPassCheckInOutcome = {
+  passId: string;
+  app: string;
+  characterId?: string;
+  accepted: boolean;
+  base64?: string;
+  width?: number;
+  height?: number;
+  reply?: string;
+  reason?: string;
+};
+
+/** 排一个原生查岗闹钟：到点直接弹 CheckInService 浮层，不依赖网页进程。 */
+export function scheduleFocusPassCheckIn(payload: {
+  passId: string;
+  app: string;
+  characterId: string;
+  name: string;
+  avatar?: string;
+  dueAt: number;
+}): boolean {
+  try {
+    const raw = bridge()?.scheduleFocusPassCheckIn?.(JSON.stringify(payload));
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as { ok?: boolean };
+    return parsed?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+export function cancelFocusPassCheckIn(passId: string): void {
+  try { bridge()?.cancelFocusPassCheckIn?.(passId); } catch { /* old APK */ }
+}
+
+/** 读走原生查岗结果（读后即清）。没有结果/老壳返回 null。 */
+export function consumePendingFocusPassCheckIn(): FocusPassCheckInOutcome | null {
+  try {
+    const raw = bridge()?.consumePendingFocusPassCheckIn?.();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<FocusPassCheckInOutcome>;
+    if (!parsed || typeof parsed !== "object" || !parsed.passId) return null;
+    return {
+      passId: String(parsed.passId),
+      app: typeof parsed.app === "string" ? parsed.app : "",
+      characterId: typeof parsed.characterId === "string" && parsed.characterId.trim() ? parsed.characterId.trim() : undefined,
+      accepted: parsed.accepted === true,
+      base64: typeof parsed.base64 === "string" && parsed.base64 ? parsed.base64 : undefined,
+      width: typeof parsed.width === "number" ? parsed.width : 0,
+      height: typeof parsed.height === "number" ? parsed.height : 0,
+      reply: typeof parsed.reply === "string" && parsed.reply.trim() ? parsed.reply.trim() : undefined,
+      reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 
 /**
  * 把「可分享角色清单 + 默认角色」交给原生保管。

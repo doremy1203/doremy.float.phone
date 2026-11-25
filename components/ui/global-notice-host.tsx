@@ -38,13 +38,19 @@ export function GlobalNoticeHost() {
 
   if (!notice || typeof document === "undefined") return null;
   const style = palette[notice.kind];
+  // The notice belongs to the virtual phone, not the outer browser viewport.
+  // Portal into the phone shell so centering, width and clipping follow the
+  // actual device frame (including scaled desktop previews and Android WebView).
+  const phoneShell = document.querySelector<HTMLElement>(".phone-shell");
+  const portalTarget = phoneShell ?? document.body;
+  const inPhoneShell = Boolean(phoneShell);
   return createPortal(
     <div
       key={notice.id}
       role={notice.kind === "error" ? "alert" : "status"}
       aria-live={notice.kind === "error" ? "assertive" : "polite"}
-      className="fixed z-[10000] flex items-start gap-3 rounded-2xl border bg-[var(--c-card,#fff)] px-4 py-3 text-[var(--c-text,#292722)] shadow-[0_12px_36px_rgba(0,0,0,.2)]"
-      style={{ position: "fixed", left: "50%", top: "50%", transform: "translate(-50%, -50%)", width: "min(420px, calc(100vw - 32px))", maxWidth: "calc(100vw - 32px)", boxSizing: "border-box", borderColor: style.border, animation: "globalNoticeIn 180ms cubic-bezier(.2,.8,.2,1) both" }}
+      className="z-[10000] flex items-start gap-3 rounded-2xl border bg-[var(--c-card,#fff)] px-4 py-3 text-[var(--c-text,#292722)] shadow-[0_12px_36px_rgba(0,0,0,.2)]"
+      style={{ position: inPhoneShell ? "absolute" : "fixed", left: "50%", top: "50%", transform: "translate(-50%, -50%)", width: "min(420px, calc(100% - 32px))", maxWidth: "calc(100% - 32px)", maxHeight: "min(70%, 420px)", overflowY: "auto", overflowWrap: "anywhere", overscrollBehavior: "contain", boxSizing: "border-box", borderColor: style.border, animation: "globalNoticeIn 180ms cubic-bezier(.2,.8,.2,1) both" }}
     >
       <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-sm font-bold text-white" style={{ background: style.border }}>{style.icon}</span>
       <div className="min-w-0 flex-1 text-sm leading-5 break-words">
@@ -54,6 +60,6 @@ export function GlobalNoticeHost() {
       <button type="button" className="ml-1 grid h-6 w-6 shrink-0 place-items-center rounded-full text-lg leading-none opacity-60 hover:opacity-100" aria-label="关闭提示" onClick={() => setNotice(null)}>×</button>
       <style>{`@keyframes globalNoticeIn { from { opacity: 0; } to { opacity: 1; } }`}</style>
     </div>,
-    document.body
+    portalTarget
   );
 }

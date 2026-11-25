@@ -12,6 +12,7 @@ import { cleanStreamText, splitStreamPreviewSegments, stripLiteralTexts, stripXm
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
 import { parseAIResponse, type ParsedMessagePart } from "@/lib/rich-message-parser";
+import { filterDuplicateFocusDirectiveParts } from "@/lib/focus-directive-dedupe";
 import { isKnownStickerLabel } from "@/lib/sticker-data";
 import { translateReasoningText } from "@/lib/reasoning-translate";
 import { MessageBubble, MediaDetailModal, prewarmStickerCache, BilingualTextBlock, isStandaloneHtmlPreviewContent, normalizeTextBubbleContent } from "./message-bubble";
@@ -35,6 +36,7 @@ import { createPortal } from "react-dom";
 
 import { CHARACTERS_UPDATED_EVENT, loadCharacters } from "@/lib/character-storage";
 import { Character } from "@/lib/character-types";
+import { getBuiltinCustomApp } from "@/lib/builtin-apps/registry";
 import { loadCustomAppChatPlusActions, type RegisteredCustomAppChatPlusAction } from "@/lib/custom-app-chat-directives";
 import { CUSTOM_APPS_UPDATED_EVENT, getInstalledCustomApp } from "@/lib/custom-app-storage";
 import { toCustomAppIconId, type InstalledCustomApp } from "@/lib/custom-app-types";
@@ -2690,7 +2692,7 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
             if (isGroupMuted(session, r.characterId)) continue;
             const responseBatchId = createResponseBatchId();
             const { parts: rawParts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(r.responseText, getCurrentStateForCharacter(r.characterId));
-            const parts = stripInvalidStickerParts(rawParts, r.characterId);
+            const parts = filterDuplicateFocusDirectiveParts(session.id, stripInvalidStickerParts(rawParts, r.characterId));
             let attachedState = false;
             let savedAnyPart = false;
             for (const part of parts) {
@@ -3115,7 +3117,7 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
                 }));
             }
         }
-        const parts = stripInvalidStickerParts(rawParts);
+        const parts = filterDuplicateFocusDirectiveParts(session.id, stripInvalidStickerParts(rawParts));
         throwIfGenerationStopped(options);
 
         // Detect call triggers and AI media actions, filter them out
@@ -3799,7 +3801,7 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
         setShowEmojiPanel(false);
         setShowStickerPanel(false);
         setRichModal(null);
-        const app = getInstalledCustomApp(action.appId);
+        const app = getInstalledCustomApp(action.appId) ?? getBuiltinCustomApp(action.appId);
         if (!app) {
             showChatToast("这个自定义 APP 已不存在");
             setCustomPlusActions(loadCustomAppChatPlusActions());
@@ -3874,7 +3876,17 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
         const loadedLife = loadVirtualLifeState();
         const settledLife = settleActorTimelineToNow(loadedLife, "character", character.id);
         const life = settledLife === loadedLife ? loadedLife : saveVirtualLifeState(settledLife);
-        if (!life.settings.enabled || !life.settings.allowCharactersToStaySilent) { kvRemove("life-sleep-pending-reply:" + session.id); return false; }
+        if (
+            !life.settings.enabled ||
+            life.settings.allowOnlineChatDuringSleep ||
+            !life.settings.allowCharactersToStaySilent
+        ) {
+            kvRemove("life-sleep-pending-reply:" + session.id);
+            kvRemove("life-sleep-wake-threshold:" + session.id + ":offline");
+            kvRemove("life-sleep-wake-threshold:" + session.id + ":online");
+            setSleepNotice(null);
+            return false;
+        }
         const latestUserText = (userText || loadChatMessages(session.id).filter(message => message.role === "user").slice(-1)[0]?.content || "").trim();
         if (!latestUserText) return false;
         const clock = getActorClock(life, "character", character.id);
@@ -3936,9 +3948,19 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
             setIsGenerating(false);
             clearGenerationLock(session.id);
         }
+        const groupParticipantIds = session.isGroup
+            ? [...new Set((session.participantIds || []).filter(Boolean))]
+            : [];
+        if (session.isGroup && groupParticipantIds.length === 0) {
+            showChatToast("群聊没有有效的角色成员，无法生成回复");
+            return;
+        }
         const turn = beginTurn({
             kind: "user_reply",
-            characterId: character?.id ?? resolveSessionCharacterId(session) ?? "",
+            characterId: session.isGroup
+                ? groupParticipantIds[0]
+                : character?.id ?? resolveSessionCharacterId(session) ?? "",
+            ...(session.isGroup ? { participantIds: groupParticipantIds } : {}),
             sessionId: session.id,
         });
         if (!turn) return;
@@ -4003,7 +4025,7 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
                         const editableResponseText = senderInfo.editableResponseText || `[${senderInfo.characterName}]: ${cleanedEditableText}`;
                         const previousState = getLatestCharacterStateValues(senderInfo.characterId);
                         const { parts: rawParts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(text, previousState);
-                        const parts = stripInvalidStickerParts(rawParts, senderInfo.characterId);
+                        const parts = filterDuplicateFocusDirectiveParts(session.id, stripInvalidStickerParts(rawParts, senderInfo.characterId));
                         let attachedState = false;
                         let savedAnyPart = false;
                         for (const part of parts) {

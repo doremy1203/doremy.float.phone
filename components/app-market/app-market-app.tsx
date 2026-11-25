@@ -63,6 +63,7 @@ import {
   setCustomAppIconStyle,
   type CustomAppIconStyle,
 } from "@/lib/custom-app-storage";
+import { removeCustomAppHostResidue } from "@/lib/custom-app-host-api";
 import type { CustomAppManifest, CustomAppPermission, CustomAppResourceDeclarations, InstalledCustomApp } from "@/lib/custom-app-types";
 import { createCustomAppPackageFile } from "@/lib/custom-app-package";
 import { downloadFile } from "@/lib/download-utils";
@@ -1022,6 +1023,7 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
       const removal = await removeCustomAppRegistrationsAsync(app.id, { deleteResources: deleteData });
       const removalText = formatCustomAppRegistrationRemovalSummary(removal);
       await uninstallCustomAppAsync(app.id, { deleteData });
+      if (deleteData) removeCustomAppHostResidue(app.id);
       setConfirmDelete(null);
       setSelectedInstalledApp(null);
       refresh();

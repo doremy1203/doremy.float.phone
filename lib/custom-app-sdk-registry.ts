@@ -1,4 +1,4 @@
-import { loadInstalledCustomApps } from "./custom-app-storage";
+import { loadAllCustomApps } from "./builtin-apps/registry";
 import type {
   CustomAppChatCardAction,
   CustomAppChatInputTool,
@@ -69,7 +69,7 @@ function loadCustomAppToolDefinitions(app: InstalledCustomApp): CustomAppToolDef
 }
 
 export function loadCustomAppPromptProfiles(): Array<RegisteredCustomAppExtension<CustomAppPromptProfile>> {
-  const items = loadInstalledCustomApps().flatMap(app => {
+  const items = loadAllCustomApps().flatMap(app => {
     const canonical = app.manifest.extensions?.prompt?.profiles ?? [];
     const profiles = canonical.length > 0 ? canonical : app.manifest.promptProfiles ?? [];
     return profiles.map(profile => withApp(app, profile));
@@ -78,7 +78,7 @@ export function loadCustomAppPromptProfiles(): Array<RegisteredCustomAppExtensio
 }
 
 export function loadCustomAppEventSubscriptions(): Array<RegisteredCustomAppExtension<CustomAppEventSubscription>> {
-  const items = loadInstalledCustomApps().flatMap(app => {
+  const items = loadAllCustomApps().flatMap(app => {
     const canonical = app.manifest.extensions?.events ?? [];
     const events = canonical.length > 0 ? canonical : app.manifest.events ?? [];
     return events.map(event => withApp(app, event));
@@ -87,28 +87,28 @@ export function loadCustomAppEventSubscriptions(): Array<RegisteredCustomAppExte
 }
 
 export function loadCustomAppChatMessageActions(): Array<RegisteredCustomAppExtension<CustomAppChatMessageAction>> {
-  const items = loadInstalledCustomApps().flatMap(app => (
+  const items = loadAllCustomApps().flatMap(app => (
     app.manifest.extensions?.chat?.messageActions ?? []
   ).map(action => withApp(app, action)));
   return dedupeByAppAndId(items);
 }
 
 export function loadCustomAppChatCardActions(): Array<RegisteredCustomAppExtension<CustomAppChatCardAction>> {
-  const items = loadInstalledCustomApps().flatMap(app => (
+  const items = loadAllCustomApps().flatMap(app => (
     app.manifest.extensions?.chat?.cardActions ?? []
   ).map(action => withApp(app, action)));
   return dedupeByAppAndId(items);
 }
 
 export function loadCustomAppChatInputTools(): Array<RegisteredCustomAppExtension<CustomAppChatInputTool>> {
-  const items = loadInstalledCustomApps().flatMap(app => (
+  const items = loadAllCustomApps().flatMap(app => (
     app.manifest.extensions?.chat?.inputTools ?? []
   ).map(tool => withApp(app, tool)));
   return dedupeByAppAndId(items);
 }
 
 export function loadCustomAppChatTools(): Array<RegisteredCustomAppExtension<CustomAppToolDefinition>> {
-  const items = loadInstalledCustomApps().flatMap(app => (
+  const items = loadAllCustomApps().flatMap(app => (
     canExposeCustomAppTools(app)
       ? loadCustomAppToolDefinitions(app).filter(isSharedCustomAppTool).map(tool => withApp(app, tool))
       : []
@@ -117,7 +117,7 @@ export function loadCustomAppChatTools(): Array<RegisteredCustomAppExtension<Cus
 }
 
 export function loadCustomAppToolsForContext(appId?: string): Array<RegisteredCustomAppExtension<CustomAppToolDefinition>> {
-  const items = loadInstalledCustomApps().flatMap(app => (
+  const items = loadAllCustomApps().flatMap(app => (
     loadCustomAppToolDefinitions(app)
       .filter(tool => customAppToolVisibleInContext(app, tool, appId))
       .map(tool => withApp(app, tool))
@@ -128,7 +128,7 @@ export function loadCustomAppToolsForContext(appId?: string): Array<RegisteredCu
 export function loadCustomAppUiExtensions(
   slot: keyof CustomAppUiExtensions,
 ): Array<RegisteredCustomAppExtension<CustomAppExtensionEntry>> {
-  const items = loadInstalledCustomApps().flatMap(app => (
+  const items = loadAllCustomApps().flatMap(app => (
     app.manifest.extensions?.ui?.[slot] ?? []
   ).map(entry => withApp(app, entry)));
   return dedupeByAppAndId(items);

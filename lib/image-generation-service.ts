@@ -820,6 +820,8 @@ async function generateImageFromConfiguredApiInternal(params: {
   /** Optional supplemental scene reference, retained for older callers. */
   referenceImageDataUrl?: string;
   settings?: ImageGenerationSettings;
+  /** 调用方会自己持久化图片时设为 false，避免媒体缓存里多出一份无引用副本。 */
+  storeInMediaCache?: boolean;
   signal?: AbortSignal;
 }): Promise<ImageGenerationResult | null> {
   const storedSettings = params.settings ?? loadImageGenerationSettings();
@@ -840,15 +842,21 @@ async function generateImageFromConfiguredApiInternal(params: {
   const matchedIds = allCharacters
     .filter(character => character.id !== params.characterId && Boolean(character.name?.trim()) && description.includes(character.name.trim()))
     .map(character => character.id);
+  // 所有生图调用最终都归一化为一份明确的出镜名单。
+  // 即使调用方传了 participantIds，也要把描述里明确写出的其他角色并进来；
+  // 否则「主角色 + 描述里点名了配角」的请求只会加载主角色的参考图。
+  const explicitParticipantIds = params.participantIds;
   const inferredCharacterIds = Array.from(new Set([
     ...(params.characterId ? [params.characterId] : []),
     ...(params.characterIds ?? []),
     ...matchedIds,
   ])).filter(characterId => characterById.has(characterId)).slice(0, 16);
-  // 所有生图调用最终都归一化为一份明确的出镜名单；调用方名单优先，旧调用方才回退到描述识别。
-  const resolvedParticipantIds = params.participantIds
-    ? Array.from(new Set(params.participantIds)).filter(id => id === "__user__" || characterById.has(id))
-    : [...inferredCharacterIds, ...((params.includeUserAppearance ?? descriptionExplicitlyIncludesPlayer(description)) ? ["__user__"] : [])];
+  const includeUserByDescription = params.includeUserAppearance ?? descriptionExplicitlyIncludesPlayer(description);
+  const resolvedParticipantIds = Array.from(new Set([
+    ...(explicitParticipantIds ?? inferredCharacterIds),
+    ...(explicitParticipantIds ? [...(params.characterIds ?? []), ...matchedIds] : []),
+    ...(includeUserByDescription ? ["__user__"] : []),
+  ])).filter(id => id === "__user__" || characterById.has(id)).slice(0, 16);
   const involvedCharacterIds = resolvedParticipantIds.filter(id => id !== "__user__" && characterById.has(id)).slice(0, 16);
   const includeUserAppearance = resolvedParticipantIds.includes("__user__");
 
@@ -864,9 +872,17 @@ async function generateImageFromConfiguredApiInternal(params: {
     ? `玩家本人稳定外观（只用于识别本人；服装、姿势、表情和场景以本次提示词为准）：${userReference.featurePrompt.trim()}`
     : "";
   const identityPolicy = (involvedCharacterIds.length || includeUserAppearance)
-    ? "身份参考规则：只保持每个人可识别的身份特征，例如面部、五官、发色、发型及明显识别标记。不要照搬参考图的服装、姿势、表情、站位、镜头、构图、背景或光线；这些内容必须服从本次场景描述，可以每次变化。"
+    ? "身份与画风参考规则：每个人物的脸型、五官、发色发型、体型、年龄感和服饰风格，以及整体画风，都必须与各自的参考图保持一致。参考图是二次元/动漫/插画就保持二次元/动漫/插画，参考图是照片就保持照片质感；严禁把二次元角色改成三次元真人写实，也严禁擅自转换画风。只有姿势、表情、场景和构图可以按本次描述变化。"
     : "";
-  const identityPrompt = [identityPolicy, ...characterIdentityPrompt, userAppearancePrompt].filter(Boolean).join("\n");
+  const participantNames = resolvedParticipantIds.map(id =>
+    id === "__user__" ? "用户本人" : (characterById.get(id)?.name || id),
+  );
+  // 生图模型不会自动知道「女人/男孩/女孩」是谁。出镜名单超过一人时，必须把准确名字
+  // 写进提示词，否则即使参考图传了多张，模型也只会把泛称角色画成无关的人。
+  const participantNamingLine = resolvedParticipantIds.length > 1
+    ? `【出镜人物】${participantNames.join("、")}。画面里提到每个人时必须使用以上准确名字；不要用“女人/男人/男孩/女孩/孩子/对方/她/他”等泛称代替人物身份。`
+    : "";
+  const identityPrompt = [participantNamingLine, identityPolicy, ...characterIdentityPrompt, userAppearancePrompt].filter(Boolean).join("\n");
 
   // NovelAI 当前生成接口不接收多张身份参考图。仍传入每位出镜角色的文字身份锚点，
   // 不把多张脸图混成一张参考图，避免模型将多位角色的身份融合。
@@ -894,7 +910,7 @@ async function generateImageFromConfiguredApiInternal(params: {
     const mimeType = data.mimeType || "image/png";
     const blob = base64ToBlob(data.b64, mimeType);
     throwIfAborted(params.signal);
-    const mediaRef = await storeMediaBlob(blob, mimeType, "image");
+    const mediaRef = params.storeInMediaCache === false ? "" : await storeMediaBlob(blob, mimeType, "image");
     throwIfAborted(params.signal);
     return {
       mediaRef,
@@ -984,9 +1000,9 @@ async function generateImageFromConfiguredApiInternal(params: {
     ? [
         "【身份参考图对应关系】",
         ...(collageLegend
-          ? [`参考图1是多人身份参考拼图，编号对应：${collageLegend}。只按编号参考对应人物的脸，不要互换、复制或融合不同角色的身份。`]
-          : referenceLabels.map((label, index) => `参考图${index + 1}对应：${label}。只参考该人物的身份特征，不代表固定服装或固定构图。`)),
-        "每位出镜人物都必须对应自己的参考图，不要互换、复制或融合不同角色的脸。"
+          ? [`参考图1是多人身份参考拼图，编号对应：${collageLegend}。只按编号参考对应人物的形象与画风，不要互换、复制或融合不同角色的身份。`]
+          : referenceLabels.map((label, index) => `参考图${index + 1}对应：${label}。该人物的形象和画风以这张图为准；姿势、表情和场景按本次描述。`)),
+        "每位出镜人物都必须对应自己的参考图，不要互换、复制或融合不同角色的脸；二次元参考图必须保持二次元画风，不得转成三次元写实。"
       ].join("\n")
     : "";
   const prompt = mergePrompt(

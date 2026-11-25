@@ -1,0 +1,39 @@
+name: Validate custom APP media and download bridge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+    paths:
+      - "components/app-market/custom-app-runner.tsx"
+      - "lib/custom-app-storage.ts"
+      - "lib/custom-app-types.ts"
+      - "lib/custom-app-permission-labels.ts"
+      - "lib/custom-app-creator-guide.ts"
+      - "lib/media-cache-storage.ts"
+      - "docs/custom-app-download-api.md"
+      - ".github/workflows/custom-app-media-validation.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-app-media-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Validate custom APP SDK contract
+        run: npm run check:sdk
+      - name: TypeScript type check
+        run: npx tsc --noEmit

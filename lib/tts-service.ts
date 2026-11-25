@@ -225,6 +225,34 @@ export function setTtsVolume(volume: number): void {
 // 上下文永久 resume，页面从第一次点击起就一直持有系统音频会话；叠加通话退出
 // 后识别泄漏，整页音频会被钉在"通话模式"（语音条/试听音量巨大且音量键失灵）。
 let _callAudioSessionActive = false;
+let _callAudioFocusUsers = 0;
+
+type CallAudioFocusBridge = {
+    requestCallAudioFocus?: () => boolean;
+    abandonCallAudioFocus?: () => boolean;
+};
+
+/** 仅在通话 TTS 真正播放时借用原生临时焦点；普通网页/旧版 APK 自动降级。 */
+function acquireCallAudioFocus(): boolean {
+    if (!_callAudioSessionActive || typeof window === "undefined") return false;
+    const bridge = (window as unknown as { AndroidShell?: CallAudioFocusBridge }).AndroidShell;
+    if (!bridge?.requestCallAudioFocus || !bridge.abandonCallAudioFocus) return false;
+    if (_callAudioFocusUsers === 0) {
+        try {
+            if (bridge.requestCallAudioFocus() !== true) return false;
+        } catch { return false; }
+    }
+    _callAudioFocusUsers += 1;
+    return true;
+}
+
+function releaseCallAudioFocus(held: boolean): void {
+    if (!held) return;
+    _callAudioFocusUsers = Math.max(0, _callAudioFocusUsers - 1);
+    if (_callAudioFocusUsers !== 0 || typeof window === "undefined") return;
+    const bridge = (window as unknown as { AndroidShell?: CallAudioFocusBridge }).AndroidShell;
+    try { bridge?.abandonCallAudioFocus?.(); } catch { /* 原生壳退出/旧版本时忽略 */ }
+}
 
 /** 通话界面挂载时置 true、卸载/挂断时置 false（false 时立即挂起空闲的上下文）。 */
 export function setCallAudioSessionActive(active: boolean): void {
@@ -359,6 +387,7 @@ export function playAudioBlobViaMediaElement(blob: Blob): { promise: Promise<voi
 }
 
 function playAudioBlobElement(blob: Blob): { promise: Promise<void>; abort: () => void } {
+    const callAudioFocusHeld = acquireCallAudioFocus();
     const url = URL.createObjectURL(blob);
     const audio = getSharedAudio();
     audio.muted = false;
@@ -381,6 +410,7 @@ function playAudioBlobElement(blob: Blob): { promise: Promise<void>; abort: () =
         audio.onloadedmetadata = null;
         URL.revokeObjectURL(url);
         try { audio.pause(); audio.removeAttribute("src"); audio.load(); } catch {}
+        releaseCallAudioFocus(callAudioFocusHeld);
         resolveFn();
     };
     // 播放被别的 App（如后台刷视频）抢走音频焦点时，浏览器只会发一个 pause，

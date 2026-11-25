@@ -4,6 +4,7 @@ import type {
   LifeEventStatus,
   LifeInvitation,
   LifeScheduleSlot,
+  LifeSceneParticipant,
   LifeSceneState,
   VirtualLifeState,
 } from "./life-types";
@@ -57,6 +58,61 @@ export function evaluateEncounterAwareness(input: EncounterPerception, seed = 0)
   if (adjusted >= 0.55) return "aware";
   if (adjusted >= 0.3) return "suspects";
   return "unaware";
+}
+
+/**
+ * Pick the foreground room deterministically. Legacy event-linked rooms are
+ * lower priority than ordinary location rooms when old data contains duplicates.
+ */
+export function findCurrentLifeScene(scenes: LifeSceneState[]): LifeSceneState | undefined {
+  return scenes.filter(scene => scene.status === "active" || scene.status === "paused").slice().sort((left, right) =>
+    Number(Boolean(left.eventId)) - Number(Boolean(right.eventId))
+    || Number(left.status === "paused") - Number(right.status === "paused")
+    || right.updatedAt.localeCompare(left.updatedAt)
+  )[0];
+}
+
+/**
+ * Resolve the canonical chat room for a location. Legacy event-linked rooms are
+ * compatibility data, not separate destinations; prefer a normal location room,
+ * then a reusable room over a completed legacy record.
+ */
+export function findLifeSceneForLocation(
+  scenes: LifeSceneState[],
+  locationId: string,
+  locationName?: string,
+): LifeSceneState | undefined {
+  return scenes
+    .filter(scene => scene.locationId === locationId || (!scene.locationId && !!locationName && scene.locationName === locationName))
+    .slice()
+    .sort((left, right) =>
+      Number(Boolean(left.eventId)) - Number(Boolean(right.eventId))
+      || Number(left.status === "completed") - Number(right.status === "completed")
+      || right.updatedAt.localeCompare(left.updatedAt)
+    )[0];
+}
+
+/**
+ * Merge the people already belonging to a destination room with newly arrived
+ * participants. Existing membership is kept; incoming activity/awareness refreshes
+ * matching members without creating duplicate participant records.
+ */
+export function mergeLifeSceneParticipants(
+  existing: LifeSceneParticipant[],
+  incoming: LifeSceneParticipant[],
+): LifeSceneParticipant[] {
+  const merged = new Map<string, LifeSceneParticipant>();
+  for (const participant of [...existing, ...incoming]) {
+    const key = participant.ownerType + ":" + participant.ownerId;
+    const previous = merged.get(key);
+    merged.set(key, previous ? {
+      ...previous,
+      ...participant,
+      activity: participant.activity || previous.activity,
+      awarenessByActorId: { ...previous.awarenessByActorId, ...participant.awarenessByActorId },
+    } : { ...participant, awarenessByActorId: { ...participant.awarenessByActorId } });
+  }
+  return [...merged.values()];
 }
 
 /**

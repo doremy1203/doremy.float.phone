@@ -894,6 +894,7 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchCursor, setSearchCursor] = useState(0);
+  const [pendingSearchJump, setPendingSearchJump] = useState<{ sessionId: string; messageId: string } | null>(null);
   const searchMatches = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return [];
@@ -937,20 +938,38 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
     clearToolsOpen, previewItem, previewOpen, editAttachMenuOpen, attachMenuOpen, drawerOpen,
   ]);
 
-  // 自动滚动：用户上滚阅读时不拉回底部
+  // 搜索结果可能位于另一个会话。先切换会话，再等目标消息真正挂载后定位，
+  // 不再依赖固定 160ms 延时（低端 WebView / 大会话加载时经常来不及）。
   const jumpToSearchMatch = useCallback((index: number) => {
     const match = searchMatches[index];
     if (!match) return;
     setSearchCursor(index);
+    setPendingSearchJump({ sessionId: match.sessionId, messageId: match.message.id });
     if (match.sessionId !== snapshot.activeSessionId) {
       switchQaSession(match.sessionId);
       setDrawerOpen(false);
     }
-    window.setTimeout(() => {
-      const node = bodyRef.current?.querySelector<HTMLElement>(`[data-qa-message-id="${match.message.id.replace(/"/g, '\"')}"]`);
-      node?.scrollIntoView({ block: "center", behavior: "smooth" });
-    }, 160);
   }, [searchMatches, snapshot.activeSessionId]);
+
+  useEffect(() => {
+    if (!pendingSearchJump || snapshot.activeSessionId !== pendingSearchJump.sessionId) return;
+    let attempts = 0;
+    let frame = 0;
+    const locate = () => {
+      const nodes = bodyRef.current?.querySelectorAll<HTMLElement>("[data-qa-message-id]");
+      const target = nodes ? Array.from(nodes).find(node => node.dataset.qaMessageId === pendingSearchJump.messageId) : null;
+      if (target) {
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+        setPendingSearchJump(null);
+        return;
+      }
+      attempts += 1;
+      if (attempts < 12) frame = window.requestAnimationFrame(locate);
+      else setPendingSearchJump(null);
+    };
+    frame = window.requestAnimationFrame(locate);
+    return () => window.cancelAnimationFrame(frame);
+  }, [pendingSearchJump, snapshot.activeSessionId, messages]);
 
   const handleScroll = useCallback(() => {
     const el = bodyRef.current;
@@ -1160,9 +1179,9 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
       </header>
 
       {searchOpen && (
-        <div className="qa-search-panel" style={{ margin: "0 12px 8px", padding: 10, borderRadius: 12, background: "rgba(128,128,128,.08)", display: "grid", gap: 8 }}>
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <input value={searchQuery} onChange={event => { setSearchQuery(event.target.value); setSearchCursor(0); }} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); jumpToSearchMatch(searchCursor); } }} placeholder="搜索全部对话的关键词…" autoFocus style={{ flex: 1, minWidth: 0, padding: "8px 10px", borderRadius: 9, border: "1px solid var(--border, #ddd)", background: "var(--surface, #fff)", fontSize: 13 }} />
+        <div className="qa-search-panel">
+          <div className="qa-search-controls">
+            <input className="qa-search-input" value={searchQuery} onChange={event => { setSearchQuery(event.target.value); setSearchCursor(0); }} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); jumpToSearchMatch(searchCursor); } }} placeholder="搜索全部对话的关键词…" autoFocus />
             <button type="button" onClick={() => jumpToSearchMatch(Math.max(0, searchCursor - 1))} disabled={!searchMatches.length} className="qa-icon-btn" aria-label="上一个匹配">‹</button>
             <button type="button" onClick={() => jumpToSearchMatch(Math.min(searchMatches.length - 1, searchCursor + 1))} disabled={!searchMatches.length} className="qa-icon-btn" aria-label="下一个匹配">›</button>
             <button type="button" onClick={() => { setSearchOpen(false); setSearchQuery(""); }} className="qa-icon-btn" aria-label="关闭搜索">×</button>
@@ -1173,9 +1192,9 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
             </div>
           )}
           {searchMatches.length > 0 && (
-            <div style={{ display: "grid", gap: 4, maxHeight: 170, overflowY: "auto" }}>
+            <div className="qa-search-results">
               {searchMatches.map((match, index) => (
-                <button key={match.sessionId + ":" + match.message.id} type="button" onClick={() => jumpToSearchMatch(index)} style={{ textAlign: "left", padding: "7px 9px", borderRadius: 8, background: index === searchCursor ? "rgba(184,135,104,.18)" : "transparent", border: 0, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <button key={match.sessionId + ":" + match.message.id} type="button" onClick={() => jumpToSearchMatch(index)} aria-current={index === searchCursor ? "true" : undefined} className={`qa-search-result ${index === searchCursor ? "is-active" : ""}`}>
                   <span style={{ opacity: .55, marginRight: 6 }}>{match.sessionTitle}</span>
                   {match.message.content.trim().slice(0, 120)}
                 </button>

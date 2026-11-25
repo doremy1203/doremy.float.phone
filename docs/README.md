@@ -13,7 +13,7 @@
 ### 自部署者
 
 - [根目录环境变量模板](../.env.example)：变量名称和用途的当前入口；实际部署还需检查 Netlify/Supabase 控制台配置。
-- [云端生活日程说明](./cloud-life-scheduler.md)：生活日程快照、Edge Function、Cron 和当前主动消息开关状态。
+- [云端生活日程说明](./cloud-life-scheduler.md)：生活日程快照、Edge Function、Cron、主动消息任务链、通知形态与前后台让行规则。
 - [站点云一键初始化 SQL](./supabase-all-in-one.sql)：账号、审核、便签墙、游戏/应用市场、举报、联机和现实桥相关站点表；不会部署个人推送云，也不会自动开放成年审核申请。
 - [账号与激活码 SQL](./account-supabase.sql)：账号、会话和激活码基础表。
 - [个人云推送 SQL](./personal-push-supabase.sql)：个人推送、生活日程运行态与 Cron；新部署优先走应用内「云服务部署」。
@@ -32,6 +32,10 @@
 - [公开分享发布门禁](./公开分享发布门禁.md)：发布前检查项；门禁文档不代表所有检查已通过。
 - [历史开发差异台账](./从诊断开始的开发差异台账.md)：2026-10-24 的阶段性对照记录，基线已过期，仅供追溯历史，不应用作当前版本结论。
 - [Android Shell 诊断](../android-shell/DIAGNOSTICS.md)：跨网页、原生和服务端链路的证据收集方式。
+- [自定义 App → 内置 App 转换指南](./custom-app-to-builtin-porting-guide.md)：把市场 zip 应用内置化的通用七步流程、沙盒边界与验收清单（以 heartcraft 为范本）。
+- [角色陪伴专注内置化迁移方案](./focus-companion-builtin-migration-plan.md)：doris.focus.companion 的专项迁移决策、APK 专属功能替换清单、分级锁机设计（含角色审批制白名单与随机查岗惩罚）与壁纸自动生成 bug 的诊断修复。
+- [角色陪伴专注移植日志](./focus-companion-porting-log.md)：M1 内置化的改动清单、运行时链路、本地验证矩阵与 CI 记录。
+- [角色陪伴专注 UI 精简与美化方案](./focus-companion-ui-polish-plan.md)：文案三级规范、帮助中心页设计、入口收敛清单与分批实施（布局不动）。
 
 ### 专题技术资料与历史记录
 

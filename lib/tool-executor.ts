@@ -19,13 +19,14 @@ import {
     saveRestTools,
     saveRestToolPackages,
     expandToolNameMacros,
+    getEnabledTools,
     toolNameMatches,
 } from "./tool-storage";
 import { executeCustomAppToolCall } from "./custom-app-tool-runtime";
 import { executeLifeToolCall } from "./life/life-tools";
 import { appendLifeTimelineEntry, loadVirtualLifeState, saveVirtualLifeState } from "./life/life-storage";
 import { characterWorkspace, agentComputerRequest, isAgentComputerConfigured } from "./agent-computer";
-import { AGENT_COMPUTER_CAPABILITY_ID, CHECK_IN_REQUEST_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PHOTO_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, PHONE_WIDGET_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, SYSTEM_CALENDAR_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import { MEMO_CAPABILITY_ID, AGENT_COMPUTER_CAPABILITY_ID, CHECK_IN_REQUEST_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PHOTO_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, PHONE_WIDGET_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, SYSTEM_CALENDAR_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability, getInternalCapabilitySubToolDefinitions } from "./internal-capability-storage";
 import { createPhotoWallId, loadPhotoWallState, savePhotoWallState, type PhotoWallDoodle, type PhotoWallCreationRecord, type PhotoWallPhoto } from "./photo-wall-storage";
 import { generateImageFromConfiguredApi } from "./image-generation-service";
 import {
@@ -58,6 +59,8 @@ import { createShortcutCommand, deliverShortcutCommand, waitForShortcutCommand }
 import { loadMemoryEntriesByType, saveMemoryEntry } from "./memory-storage";
 import type { MemoryEntry } from "./memory-types";
 import { loadCharacters } from "./character-storage";
+import { loadChatSessions } from "./chat-storage";
+import { makeNativeToolName } from "./native-tool-name";
 import {
     deleteCalendarScheduleItem,
     loadCalendarWeekPlan,
@@ -263,6 +266,36 @@ async function proxyFetch(
     } finally {
         if (timeoutId) clearTimeout(timeoutId);
     }
+}
+
+export async function testBuiltinSearchConnection(
+    provider: "deepseek" | "tavily",
+    apiKey: string,
+): Promise<{ resultCount: number; message: string }> {
+    const key = apiKey.trim();
+    if (!key) throw new Error("请先填写 API Key。");
+    const url = provider === "deepseek" ? "https://api.deepseek.com/v1/tools/search" : "https://api.tavily.com/search";
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const body = provider === "deepseek"
+        ? { query: "OpenAI", count: 1, need_content: false }
+        : { api_key: key, query: "OpenAI", search_depth: "basic", max_results: 1, include_answer: false };
+    if (provider === "deepseek") headers.Authorization = "Bearer " + key;
+    const response = await proxyFetch(url, { method: "POST", headers, body, timeoutMs: 20000 });
+    let payload: Record<string, unknown> = {};
+    try { payload = JSON.parse(response.text) as Record<string, unknown>; }
+    catch {
+        if (response.status < 200 || response.status >= 300) throw new Error("接口返回 HTTP " + response.status + "：" + response.text.slice(0, 240));
+        throw new Error("接口返回了无法识别的数据，请检查代理或服务商接口。");
+    }
+    if (response.status < 200 || response.status >= 300) {
+        const error = payload.error;
+        const detail = typeof error === "string" ? error : error && typeof error === "object" && "message" in error
+            ? String((error as { message?: unknown }).message || JSON.stringify(error))
+            : String(payload.message || payload.detail || response.text);
+        throw new Error("HTTP " + response.status + "：" + detail.slice(0, 240));
+    }
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    return { resultCount: results.length, message: results.length ? "连接成功，已返回 " + results.length + " 条搜索结果。" : "接口连接成功，但测试关键词没有返回结果。" };
 }
 
 // 直连模式：浏览器直接请求 MCP（本机/局域网地址服务端代理天然不可达且被 SSRF 防线拦截）。
@@ -537,12 +570,94 @@ function buildToolNameMacroContext(context?: ToolExecutionContext) {
     return { characterName, userName };
 }
 
+/**
+ * Recover native provider names when they leak across a text-protocol or persisted
+ * reality-bridge boundary. The registry is rebuilt from the same enabled-tool
+ * snapshot and registration order used by buildNativeChatTools; no suffix stripping
+ * or guessed tool-name matching is allowed.
+ */
+function resolveNativeToolCall(call: ToolCall, context?: ToolExecutionContext): ToolCall {
+    const requested = call.name.trim();
+    if (!/^action_?[a-z0-9]{1,16}$/i.test(requested)) return call;
+
+    const enabledTools = getEnabledTools(context?.appId ?? "chat");
+    if (enabledTools.length === 0) return call;
+    const macroContext = buildToolNameMacroContext(context);
+    const expandedSourceIds = new Set(
+        context?.sessionId
+            ? loadChatSessions().find(session => session.id === context.sessionId)?.nativeExpandedToolSourceIds || []
+            : [],
+    );
+    const usedNames = new Set<string>();
+    const aliases = new Map<string, string>();
+
+    const expandedName = (name: string) => expandToolNameMacros(name, macroContext);
+    const register = (displayName: string, canonicalName: string) => {
+        const nativeName = makeNativeToolName(expandedName(displayName), usedNames);
+        aliases.set(nativeName, canonicalName);
+    };
+    const reserveLoader = (sourceKey: string, displayName: string) => {
+        makeNativeToolName(`load_${sourceKey}_${expandedName(displayName)}_tools`, usedNames);
+    };
+    const sourceKey = (tool: { source: string; sourceId: string }) => `${tool.source}:${tool.sourceId}`;
+
+    // First pass mirrors the initial native-tool registration order, including loader
+    // names because they participate in collision suffix allocation.
+    for (const tool of enabledTools) {
+        const capability = tool.source === "internal" ? getInternalCapability(tool.sourceId) : undefined;
+        const subTools = capability ? getInternalCapabilitySubToolDefinitions(capability) : [];
+        const isSingle = tool.source === "life"
+            || tool.source === "rest"
+            || tool.source === "composite"
+            || tool.source === "custom_app"
+            || (tool.source === "internal" && subTools.length === 0);
+        if (isSingle) {
+            register(tool.name, tool.name);
+        } else {
+            reserveLoader(sourceKey(tool), tool.name);
+        }
+    }
+
+    // Second pass mirrors expanded package/sub-tool registration. Only packages
+    // actually expanded in this chat session contribute names and collision suffixes.
+    for (const tool of enabledTools) {
+        const key = sourceKey(tool);
+        if (tool.source === "rest_package" && expandedSourceIds.has(key)) {
+            for (const child of tool.restTools || []) register(child.name, child.name);
+        } else if (tool.source === "composite_package" && expandedSourceIds.has(key)) {
+            for (const child of tool.compositeTools || []) register(child.name, child.name);
+        } else if (tool.source === "mcp_server" && expandedSourceIds.has(key)) {
+            for (const child of tool.mcpTools || []) register(child.name, child.name);
+        } else if (tool.source === "custom_app_package" && expandedSourceIds.has(key)) {
+            for (const child of tool.customAppTools || []) register(child.name, child.name);
+        } else if (tool.source === "internal") {
+            const capability = getInternalCapability(tool.sourceId);
+            const subTools = capability ? getInternalCapabilitySubToolDefinitions(capability) : [];
+            for (const child of subTools) register(child.name, child.name);
+        }
+    }
+
+    const exact = aliases.get(requested) || aliases.get(requested.toLowerCase());
+    if (exact) return { ...call, name: exact };
+
+    // Some providers strip underscores from function names. Accept that variant only
+    // when it identifies exactly one registered native name; never remove collision
+    // suffixes or guess between multiple tools.
+    const compact = requested.toLowerCase().replace(/_/g, "");
+    const matches = [...aliases.entries()]
+        .filter(([nativeName]) => nativeName.toLowerCase().replace(/_/g, "") === compact)
+        .map(([, canonicalName]) => canonicalName);
+    const uniqueMatches = [...new Set(matches)];
+    return uniqueMatches.length === 1 ? { ...call, name: uniqueMatches[0] } : call;
+}
+
 async function executeSingleToolCall(
     call: ToolCall,
     context: ToolExecutionContext | undefined,
     hint: ToolExecutionHint,
 ): Promise<ToolResult> {
     throwIfAborted(context?.signal);
+    call = resolveNativeToolCall(call, context);
     const preferredType = hint.toolType && hint.toolType !== "auto" && hint.toolType !== "script" ? hint.toolType : undefined;
     const restTools = loadRestTools();
     const restPackages = loadRestToolPackages();
@@ -863,6 +978,7 @@ function normalizeInternalToolResult(result: ToolResult): ToolResult {
 }
 
 async function executeInternalTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult | null> {
+    if (["翻看备忘录","阅读备忘录","新建备忘录","修改备忘录","整理待办","整理档案盒","翻阅归档","删除备忘录","完成备忘录维护"].includes(call.name)) return executeMemoTool(call, context);
     if (isNoteWallToolName(call.name)) return executeNoteWallTool(call, context);
     if (isPhotoWallToolName(call.name)) return executePhotoWallTool(call, context);
     if (isMusicControlToolName(call.name)) return executeMusicControlTool(call, context);
@@ -899,6 +1015,83 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     }
 
     return executeMemoryWriteTool(call.args, capability, context);
+}
+
+async function executeMemoTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+    const capability = getInternalCapability(MEMO_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") return { name: call.name, success: false, error: "备忘录能力未启用" };
+    if (context?.appId !== "chat" || !context.characterId) return { name: call.name, success: false, error: "备忘录工具仅允许在一对一私聊中使用" };
+    const owner = { type: "character" as const, id: context.characterId };
+    try {
+        const memo = await import("./memo-archive-storage");
+        const own = await memo.loadMemoArchive(owner, "all");
+        const shared = await memo.readSharedMemoNotes(context.characterId);
+        const all = [...own.notes.filter(n => !n.deletedAt && !n.archived), ...shared.filter(n => !n.archived)];
+        const noteId = String(call.args?.noteId ?? "");
+        if (call.name === "翻看备忘录") {
+            const q = String(call.args?.query ?? "").trim().toLowerCase();
+            const limit = Math.max(1, Math.min(30, Number(call.args?.limit) || 12));
+            const rows = all.filter(n => !q || (n.title + n.body + n.tags.join(" ")).toLowerCase().includes(q)).slice(0, limit);
+            return { name: call.name, success: true, data: rows.length ? rows.map(n => `noteId=${n.id}；标题=${n.title}；摘要=${n.body.slice(0,100)}；标签=${n.tags.join("、")}；来源=${n.owner.type==="user"?"用户分享（只读）":"我的档案"}`).join("\n") : "没有找到相关备忘录。" };
+        }
+        if (call.name === "阅读备忘录") {
+            const n = all.find(x => x.id === noteId); if (!n) return { name: call.name, success: false, error: "备忘录不存在或未向你分享" };
+            return { name: call.name, success: true, data: `标题：${n.title}\n正文：\n${n.body}\n待办：\n${n.todos.map(t=>(t.done?"[x] ":"[ ] ")+t.text).join("\n")}` };
+        }
+        if (call.name === "新建备忘录") {
+            const title = String(call.args?.title ?? "").trim(), body = String(call.args?.body ?? "");
+            if (!title || !body) return { name: call.name, success: false, error: "新建备忘录需要 title 和 body" };
+            const duplicate = own.notes.find(n => !n.deletedAt && n.title.trim().toLowerCase() === title.toLowerCase());
+            if (duplicate) return { name: call.name, success: false, error: `已存在同名备忘录 noteId=${duplicate.id}，请先阅读或修改，不要重复创建。` };
+            const n = await memo.saveMemoNote(owner, { title, body, tags: Array.isArray(call.args?.tags) ? call.args.tags.map(String) : [] });
+            return { name: call.name, success: true, data: `已创建备忘录：${n.title}（noteId=${n.id}）` };
+        }
+        if (call.name === "修改备忘录") {
+            const n = own.notes.find(x => x.id === noteId && !x.deletedAt); if (!n) return { name: call.name, success: false, error: "只能修改自己的备忘录；用户分享内容只读。" };
+            const nextBody = call.args?.body === undefined ? n.body : call.args?.append === true ? n.body + "\n" + String(call.args.body) : String(call.args.body);
+            const updated = await memo.saveMemoNote(owner, { ...n, title: call.args?.title === undefined ? n.title : String(call.args.title), body: nextBody });
+            return { name: call.name, success: true, data: `已更新：${updated.title}` };
+        }
+        if (call.name === "整理待办") {
+            if (call.args?.items !== undefined || call.args?.text) {
+                const rawItems = Array.isArray(call.args?.items) ? call.args.items : [call.args?.text];
+                const items = rawItems.map((item: unknown) => typeof item === "string" ? item : item && typeof item === "object" ? String((item as {text?:unknown}).text ?? "") : "").filter((item: string) => item.trim());
+                if (!items.length) return { name: call.name, success: false, error: "items 至少需要包含一条有效 text" };
+                const result = await memo.appendMemoTodos(owner, noteId || undefined, items);
+                return { name: call.name, success: true, data: `已批量整理待办，当前共 ${result.count} 项。新增事项已追加，原有事项不会被覆盖。` };
+            }
+            const n = own.notes.find(x => x.id === noteId && !x.deletedAt); if (!n) return { name: call.name, success: false, error: "更新已有待办时需要有效 noteId。" };
+            const todos = call.args?.todoId ? n.todos.map(t => t.id === call.args.todoId ? { ...t, done: call.args?.done !== false, completedAt: call.args?.done === false ? undefined : Date.now() } : t) : n.todos;
+            await memo.saveMemoNote(owner, { ...n, todos });
+            return { name: call.name, success: true, data: `待办已更新。未完成 ${todos.filter(t=>!t.done).length} 项。` };
+        }
+        if (call.name === "整理档案盒") {
+            if (call.args?.action === "rename" && call.args?.folderId) {
+                await memo.updateMemoFolder(String(call.args.folderId), owner, { name: String(call.args.name ?? "") });
+                return { name: call.name, success: true, data: "档案盒已重命名。" };
+            }
+            const folder = await memo.createMemoFolder(owner, String(call.args?.name ?? ""));
+            return { name: call.name, success: true, data: `已创建档案盒 ${folder.name}（folderId=${folder.id}）` };
+        }
+        if (call.name === "翻阅归档") {
+            const rows = own.notes.filter(n => n.archived && !n.deletedAt).slice(0, Math.max(1, Math.min(30, Number(call.args?.limit)||12)));
+            return { name: call.name, success: true, data: rows.map(n=>`noteId=${n.id}；${n.title}；${n.body.slice(0,100)}`).join("\n") || "暂无归档内容。" };
+        }
+        if (call.name === "完成备忘录维护") {
+            const ids = Array.isArray(call.args?.reviewedNoteIds) ? call.args.reviewedNoteIds.map(String) : [];
+            const summary = String(call.args?.summary ?? "");
+            const changes = Array.isArray(call.args?.changes) ? call.args.changes.map(String) : [];
+            const record = await memo.recordMemoMaintenanceResult(context.characterId, ids, summary, changes);
+            return { name: call.name, success: true, data: `维护结果已保存：检查 ${record.reviewedNoteIds.length} 条手记，${record.changes.length ? "实际变更 " + record.changes.length + " 项" : "无需修改"}。未检查的手记仍保留待维护状态。` };
+        }
+        if (call.name === "删除备忘录") {
+            await memo.moveMemoToRecycleBin(noteId, owner);
+            return { name: call.name, success: true, data: "已移入回收站，可在私人档案室恢复或永久删除。" };
+        }
+        return { name: call.name, success: false, error: "未知备忘录动作" };
+    } catch (error) {
+        return { name: call.name, success: false, error: error instanceof Error ? error.message : String(error) };
+    }
 }
 
 /**
@@ -3930,14 +4123,44 @@ async function executeRestTool(tool: RestToolConfig, args: Record<string, unknow
             else if (v !== "" && !isNaN(Number(v))) { typedFixed[k] = Number(v); }
             else { typedFixed[k] = v; }
         }
+        const isBuiltinSearch = tool.id === "builtin_search";
+        const searchProvider = isBuiltinSearch
+            ? (tool.fixedParams?.provider === "tavily" ? "tavily" : "deepseek")
+            : "";
+        const searchApiKey = isBuiltinSearch ? String(tool.fixedParams?.api_key || "").trim() : "";
+        if (isBuiltinSearch && !searchApiKey) {
+            return { name: tool.name, success: false, error: searchProvider === "deepseek"
+                ? "请先在工具箱 → 搜索中填写 DeepSeek API Key。"
+                : "请先在工具箱 → 搜索中填写 Tavily API Key。" };
+        }
+        const searchQuery = typeof args.query === "string" ? args.query.trim() : "";
+        if (isBuiltinSearch && !searchQuery) {
+            return { name: tool.name, success: false, error: "搜索关键词不能为空。" };
+        }
+        const requestMethod: "GET" | "POST" = isBuiltinSearch ? "POST" : tool.method;
         const mergedArgs = { ...args, ...typedFixed };
         const consumedKeys = new Set<string>();
         const headers: Record<string, string> = renderRestHeaders({ ...tool.headers }, mergedArgs, consumedKeys);
 
-        let url = renderTemplateString(tool.endpoint, mergedArgs, consumedKeys, { encodeForUrl: true });
+        let url = isBuiltinSearch
+            ? (searchProvider === "tavily" ? "https://api.tavily.com/search" : "https://api.deepseek.com/v1/tools/search")
+            : renderTemplateString(tool.endpoint, mergedArgs, consumedKeys, { encodeForUrl: true });
         let body: unknown = undefined;
 
-        if (tool.method === "GET") {
+        if (isBuiltinSearch) {
+            if (searchProvider === "deepseek") {
+                headers.Authorization = `Bearer ${searchApiKey}`;
+                body = { query: searchQuery.slice(0, 128), count: 5, need_content: true };
+            } else {
+                body = {
+                    api_key: searchApiKey,
+                    query: searchQuery,
+                    search_depth: "basic",
+                    max_results: 5,
+                    include_answer: false,
+                };
+            }
+        } else if (requestMethod === "GET") {
             const params = new URLSearchParams();
             for (const [k, v] of Object.entries(mergedArgs)) {
                 if (!consumedKeys.has(k) && v !== undefined && v !== "") params.set(k, String(v));
@@ -3953,17 +4176,18 @@ async function executeRestTool(tool: RestToolConfig, args: Record<string, unknow
                 ? renderRestBodyTemplate(tool.bodyTemplate.trim(), mergedArgs, consumedKeys)
                 : mergedArgs;
         }
+        if (isBuiltinSearch) headers["Content-Type"] = "application/json";
 
         let resStatus: number;
         let resText: string;
         let binaryAttachments: MediaAttachment[] | undefined;
 
-        if (tool.directFetch ?? true) {
+        if (!isBuiltinSearch && (tool.directFetch ?? true)) {
             const controller = new AbortController();
             const detachExternalAbort = attachAbortSignal(controller, signal);
             const timeout = setTimeout(() => controller.abort(), 120_000);
-            const fetchOptions: RequestInit = { method: tool.method, headers, signal: controller.signal };
-            if (body !== undefined && tool.method !== "GET") {
+            const fetchOptions: RequestInit = { method: requestMethod, headers, signal: controller.signal };
+            if (body !== undefined && requestMethod !== "GET") {
                 fetchOptions.body = JSON.stringify(body);
             }
             let res: Response;
@@ -4016,7 +4240,7 @@ async function executeRestTool(tool: RestToolConfig, args: Record<string, unknow
                 throwIfAborted(signal);
             }
         } else {
-            const res = await proxyFetch(url, { method: tool.method, headers, body, signal });
+            const res = await proxyFetch(url, { method: requestMethod, headers, body, signal });
             resStatus = res.status;
             if (resStatus >= 200 && resStatus < 300) {
                 try {
@@ -4072,6 +4296,29 @@ async function executeRestTool(tool: RestToolConfig, args: Record<string, unknow
                 data: `${unique.join("/")}已自动发送给用户（共 ${binaryAttachments.length} 个）。不要再用文字标签描述或重复发送。`,
                 mediaAttachments: binaryAttachments,
             };
+        }
+
+        if (isBuiltinSearch && searchProvider === "deepseek") {
+            try {
+                const payload = JSON.parse(resText) as { results?: Array<{
+                    title?: string; url?: string; snippet?: string; summary?: string; content?: string; date?: string; site_name?: string;
+                }> };
+                const results = Array.isArray(payload.results) ? payload.results.slice(0, 5) : [];
+                resText = results.length
+                    ? results.map((item, index) => {
+                        const summary = String(item.summary || item.snippet || item.content || "").trim().slice(0, 420);
+                        return [
+                            `[${index + 1}] ${item.title || "搜索结果"}`,
+                            item.site_name ? `来源：${item.site_name}` : "",
+                            item.date ? `发布时间：${item.date}` : "",
+                            item.url ? `链接：${item.url}` : "",
+                            summary ? `摘要：${summary}` : "",
+                        ].filter(Boolean).join("\\n");
+                    }).join("\\n\\n")
+                    : "DeepSeek 搜索没有返回匹配结果。";
+            } catch {
+                // Keep the upstream response intact so the normal error/result path can explain it.
+            }
         }
 
         const { text: processed, attachments } = await replaceBase64WithRefs(resText, signal);

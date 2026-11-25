@@ -20,8 +20,12 @@ registerKvMigration(CONFIG_KEY);
 registerKvMigration(RUNTIME_KEY);
 
 /** 单个角色的查岗设置。 */
+export type CheckInTriggerMode = "background" | "any";
+
 export type CheckInCharacterConfig = {
   enabled: boolean;
+  /** 仅后台触发，或前后台均可触发。 */
+  triggerMode: CheckInTriggerMode;
   /** 触发间隔下限（分钟） */
   minMinutes: number;
   /** 触发间隔上限（分钟）；等于 minMinutes 即固定间隔 */
@@ -34,6 +38,10 @@ export type CheckInCharacterConfig = {
 export type CheckInRuntime = {
   /** 上次触发时刻（毫秒）；0 = 从未触发 */
   lastFiredAt: number;
+  /** 下次允许触发的墙钟时间（仅 any 模式）。 */
+  nextDueAt: number;
+  /** 下次允许触发时累计的后台毫秒数（仅 background 模式）。 */
+  nextDueBackgroundMs: number;
   /** 计数所属的日期（YYYY-MM-DD）；跨天就重置计数 */
   dayKey: string;
   /** 当天已触发次数 */
@@ -42,6 +50,7 @@ export type CheckInRuntime = {
 
 export const CHECK_IN_DEFAULTS: CheckInCharacterConfig = {
   enabled: false,
+  triggerMode: "background",
   minMinutes: 30,
   maxMinutes: 90,
   dailyLimit: 3,
@@ -76,6 +85,8 @@ function normalizeCharacter(raw: unknown): CheckInCharacterConfig {
   return {
     // 必须显式 true 才算开——查岗是「角色主动看你屏幕」，缺省绝不能是开
     enabled: source.enabled === true,
+    // 旧配置没有该字段时迁移到更符合查岗定位的「仅后台」。
+    triggerMode: source.triggerMode === "any" ? "any" : "background",
     minMinutes,
     maxMinutes,
     dailyLimit: clampNumber(
@@ -114,8 +125,15 @@ export function loadCharacterCheckIn(characterId: string): CheckInCharacterConfi
 /** 写某个角色的配置。 */
 export function saveCharacterCheckIn(characterId: string, patch: Partial<CheckInCharacterConfig>): CheckInCharacterConfig {
   const all = loadCheckInConfig();
-  const next = normalizeCharacter({ ...(all[characterId] ?? CHECK_IN_DEFAULTS), ...patch });
+  const previous = all[characterId] ?? CHECK_IN_DEFAULTS;
+  const next = normalizeCharacter({ ...previous, ...patch });
   all[characterId] = next;
+  if (patch.enabled !== undefined || patch.triggerMode !== undefined || patch.minMinutes !== undefined || patch.maxMinutes !== undefined) {
+    const runtime = loadCheckInRuntime();
+    const current = readCharacterRuntime(characterId);
+    runtime[characterId] = { ...current, nextDueAt: 0, nextDueBackgroundMs: 0 };
+    saveCheckInRuntime(runtime);
+  }
   kvSet(CONFIG_KEY, JSON.stringify(all));
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent("check-in-config-changed"));
@@ -168,17 +186,30 @@ export function readCharacterRuntime(characterId: string): CheckInRuntime {
   const entry = loadCheckInRuntime()[characterId];
   const day = todayKey();
   if (!entry || entry.dayKey !== day) {
-    return { lastFiredAt: entry?.lastFiredAt ?? 0, dayKey: day, countToday: 0 };
+    return { lastFiredAt: entry?.lastFiredAt ?? 0, nextDueAt: entry?.nextDueAt ?? 0, nextDueBackgroundMs: entry?.nextDueBackgroundMs ?? 0, dayKey: day, countToday: 0 };
   }
-  return entry;
+  // 兼容旧版运行态：新增字段缺失时统一补 0，避免 undefined 破坏首次调度。
+  return {
+    ...entry,
+    nextDueAt: Number.isFinite(entry.nextDueAt) ? entry.nextDueAt : 0,
+    nextDueBackgroundMs: Number.isFinite(entry.nextDueBackgroundMs) ? entry.nextDueBackgroundMs : 0,
+  };
 }
 
-/** 记一次触发（更新上次时间与当日计数）。 */
-export function markCheckInFired(characterId: string): void {
+/** 记一次已发起的查岗，并为下一轮固定抽取一次间隔。 */
+export function markCheckInFired(
+  characterId: string,
+  config: CheckInCharacterConfig = loadCharacterCheckIn(characterId),
+  backgroundElapsedMs = 0,
+): void {
   const runtime = loadCheckInRuntime();
   const current = readCharacterRuntime(characterId);
+  const now = Date.now();
+  const delayMs = randomCheckInDelayMinutes(config) * 60_000;
   runtime[characterId] = {
-    lastFiredAt: Date.now(),
+    lastFiredAt: now,
+    nextDueAt: config.triggerMode === "any" ? now + delayMs : 0,
+    nextDueBackgroundMs: config.triggerMode === "background" ? backgroundElapsedMs + delayMs : 0,
     dayKey: current.dayKey,
     countToday: current.countToday + 1,
   };
@@ -202,6 +233,7 @@ export function resetCheckInRuntime(characterId: string): void {
  */
 export type CheckInScheduleSnapshot = {
   enabled: boolean;
+  triggerMode: CheckInTriggerMode;
   minMinutes: number;
   maxMinutes: number;
   dailyLimit: number;
@@ -227,6 +259,7 @@ export function readCheckInScheduleSnapshot(
     : -1;
   return {
     enabled: config.enabled,
+    triggerMode: config.triggerMode,
     minMinutes: config.minMinutes,
     maxMinutes: config.maxMinutes,
     dailyLimit: config.dailyLimit,
@@ -252,16 +285,61 @@ export function randomCheckInDelayMinutes(config: CheckInCharacterConfig): numbe
  * 三个条件缺一不可：开着、今天没超上限、距上次触发够久了。
  * 「够久」用随机间隔——固定节拍像定时器，真人是忽快忽慢的。
  */
+export type CheckInAppState = {
+  available: boolean;
+  foreground: boolean;
+  backgroundElapsedMs: number;
+};
+
+/** 确保本轮随机目标只抽取一次；后台模式按原生累计后台时长计时。 */
+export function ensureCheckInDueTime(
+  characterId: string,
+  config: CheckInCharacterConfig,
+  now = Date.now(),
+  appState?: CheckInAppState,
+): CheckInRuntime {
+  const runtime = readCharacterRuntime(characterId);
+  if (config.triggerMode === "background") {
+    if (runtime.nextDueBackgroundMs <= 0 && appState?.available) {
+      const all = loadCheckInRuntime();
+      const next = {
+        ...runtime,
+        nextDueBackgroundMs: appState.backgroundElapsedMs + randomCheckInDelayMinutes(config) * 60_000,
+        nextDueAt: 0,
+      };
+      all[characterId] = next;
+      saveCheckInRuntime(all);
+      return next;
+    }
+    return runtime;
+  }
+  if (runtime.nextDueAt <= 0) {
+    const all = loadCheckInRuntime();
+    const next = {
+      ...runtime,
+      nextDueAt: now + randomCheckInDelayMinutes(config) * 60_000,
+      nextDueBackgroundMs: 0,
+    };
+    all[characterId] = next;
+    saveCheckInRuntime(all);
+    return next;
+  }
+  return runtime;
+}
+
 export function shouldFireCheckIn(
   characterId: string,
   config: CheckInCharacterConfig,
   now = Date.now(),
+  appState?: CheckInAppState,
 ): boolean {
   if (!config.enabled) return false;
-  const runtime = readCharacterRuntime(characterId);
+  const runtime = ensureCheckInDueTime(characterId, config, now, appState);
   if (runtime.countToday >= config.dailyLimit) return false;
-  if (runtime.lastFiredAt <= 0) return true;
-  const elapsedMinutes = (now - runtime.lastFiredAt) / 60_000;
-  const threshold = randomCheckInDelayMinutes(config);
-  return elapsedMinutes >= threshold;
+  if (config.triggerMode === "background") {
+    return Boolean(appState?.available && !appState.foreground
+      && runtime.nextDueBackgroundMs > 0
+      && appState.backgroundElapsedMs >= runtime.nextDueBackgroundMs);
+  }
+  return runtime.nextDueAt > 0 && now >= runtime.nextDueAt;
 }

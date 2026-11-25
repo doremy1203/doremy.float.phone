@@ -50,13 +50,15 @@ const DAILY_ALLOWED = 20;
 function describeSchedule(s: CheckInScheduleSnapshot): string {
   if (!s.enabled) return "这个角色没开查岗";
   if (s.dailyReached) return `今天已经查过 ${s.countToday} 次，到上限了，明天恢复`;
-  if (s.lastFiredAt <= 0) return "还一次都没查过——下一次扫描就会轮到（最长等一分钟）";
-  if (s.due) return `已到点，下一次扫描就会弹（上次是 ${s.minutesSinceLast} 分钟前）`;
-  const minLeft = Math.max(1, s.minMinutes - s.minutesSinceLast);
-  const maxLeft = Math.max(minLeft, s.maxMinutes - s.minutesSinceLast);
-  return minLeft === maxLeft
-    ? `再过约 ${minLeft} 分钟`
-    : `再过 ${minLeft}~${maxLeft} 分钟（随机取一个）`;
+  if (s.lastFiredAt <= 0) {
+    return s.triggerMode === "background"
+      ? "首次进入后台后开始累计随机间隔"
+      : "首次启用后开始累计随机间隔";
+  }
+  if (s.due) return `已到点，等待下一次有效扫描（上次是 ${s.minutesSinceLast} 分钟前）`;
+  return s.triggerMode === "background"
+    ? "只累计 App 真正处于后台的时间"
+    : "按实际经过时间等待下一次查岗";
 }
 
 export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void }) {
@@ -111,7 +113,7 @@ export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void
     onNotice?.("查岗已开启。到点它会截屏，但会先弹窗问你要不要给它看");
   }, [refresh, inShell, readiness.supported, readiness.accessibilityOn, onNotice]);
 
-  const patch = useCallback((characterId: string, next: { minMinutes?: number; maxMinutes?: number; dailyLimit?: number }) => {
+  const patch = useCallback((characterId: string, next: { triggerMode?: "background" | "any"; minMinutes?: number; maxMinutes?: number; dailyLimit?: number }) => {
     saveCharacterCheckIn(characterId, next);
     refresh();
   }, [refresh]);
@@ -175,6 +177,7 @@ export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void
             // 链路快照：即便没开启也给一份（「没开」本身就是要展示的状态）
             const snapshot = readCheckInScheduleSnapshot(character.id, config ?? {
               enabled: false,
+              triggerMode: "background",
               minMinutes: 30,
               maxMinutes: 90,
               dailyLimit: 3,
@@ -185,7 +188,7 @@ export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void
                   <div className="menu-label-group">
                     <span className="menu-label">{character.name}</span>
                     <span className="menu-desc">
-                      {enabled ? `每 ${min}~${max} 分钟一次，每天最多 ${limit} 次` : "未开启"}
+                      {enabled ? `每 ${min}~${max} 分钟一次，每天最多 ${limit} 次 · ${config?.triggerMode === "any" ? "前后台均可" : "仅后台"}` : "未开启"}
                     </span>
                     {enabled ? (
                       <span className="menu-desc" style={{ color: "var(--per-accent, #6f5bd6)" }}>
@@ -198,6 +201,22 @@ export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void
 
                 {enabled && (
                   <>
+                    <div className="menu-item" style={{ cursor: "default", alignItems: "flex-start" }}>
+                      <div className="menu-label-group">
+                        <span className="menu-label">触发场景</span>
+                        <span className="menu-desc">默认仅后台；前台正在和该角色私聊时始终暂缓</span>
+                      </div>
+                      <select
+                        className="per-field-input"
+                        aria-label="查岗触发场景"
+                        value={config?.triggerMode ?? "background"}
+                        onChange={e => patch(character.id, { triggerMode: e.target.value === "any" ? "any" : "background" })}
+                      >
+                        <option value="background">仅后台触发</option>
+                        <option value="any">不限制前后台</option>
+                      </select>
+                    </div>
+
                     {/* 间隔：两个直接输入的分钟数，不再给固定档位——
                         「我要 47 分钟」这种需求给按钮满足不了。 */}
                     <div className="menu-item" style={{ cursor: "default", alignItems: "flex-start" }}>
@@ -353,7 +372,7 @@ export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void
           },
           {
             label: "⑦ 扫描器",
-            value: "随桌面壳常驻，每 1 分钟扫一遍；回到小手机也会立刻补扫",
+            value: "统一调度器每 1 分钟扫描；后台模式只按原生累计后台时长计时",
             ok: true,
           },
         ].map(row => (

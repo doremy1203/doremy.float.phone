@@ -43,6 +43,16 @@ import {
   saveWidgetData,
   type WidgetConfig,
 } from "@/lib/widget";
+import {
+  DEFAULT_FOCUS_WIDGET_STYLE,
+  loadFocusWidgetStyle,
+  saveFocusWidgetStyle,
+  type FocusWidgetStyle,
+} from "@/lib/widget/focus-style";
+import {
+  focusWidgetPin as shellFocusWidgetPin,
+  focusWidgetUpdate as shellFocusWidgetUpdate,
+} from "@/lib/device-action/bridge";
 
 /** 预览用的示例数据：用户还没让角色留话时，先让模板有东西可显示。 */
 const SAMPLE_TEXT = "今天路过那家店，想起你说想吃他家的小笼包";
@@ -50,6 +60,16 @@ const SAMPLE_STATUS = "在想你";
 
 function clampInt(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+/** #RRGGBB + 不透明度百分比 → rgba() 预览用 */
+function hexWithAlpha(hex: string, alphaPct: number): string {
+  const h = (hex || "#000000").replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16) || 0;
+  const g = parseInt(h.slice(2, 4), 16) || 0;
+  const b = parseInt(h.slice(4, 6), 16) || 0;
+  const a = Math.max(0, Math.min(100, Math.round(alphaPct))) / 100;
+  return `rgba(${r},${g},${b},${a.toFixed(2)})`;
 }
 
 export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void }) {
@@ -66,6 +86,8 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
   const [diagnosis, setDiagnosis] = useState<string[] | null>(null);
   const [profiles, setProfiles] = useState<WidgetProfile[]>(() => loadWidgetProfiles());
   const [profileDraft, setProfileDraft] = useState<WidgetProfile | null>(null);
+  /** 专注倒计时小组件的样式（独立卡，随改随预览，保存才推送壳侧） */
+  const [focusStyle, setFocusStyle] = useState<FocusWidgetStyle>(() => loadFocusWidgetStyle());
 
   const characters = useMemo(() => loadCharacters().map(c => ({ id: c.id, name: c.name, avatar: c.avatar ?? "" })), []);
 
@@ -182,6 +204,24 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
     setDataVersion(v => v + 1);
     onNotice?.("已写入示例内容");
   }, [config.characterId, activeCharacterAvatar, onNotice]);
+
+  /** 保存专注组件样式并推到壳侧（styleOnly：不动正在运行的会话状态）。 */
+  const saveFocusStyleAndPush = useCallback(() => {
+    saveFocusWidgetStyle(focusStyle);
+    const r = shellFocusWidgetUpdate(JSON.stringify({ styleOnly: true, style: focusStyle }));
+    onNotice?.(r.ok ? "样式已保存并推送到桌面" : (r.reason || "推送失败，请检查壳版本"));
+  }, [focusStyle, onNotice]);
+
+  const resetFocusStyle = useCallback(() => {
+    setFocusStyle({ ...DEFAULT_FOCUS_WIDGET_STYLE });
+    saveFocusWidgetStyle(DEFAULT_FOCUS_WIDGET_STYLE);
+    onNotice?.("已恢复默认样式，记得点「保存并推送桌面」");
+  }, [onNotice]);
+
+  const pinFocusWidget = useCallback(() => {
+    const r = shellFocusWidgetPin();
+    onNotice?.(r.ok ? "已请求系统添加专注组件" : (r.reason || "当前启动器不支持从应用内添加，请在桌面长按手动添加"));
+  }, [onNotice]);
 
   const createProfile = useCallback(() => {
     const now = new Date().toISOString();
@@ -553,6 +593,94 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
           </div>
         </>
       ) : null}
+
+      {/* ── 专注倒计时（独立小组件）── */}
+      <div className="ws-card">
+        <div className="ws-card-head">
+          <span className="ws-card-title">⏳ 专注倒计时（独立小组件）</span>
+        </div>
+        <p className="ws-hint">
+          专注 / 锁机会话的秒级倒计时卡（原生 Chronometer 走表，改时间无效），
+          与上面的角色留言卡互相独立。样式随改随预览，点保存才落到桌面。
+        </p>
+
+        {/* 实时预览：与原生 RemoteViews 渲染同一份输入（背景色+不透明度/文字色/次要色/圆角/行开关） */}
+        <div style={{ display: "flex", justifyContent: "center", padding: "6px 0 14px" }}>
+          <div
+            style={{
+              width: 250,
+              padding: 16,
+              borderRadius: focusStyle.radius,
+              background: hexWithAlpha(focusStyle.bg, focusStyle.bgAlpha),
+              border: "1px solid rgba(128,128,128,.18)",
+            }}
+          >
+            <div style={{ color: hexWithAlpha(focusStyle.textColor, focusStyle.dimAlpha), fontSize: 11, letterSpacing: 2 }}>专注 · FOCUS</div>
+            <div style={{ color: focusStyle.textColor, fontSize: 34, fontFamily: "monospace", marginTop: 4 }}>25:00</div>
+            <div style={{ height: 5, borderRadius: 3, background: hexWithAlpha(focusStyle.textColor, 14), marginTop: 10, overflow: "hidden" }}>
+              <div style={{ width: "38%", height: "100%", borderRadius: 3, background: "linear-gradient(90deg,#7C8CFF,#5EEAD4)" }} />
+            </div>
+            {focusStyle.showTask ? (
+              <div style={{ color: focusStyle.textColor, fontSize: 12, marginTop: 12, opacity: 0.92 }}>背 20 个单词 · 第 2/4 组</div>
+            ) : null}
+            {focusStyle.showTa ? (
+              <div style={{ color: hexWithAlpha(focusStyle.textColor, focusStyle.dimAlpha), fontSize: 11, marginTop: 6 }}>Alex · 陪你把这段时间走完</div>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="ws-grid2">
+          <label className="ws-field">
+            背景色
+            <input type="color" value={focusStyle.bg} onChange={e => setFocusStyle(s => ({ ...s, bg: e.target.value }))} />
+          </label>
+          <label className="ws-field">
+            背景不透明度 {focusStyle.bgAlpha}%
+            <input type="range" min={0} max={100} value={focusStyle.bgAlpha} onChange={e => setFocusStyle(s => ({ ...s, bgAlpha: Number(e.target.value) }))} />
+          </label>
+          <label className="ws-field">
+            文字色
+            <input type="color" value={focusStyle.textColor} onChange={e => setFocusStyle(s => ({ ...s, textColor: e.target.value }))} />
+          </label>
+          <label className="ws-field">
+            次要文字 {focusStyle.dimAlpha}%
+            <input type="range" min={0} max={100} value={focusStyle.dimAlpha} onChange={e => setFocusStyle(s => ({ ...s, dimAlpha: Number(e.target.value) }))} />
+          </label>
+          <label className="ws-field">
+            圆角
+            <select value={focusStyle.radius} onChange={e => setFocusStyle(s => ({ ...s, radius: Number(e.target.value) }))}>
+              <option value={8}>小（8dp）</option>
+              <option value={16}>中（16dp）</option>
+              <option value={24}>大（24dp）</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="ws-row">
+          <div className="ws-row-text">
+            <b>显示任务行</b>
+            <p>当前专注任务（没填任务时显示占位语）</p>
+          </div>
+          <Toggle checked={focusStyle.showTask} onChange={v => setFocusStyle(s => ({ ...s, showTask: v }))} />
+        </div>
+        <div className="ws-row">
+          <div className="ws-row-text">
+            <b>显示 TA 行</b>
+            <p>陪伴角色名与那句鼓励语</p>
+          </div>
+          <Toggle checked={focusStyle.showTa} onChange={v => setFocusStyle(s => ({ ...s, showTa: v }))} />
+        </div>
+
+        <p className="ws-hint">进度条颜色跟随内置配色；会话运行中保存样式不影响正在走的倒计时。</p>
+        <div className="ws-template-actions">
+          <button type="button" className="ws-btn ghost" onClick={resetFocusStyle}>恢复默认</button>
+          <button type="button" className="ws-btn" onClick={saveFocusStyleAndPush}>保存并推送桌面</button>
+        </div>
+        <div className="ws-inline-row">
+          <span>还没有放到桌面上？</span>
+          <button type="button" className="ws-link" onClick={pinFocusWidget}>添加专注组件到桌面</button>
+        </div>
+      </div>
 
     </div>
   );

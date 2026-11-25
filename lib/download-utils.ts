@@ -6,6 +6,8 @@ function emitDownloadNotice(kind: "success" | "error" | "info", message: string)
 export type DownloadFileOptions = {
     disableNativeShare?: boolean;
     nativeShareOnly?: boolean;
+    /** 壳内保存位置：图片进相册、语音进音乐库、文件/ZIP 进下载目录。 */
+    destination?: "image" | "audio" | "file";
 };
 
 /** android-shell 壳的 WebView UA 后缀标识（见 MainActivity.kt 的 userAgentString 拼接）。 */
@@ -14,6 +16,7 @@ const FLOAT_SHELL_UA_MARK = "FloatShell/";
 /** 壳暴露的原生桥（能力按需特性检测，非壳环境为 undefined）。 */
 type FloatShellBridge = {
     saveBase64File?: (fileName: string, base64: string) => boolean;
+    saveBase64Media?: (fileName: string, base64: string, kind: string) => boolean;
     openUrl?: (url: string) => boolean;
     launchExternalApp?: (packageName: string, dataUrl: string) => boolean;
     /** 直链交给系统下载管理器（真后台）；返回是否成功入队 */
@@ -165,6 +168,32 @@ async function downloadFileInternal(blob: Blob, filename: string, options: Downl
     // 壳环境中 blob: + a[download] 通常无法落盘，必须使用原生桥；失败时不再假装浏览器兜底成功。
     const shell = readFloatShellBridge();
     if (shell) {
+        const destination = options.destination ?? "file";
+        const savedNotice = destination === "image"
+            ? `已保存到相册（Pictures/小手机）：${filename}`
+            : destination === "audio"
+                ? `已保存到音乐库（Music/小手机）：${filename}`
+                : `已保存到系统下载目录：${filename}`;
+        if (destination !== "file" && shell.saveBase64Media) {
+            try {
+                if (blob.size > 12 * 1024 * 1024) {
+                    emitDownloadNotice("error", `${filename} 保存失败：文件超过 12MB，无法直接写入相册/音乐库。`);
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    return;
+                }
+                const base64 = await blobToBase64(blob);
+                if (shell.saveBase64Media(filename, base64, destination)) {
+                    emitDownloadNotice("success", savedNotice);
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    return;
+                }
+                emitDownloadNotice("error", `${filename} 保存失败：Android 原生保存接口返回失败，请检查存储空间和文件权限。`);
+            } catch (error) {
+                emitDownloadNotice("error", `${filename} 保存失败：${error instanceof Error ? error.message : "读取或写入文件时发生错误"}`);
+            }
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            return;
+        }
         if (!shell.saveBase64File) {
             emitDownloadNotice("error", `${filename} 保存失败：当前 APK 没有文件保存能力，请更新到包含下载桥的版本。`);
             setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -173,7 +202,7 @@ async function downloadFileInternal(blob: Blob, filename: string, options: Downl
         try {
             // 优先分块：备份动辄几百 MB，整块 base64 会直接把 WebView 堆撑爆。
             if (await saveBlobInChunks(blob, filename, shell)) {
-                emitDownloadNotice("success", `已保存到系统下载目录：${filename}`);
+                emitDownloadNotice("success", savedNotice);
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
                 return;
             }
@@ -184,7 +213,7 @@ async function downloadFileInternal(blob: Blob, filename: string, options: Downl
             }
             const base64 = await blobToBase64(blob);
             if (shell.saveBase64File(filename, base64)) {
-                emitDownloadNotice("success", `已保存到系统下载目录：${filename}`);
+                emitDownloadNotice("success", savedNotice);
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
                 return;
             }

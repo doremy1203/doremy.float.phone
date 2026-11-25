@@ -33,7 +33,7 @@ import {
     NOTE_WALL_CAPABILITY_ID,
     TOOLBOX_MANAGEMENT_CAPABILITY_ID,
 } from "@/lib/internal-capability-storage";
-import { discoverMcpTools, startMcpOAuth } from "@/lib/tool-executor";
+import { discoverMcpTools, startMcpOAuth, testBuiltinSearchConnection } from "@/lib/tool-executor";
 import { getMaxToolRounds, loadChatAppSettings, saveChatAppSettings } from "@/lib/chat-storage";
 import { SettingsContext } from "@/components/phone-settings-app";
 import { Toggle, Input, Textarea, Select } from "@/components/ui/form";
@@ -128,6 +128,7 @@ export function ToolboxSettings() {
     const [confirmDeleteType, setConfirmDeleteType] = useState<"rest" | "restPackage" | "composite" | "compositePackage" | "mcp">("rest");
     const [isDiscovering, setIsDiscovering] = useState(false);
     const [isAuthorizing, setIsAuthorizing] = useState(false);
+    const [searchTestState, setSearchTestState] = useState<{ loading: boolean; message?: string; error?: boolean } | null>(null);
     // MCP 操作结果统一走一次性弹窗，不在编辑页里留常驻文案
     const [mcpNotice, setMcpNotice] = useState<{ title: string; message: string; error?: boolean } | null>(null);
     const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
@@ -1296,30 +1297,62 @@ export function ToolboxSettings() {
                 const onConfirm = () => { if (isNewRest) confirmDraftRest(); else setEditRestId(null); };
                 const onCancel = () => { if (isNewRest) cancelDraftRest(); else setEditRestId(null); };
                 const title = editRest.builtIn ? editRest.name : (isNewRest ? "添加工具" : "编辑工具");
-
                 if (editRest.builtIn) {
-                    // Only tools that carry a key in fixedParams (weather/search) need an
-                    // API Key field; keyless tools like 查看网页 (Jina Reader) don't.
-                    const apiKeyField = Object.keys(editRest.fixedParams || {})[0];
+                    const isSearchTool = editRest.id === "builtin_search";
+                    const searchProvider = editRest.fixedParams?.provider === "tavily" ? "tavily" : "deepseek";
+                    const testSearchConnection = async () => {
+                        setSearchTestState({ loading: true });
+                        try {
+                            const result = await testBuiltinSearchConnection(searchProvider, String(editRest.fixedParams?.api_key || ""));
+                            setSearchTestState({ loading: false, message: result.message });
+                        } catch (error) {
+                            setSearchTestState({ loading: false, error: true, message: error instanceof Error ? error.message : String(error) });
+                        }
+                    };
+                    const apiKeyField = isSearchTool ? "api_key" : Object.keys(editRest.fixedParams || {})[0];
                     return (
                         <ContentDialog title={title} confirmLabel="完成" onConfirm={onConfirm} onCancel={onCancel}>
                             <div className="flex flex-col gap-3">
                                 <span className="menu-desc">{editRest.description}</span>
-                                {apiKeyField && (
-                                <div className="flex flex-col gap-1">
-                                    <label className="menu-desc ml-1">API Key</label>
-                                    <Input type="password" value={editRest.fixedParams?.[apiKeyField] ?? ""} placeholder="填入你的 API Key"
-                                        onChange={e => setR({ fixedParams: { ...editRest.fixedParams, [apiKeyField]: e.target.value } })} />
-                                    <span className="menu-desc ml-1">
-                                        {editRest.id === "builtin_weather" && "去 weatherapi.com 免费注册获取"}
-                                        {editRest.id === "builtin_search" && "去 tavily.com 免费注册获取"}
-                                    </span>
-                                </div>
+                                {isSearchTool && (
+                                    <div className="flex flex-col gap-1">
+                                        <label className="menu-desc ml-1">搜索服务</label>
+                                        <Select value={searchProvider} onChange={e => setR({ fixedParams: { ...editRest.fixedParams, provider: e.target.value } })}>
+                                            <option value="deepseek">DeepSeek Search</option>
+                                            <option value="tavily">Tavily</option>
+                                        </Select>
+                                    </div>
                                 )}
-                                <div className="flex items-center justify-between gap-3">
-                                    <span className="menu-desc">直连模式（跳过服务端代理，无超时限制）</span>
-                                    <Toggle checked={editRest.directFetch ?? true} onChange={c => setR({ directFetch: c })} />
-                                </div>
+                                {apiKeyField && (
+                                    <div className="flex flex-col gap-1">
+                                        <label className="menu-desc ml-1">{isSearchTool ? (searchProvider === "deepseek" ? "DeepSeek API Key" : "Tavily API Key") : "API Key"}</label>
+                                        <Input type="password" value={editRest.fixedParams?.[apiKeyField] ?? ""} placeholder="填入你的 API Key"
+                                            onChange={e => setR({ fixedParams: { ...editRest.fixedParams, [apiKeyField]: e.target.value } })} />
+                                        <span className="menu-desc ml-1">
+                                            {editRest.id === "builtin_weather" && "去 WeatherAPI 注册获取"}
+                                            {isSearchTool && searchProvider === "deepseek" && "使用 DeepSeek 开放平台 API Key；搜索请求通过站点代理发送，避免浏览器跨域限制。"}
+                                            {isSearchTool && searchProvider === "tavily" && "使用 Tavily API Key。"}
+                                        </span>
+                                    </div>
+                                )}
+                                {isSearchTool ? (
+                                    <div className="flex flex-col gap-2">
+                                        <span className="menu-desc">搜索通过站点代理请求，API Key 不会发送给模型。</span>
+                                        <button type="button" className="ui-secondary-btn self-start" disabled={searchTestState?.loading || !String(editRest.fixedParams?.api_key || "").trim()} onClick={testSearchConnection}>
+                                            {searchTestState?.loading ? "测试中…" : "测试连接"}
+                                        </button>
+                                        {searchTestState?.message && (
+                                            <span role="status" className={searchTestState.error ? "text-xs text-red-500" : "text-xs text-green-600"}>
+                                                {searchTestState.message}
+                                            </span>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center justify-between gap-3">
+                                        <span className="menu-desc">直连模式（跳过服务端代理，无超时限制）</span>
+                                        <Toggle checked={editRest.directFetch ?? true} onChange={c => setR({ directFetch: c })} />
+                                    </div>
+                                )}
                             </div>
                         </ContentDialog>
                     );

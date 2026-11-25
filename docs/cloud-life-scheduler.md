@@ -1,45 +1,65 @@
-# Cloud-resident life schedule evaluator
+# 云端生活日程与主动消息
 
-> **当前功能开关说明（2026-11-06）：** 本仓库包含云端日程评估 Edge Function，但当前客户端将生活主动消息生成关闭：`components/life/life-engine-app.tsx`、`lib/life/life-proactive-scheduler.ts` 中的 `LIFE_PROACTIVE_MESSAGES_ENABLED` 均为 `false`，`lib/life/life-schedule-cloud.ts` 同步的 `proactiveEnabled` 也为 `false`。因此本文不能被理解为“当前会自动创建并发送后台角色消息”。本文说明仍存在的日程快照、云端运行态评估代码及其部署边界。
+> **当前状态（2026-11-25）：** 生活主动消息的客户端硬开关已恢复为 `true`，生活设置中提供「后台主动消息」、消息间隔（默认 5–15 分钟）和现场安静时长。**代码开启不等于已部署成功**：后台生成与通知仍需要个人 Supabase 项目、Edge Functions、Cron、推送订阅和设备后台权限共同工作。未部署个人云时，只有 App 前台打开生活现场时的本地主动消息可用。
 
 ## 代码职责
 
-- 客户端生活系统负责编辑七日日程、角色/玩家活动与地点、场景和参与者，并把相关快照同步到个人云或站点推送桥。
-- `supabase/functions/life-scheduler/index.ts` 负责读取加密日程快照，计算玩家和角色当前活动/地点，并维护 `life_schedule_runtime` 运行态。
-- `supabase/functions/push-generate/index.ts` 包含生活场景任务的快照/运行态校验、并发保护、诊断和消息写入处理代码。该代码存在不代表当前客户端会安排主动消息任务。
+- 客户端生活系统负责七日日程、角色/玩家活动与地点、场景和参与者，并把相关快照同步到个人云。
+- `supabase/functions/life-scheduler/index.ts` 读取加密日程快照，计算玩家和角色当前活动/地点，维护 `life_schedule_runtime`，并把每个「场景 + 角色」的持久任务重新排期。
+- `supabase/functions/push-generate/index.ts` 领取到期任务，生成前重新校验最新快照和运行态，调用模型并把结果写入回传箱、投递通知。
 - `app/api/life/schedule-diagnostics/route.ts` 为生活系统诊断面板提供云端诊断查询入口。
+- Android 壳的 `PushService` 通过 Supabase Realtime 接收广播并显示系统通知；`PushWatchdogReceiver` 每 15 分钟检查服务是否存活。
 
-## 日程数据
+## 任务是怎么跑起来的
 
-客户端同步的快照包含：
+1. 用户打开生活现场，客户端创建该「场景 + 角色」的第一条任务模板；没有这条模板，服务端不会凭空开始。
+2. `life-scheduler` 每分钟评估一次，在玩家与角色同处现场、双方清醒、没有正在进行的私聊时，把任务重新排到未来 3–180 分钟（默认 5–15 分钟）。
+3. `push-generate` 到期领取任务，先校验：快照不超过 3 分钟、运行态不超过 2 分钟、版本一致、玩家与角色仍同地点、场景仍 active、没有睡眠/私聊/前台现场占用。
+4. 校验通过后调用模型；结果写入 `push_outbox`，并通过 Web Push 或壳 Realtime 广播通知。
+5. 用户点通知或打开 App 后，回传箱把错过的现场消息补进生活现场；通知栏可直接「回复行动 / 回复对话」。
+
+客户端还会在首次进入现场时挂一条前台兜底任务。App 被系统回收后，只要服务端任务链已经建立，`life-scheduler` 会继续续排，不依赖 WebView 存活。
+
+## 快照包含什么
+
 - 玩家地点、角色地点；
 - 活跃场景及参与角色；
 - 七日日程条目；
 - 角色/玩家活动状态和临时地点覆盖；
 - 日程版本、场景前台租约和在线聊天租约；
-- 主动消息开关状态（当前固定同步为关闭）。
+- 主动消息开关、消息间隔和安静时长。
 
-云端评估函数对 `source = weekly-generation` 的常规周计划按周投影；一次性、手动、特殊活动和邀约不按常规周计划重复。具体时间和地点解析以当前 `life-scheduler/index.ts` 为准。
+云端对 `source = weekly-generation` 的常规周计划按周投影；一次性、手动、特殊活动和邀约不按常规周计划重复。
 
-## 云端执行与启用条件
+## 前台与线上消息的让行规则
 
-1. 客户端调用 `syncLifeScheduleSnapshot`，将加密日程快照写入所配置的个人云项目或站点推送桥。
-2. 当个人 Supabase 已部署相应 Schema、`life-scheduler` Edge Function 和 Cron，Cron 才能周期性调用日程评估函数并更新运行态。
-3. 当前主动消息开关关闭，客户端不会把该功能描述为后台主动消息已启用；即使云端存在相关生成处理代码，也不能据此推断会有新的主动消息排期或送达。
-4. 通知投递还需要相应推送订阅、Realtime/Web Push 配置、网络、设备权限和后台策略。通知送达与日程运行态计算是不同结果。
+- **生活现场前台租约**只在生活现场页面可见时存在，每 30 秒续期，120 秒过期；切到后台或进程被杀后自动失效。
+- 现场可见时，客户端暂停线上追问/冷场/定时唤醒的触发，但**不删除排期**；离开现场或切到后台后继续。
+- 服务端处理生活任务时，如果用户正在私聊该角色，会延后到聊天租约结束 +15 秒。
+- 服务端处理**非生活任务**时，如果生活现场前台租约有效，会延后到现场结束 +90 秒，避免两条叙事同时推送。
 
-## 部署边界
+## 通知形态
 
-本仓库包含 `supabase/functions/life-scheduler/index.ts` 及构建产物 `public/ai-phone-push/life-scheduler.mjs`。个人 Supabase 项目不会因为 Netlify 网页部署而自动更新。启用云端日程评估前，应通过应用提供的个人云部署流程升级 Schema、Edge Function、Cron 和密钥，并检查运行日志与诊断表。
+| 类型 | 标题 | 正文 | 交互 |
+|---|---|---|---|
+| 生活现场主动消息 | `生活现场 · 主动消息` | 动作 + 对白，一轮一条，不拆成多条 | 回复行动 / 回复对话；点击打开 `/life` |
+| 线上聊天消息 | 角色名或备注 | 按空行最多拆 6 条，每条 200 字 | 通知栏回复；点击直达会话 |
+| 后台常驻通知 | `小手机` | `已连接，等待角色消息` | 仅表示推送服务存活 |
 
-## 诊断边界
+浏览器离线推送使用 Web Push；Android 壳使用合成订阅 `shell:<userId>` + Realtime 广播，不依赖 Web Push。通知权限、渠道重要度、电池优化和厂商后台策略都会影响实际弹出。
 
-`life_schedule_runtime`、`life_schedule_diagnostics` 等表/函数只有在对应 Schema 已部署时才存在。遇到问题应分别核对：
-- 客户端是否成功同步快照；
-- 个人云 Schema 与函数版本；
-- Cron 是否注册并运行；
-- `life_schedule_runtime` 是否更新；
-- 诊断事件是否记录；
-- 推送订阅与设备端通知是否可用。
+## 启用与排查清单
 
-不要把页面显示了日程、代码仓库包含 Edge Function、自动化测试通过，等同于某个用户的个人云环境已成功运行。
+1. 个人 Supabase 已执行匹配版本的 `personal-push-supabase.sql`，并部署 `life-scheduler`、`push-generate` 与 Cron。
+2. 应用内「云服务部署」显示已连接，`push_server_config`、`push_subscriptions`、`push_jobs`、`push_outbox` 可读写。
+3. 生活设置中「启用虚拟生活引擎」「允许角色自主行动」「后台主动消息」均已开启。
+4. 进入一个有角色在场的现场，确认诊断面板出现 `life_job_armed` 或对应任务记录。
+5. 分别测试：App 前台、退后台、从最近任务划掉、锁屏、重启。
+6. 检查 `life_schedule_runtime`、`life_schedule_diagnostics`、`push_jobs.result_note` 和 `push_outbox`。
+
+## 已知边界
+
+- 个人云不会因为网页部署而自动更新；`push-generate` 或 SQL 版本过旧时，任务可能停在 `pending`/`failed`。
+- 厂商强制停止、关闭自启动或断网期间不会恢复任务；`PushService` 看门狗只能提高存活率，不能保证永不回收。
+- 每日最多 50 次服务端生成；达到上限会延后到次日，不是故障。
+- 后台同时存在生活现场与线上追问时，前台有明确让行；完全后台的并发仍可能落在相近时间，需要更长租约或产品取舍。

@@ -32,9 +32,12 @@ export type IconId =
   | "mixology"
   | "life"
   | "archive"
+  | "memo"
   | "photowall"
   | "watchtogether"
   | "callstats"
+  | "heartcraft"
+  | "focuscompanion"
 ;
 
 // 桌面文件夹：以 folder: 前缀的 id 伪装成图标占一个格子参与拖拽/换页，
@@ -75,8 +78,8 @@ export const PAGE_2_DEFAULT: IconId[] = [
 ];
 
 // 第三页放系统/工具类应用；生活、档案、照片墙、一起看单独放到第四页，避免与已有图标/组件抢位置。
-export const PAGE_3_DEFAULT: IconId[] = ["worldbuilder", "qa", "resource_hub", "realitybridge", "mixology"];
-export const PAGE_4_DEFAULT: IconId[] = ["life", "archive", "photowall", "watchtogether", "callstats"];
+export const PAGE_3_DEFAULT: IconId[] = ["worldbuilder", "qa", "resource_hub", "realitybridge", "mixology", "heartcraft", "focuscompanion"];
+export const PAGE_4_DEFAULT: IconId[] = ["life", "archive", "memo", "photowall", "watchtogether", "callstats"];
 
 export const DOCK_DEFAULT: IconId[] = ["settings", "theme", "resources", "characters"];
 
@@ -133,8 +136,11 @@ export const ICONS: Record<IconId, IconMeta> = {
   qa: { id: "qa", label: "工坊", tone: "var(--c-icon-qa, #4a505c99)", placeholder: false },
   mixology: { id: "mixology", label: "独家特调", tone: "var(--c-icon-violet)", placeholder: false },
   life: { id: "life", label: "生活", tone: "var(--c-icon-rose)", placeholder: false },
-  archive: { id: "archive", label: "档案室", tone: "var(--c-icon-teal)", placeholder: false },
+  archive: { id: "archive", label: "媒体档案", tone: "var(--c-icon-teal)", placeholder: false },
+  memo: { id: "memo", label: "备忘录", tone: "var(--c-icon-amber)", placeholder: false },
   photowall: { id: "photowall", label: "照片墙", tone: "var(--c-icon-rose)", placeholder: false },
   watchtogether: { id: "watchtogether", label: "一起看", tone: "var(--c-icon-sage, #7e8b78)", placeholder: false },
   callstats: { id: "callstats", label: "通话统计", tone: "var(--c-icon-teal)", placeholder: false },
+  heartcraft: { id: "heartcraft", label: "心意手作", tone: "var(--c-icon-rose)", placeholder: false },
+  focuscompanion: { id: "focuscompanion", label: "专注", tone: "var(--c-icon-green)", placeholder: false },
 };

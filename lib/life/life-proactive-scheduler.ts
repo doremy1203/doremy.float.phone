@@ -9,17 +9,28 @@
 import { loadCharacters } from "@/lib/character-storage";
 import { loadChatContacts, loadChatSessions, resolveSessionCharacterId } from "@/lib/chat-storage";
 import { armLifeSceneProactiveBailout, cancelBailoutPrefix } from "@/lib/push-bailout-client";
+import { loadApiConfigs, loadBindingConfig, resolveBinding } from "@/lib/settings-storage";
 import { syncLifeScheduleSnapshot } from "./life-schedule-cloud";
-import { loadVirtualLifeState } from "./life-storage";
+import { appendLifeTimelineEntry, loadVirtualLifeState, saveVirtualLifeState } from "./life-storage";
 import { resolveActorLocation } from "./life-runtime";
 import type { VirtualLifeState } from "./life-types";
 import { recordLifeDiagnostic } from "./life-diagnostics";
 import { LIFE_PRESENCE_LEASE_UPDATED_EVENT } from "./life-scheduler-coordinator";
 
 const PLAYER_ID = "player";
-const LIFE_PROACTIVE_MESSAGES_ENABLED = false; // Keep server-side life scheduling, disable message jobs.
+const LIFE_PROACTIVE_MESSAGES_ENABLED = true; // 用户明确要求恢复主动消息：日程与消息任务都保持启用。
 const ARM_META_PREFIX = "life-schedule-arm:";
 const STATUS_KEY = "life-proactive-last-status-v1";
+/** 角色未来七日日程不足 24 小时时，自动续排一次。 */
+const AUTO_SCHEDULE_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
+const AUTO_SCHEDULE_MIN_COVERAGE_MS = 24 * 60 * 60 * 1000;
+/** 同一角色的自动续排冷却，避免生成失败或页面来回切换时反复调用模型。 */
+const AUTO_SCHEDULE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const AUTO_SCHEDULE_STATE_KEY = "life-auto-schedule-state-v1";
+/** 即使状态更新事件连续触发，也最多每分钟发起一次自动续排，避免多角色连续打模型。 */
+const AUTO_SCHEDULE_MIN_RUN_GAP_MS = 60_000;
+type AutoScheduleRecord = { lastAutoScheduleAt: number };
+let lastAutoScheduleAttemptAt = 0;
 export type LifeProactiveStatus = { at: string; ok: boolean; character?: string; reason?: string };
 export function readLifeProactiveStatus(): LifeProactiveStatus | null {
   try {
@@ -29,6 +40,114 @@ export function readLifeProactiveStatus(): LifeProactiveStatus | null {
 }
 function writeLifeProactiveStatus(status: LifeProactiveStatus) {
   try { localStorage.setItem(STATUS_KEY, JSON.stringify(status)); } catch { /* best effort */ }
+}
+
+function readAutoScheduleState(): Record<string, AutoScheduleRecord> {
+  try {
+    const raw = localStorage.getItem(AUTO_SCHEDULE_STATE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, AutoScheduleRecord> : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch { return {}; }
+}
+function writeAutoScheduleState(state: Record<string, AutoScheduleRecord>) {
+  try { localStorage.setItem(AUTO_SCHEDULE_STATE_KEY, JSON.stringify(state)); } catch { /* best effort */ }
+}
+
+/** 该角色未来七日日程的覆盖终点（只统计与未来七日窗口重叠的日程）。 */
+export function getLifeScheduleCoverageEndMs(state: VirtualLifeState, characterId: string, nowMs = Date.now()): number {
+  const horizon = nowMs + AUTO_SCHEDULE_HORIZON_MS;
+  let coverageEnd = nowMs;
+  for (const slot of state.schedules) {
+    if (slot.ownerType !== "character" || slot.ownerId !== characterId) continue;
+    const slotStart = Date.parse(slot.startAt);
+    const slotEnd = Date.parse(slot.endAt);
+    if (!Number.isFinite(slotStart) || !Number.isFinite(slotEnd)) continue;
+    if (slotEnd <= nowMs || slotStart >= horizon) continue;
+    coverageEnd = Math.max(coverageEnd, Math.min(slotEnd, horizon));
+  }
+  return coverageEnd;
+}
+
+/** 最后一条日程结束距现在不足 24 小时（或没有未来日程）时需要自动续排。 */
+export function needsLifeScheduleAutoRenewal(state: VirtualLifeState, characterId: string, nowMs = Date.now()): boolean {
+  return getLifeScheduleCoverageEndMs(state, characterId, nowMs) - nowMs < AUTO_SCHEDULE_MIN_COVERAGE_MS;
+}
+
+function hasUsableLifeApiConfig(characterId: string): boolean {
+  const slot = resolveBinding(loadBindingConfig(), characterId, "life");
+  if (!slot.apiConfigId) return false;
+  return loadApiConfigs().some(config => config.id === slot.apiConfigId);
+}
+
+/**
+ * 生活调度 tick 的自动续排：复用生活页现有 AI 日程生成入口，
+ * 受 settings.enabled 与聊天 API 配置约束；每个 tick 最多处理一位角色。
+ */
+async function runAutoScheduleRenewal(state: VirtualLifeState): Promise<boolean> {
+  if (!state.settings.enabled) return false;
+  const characters = loadCharacters();
+  if (!characters.length) return false;
+  const nowMs = Date.now();
+  if (nowMs - lastAutoScheduleAttemptAt < AUTO_SCHEDULE_MIN_RUN_GAP_MS) return false;
+  const records = readAutoScheduleState();
+  const due = characters.find(character => {
+    if (!needsLifeScheduleAutoRenewal(state, character.id, nowMs)) return false;
+    return nowMs - (records[character.id]?.lastAutoScheduleAt ?? 0) >= AUTO_SCHEDULE_COOLDOWN_MS;
+  });
+  if (!due) return false;
+  // 未配置可用的聊天 API 时不触发，也不写冷却；配置好后下一轮自然重试。
+  if (!hasUsableLifeApiConfig(due.id)) return false;
+  lastAutoScheduleAttemptAt = nowMs;
+  // 先记冷却再生成：即使请求超时或页面被杀，也不会在每个 tick 反复打模型。
+  records[due.id] = { lastAutoScheduleAt: nowMs };
+  writeAutoScheduleState(records);
+  try {
+    const { regenerateCharacterWeeklyScheduleWithAI } = await import("@/components/life/life-engine-app");
+    const result = await regenerateCharacterWeeklyScheduleWithAI(due);
+    if (!result.ok) {
+      if (result.skipped) {
+        // 另一处生成正在进行：撤销本次冷却，下一轮再试。
+        const latestRecords = readAutoScheduleState();
+        delete latestRecords[due.id];
+        writeAutoScheduleState(latestRecords);
+      }
+      recordLifeDiagnostic({
+        source: "AI 七日日程",
+        event: result.skipped ? "自动续排跳过" : "自动续排失败",
+        status: result.skipped ? "info" : "error",
+        detail: result.message,
+        meta: { characterId: due.id, characterName: due.name },
+      });
+      return false;
+    }
+    const latest = loadVirtualLifeState();
+    if (latest.settings.enabled) {
+      saveVirtualLifeState(appendLifeTimelineEntry(latest, {
+        category: "schedule",
+        title: "自动续排下周日程",
+        details: due.name + " 的未来 7 天日程覆盖不足，已根据角色卡、世界书和短期记忆自动生成新的七日日程。",
+        actorId: due.id,
+        actorName: due.name,
+      }));
+    }
+    recordLifeDiagnostic({
+      source: "AI 七日日程",
+      event: "自动续排下周日程",
+      status: "ok",
+      detail: due.name + " 的七日日程已自动续排。",
+      meta: { characterId: due.id, characterName: due.name, coverageEnd: new Date(getLifeScheduleCoverageEndMs(latest, due.id)).toISOString() },
+    });
+    return true;
+  } catch (error) {
+    recordLifeDiagnostic({
+      source: "AI 七日日程",
+      event: "自动续排异常",
+      status: "error",
+      detail: error instanceof Error ? error.message : String(error),
+      meta: { characterId: due.id, characterName: due.name },
+    });
+    return false;
+  }
 }
 const TICK_MS = 60_000;
 const MIN_DELAY_MS = 3 * 60_000;
@@ -78,7 +197,9 @@ async function runOnce(): Promise<void> {
   }
   running = true;
   try {
-    const state = loadVirtualLifeState();
+    let state = loadVirtualLifeState();
+    // 自动续排独立于「主动消息」硬关闭：只要生活引擎开启且 API 可用就会补足未来日程。
+    if (await runAutoScheduleRenewal(state)) state = loadVirtualLifeState();
     if (!LIFE_PROACTIVE_MESSAGES_ENABLED || !state.settings.enabled || !state.settings.enableCharacterAutonomy || state.settings.enableProactiveSceneMessages === false) {
       const disabledKey = [state.settings.enabled, state.settings.enableCharacterAutonomy, state.settings.enableProactiveSceneMessages].join(":");
       if (disabledKey !== lastDisabledCleanupKey) {
@@ -241,6 +362,7 @@ export function clearLifeProactiveSchedulerLocalState(): void {
   if (typeof window !== "undefined") {
     try {
       localStorage.removeItem(STATUS_KEY);
+      localStorage.removeItem(AUTO_SCHEDULE_STATE_KEY);
       for (let index = localStorage.length - 1; index >= 0; index -= 1) {
         const key = localStorage.key(index);
         if (key?.startsWith(ARM_META_PREFIX)) localStorage.removeItem(key);
@@ -249,4 +371,5 @@ export function clearLifeProactiveSchedulerLocalState(): void {
   }
   armedCache.clear();
   cancelledOffline.clear();
+  lastAutoScheduleAttemptAt = 0;
 }

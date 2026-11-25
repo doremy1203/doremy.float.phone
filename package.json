@@ -10,7 +10,7 @@
     "lint": "node scripts/run-eslint.mjs",
     "test:character-id": "node scripts/test-character-id-integration.mjs",
     "test:widget-output": "node scripts/test-phone-widget-output.mjs",
-    "test:life": "node scripts/test-character-id-integration.mjs && node scripts/test-life-runtime.mjs && node scripts/test-life-autonomy.mjs && node scripts/test-life-scene-responders.mjs && node scripts/test-life-output-parser.mjs && node scripts/test-life-guided-schedule.mjs && node scripts/test-life-wiring.mjs && node scripts/test-life-notification-queue.mjs && node scripts/test-life-notification-bridge.mjs && node scripts/test-life-scheduler-coordinator.mjs && node scripts/test-turn-coordinator.mjs && node scripts/test-life-cloud-scheduler.mjs",
+    "test:life": "node scripts/test-character-id-integration.mjs && node scripts/test-life-location-import.mjs && node scripts/test-life-runtime.mjs && node scripts/test-life-autonomy.mjs && node scripts/test-life-scene-responders.mjs && node scripts/test-life-output-parser.mjs && node scripts/test-life-guided-schedule.mjs && node scripts/test-life-wiring.mjs && node scripts/test-life-notification-queue.mjs && node scripts/test-life-scene-turn-queue.mjs && node scripts/test-life-notification-bridge.mjs && node scripts/test-life-scheduler-coordinator.mjs && node scripts/test-turn-coordinator.mjs && node scripts/test-life-cloud-scheduler.mjs",
     "test:photo-wall": "node scripts/test-photo-wall-sticker-sizing.mjs && node scripts/test-photo-wall-record-layers.mjs",
     "check:sdk": "node scripts/check-custom-app-sdk-consistency.mjs",
     "check:weixin": "node scripts/check-weixin-prompt-equivalence.mjs",
@@ -19,7 +19,9 @@
     "weixin:assistant:once": "node tools/weixin-local-assistant/assistant.mjs --once",
     "weixin:build-dist": "node scripts/build-weixin-assistant-dist.mjs",
     "push:build-dist": "node scripts/build-personal-push-dist.mjs",
-    "build:glass-icons": "node scripts/build-glass-icons.mjs"
+    "build:glass-icons": "node scripts/build-glass-icons.mjs",
+    "test:memo": "node scripts/test-memo-archive-contract.mjs",
+    "test:tool-names": "node scripts/test-native-tool-name-resolution.mjs"
   },
   "dependencies": {
     "@gltf-transform/functions": "^4.4.1",

@@ -11,6 +11,7 @@ import {
     UNSUPPORTED_IMPORT_FORMAT,
 } from "@/lib/settings-storage";
 import type { GenerationParameterKey, PresetConfig, Prompt, PromptOrderEntry } from "@/lib/settings-types";
+import { dismissPresetSyncHint, presetSyncStatus, syncBuiltinEntriesIntoAllPresets, syncBuiltinEntriesIntoPreset, type PresetSyncStatus } from "@/lib/preset-sync";
 import {
     GENERATION_PARAMETER_KEYS,
     resolveEnabledGenerationParameters,
@@ -286,6 +287,13 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
     const [viewMode, setViewMode] = useState<"list" | "detail">("list");
     const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
     const [confirmExportId, setConfirmExportId] = useState<string | null>(null);
+    const [syncNote, setSyncNote] = useState("");
+    const [syncStatus, setSyncStatus] = useState<PresetSyncStatus>(() => presetSyncStatus());
+    useEffect(() => {
+        if (!syncNote) return;
+        const timer = window.setTimeout(() => setSyncNote(""), 2600);
+        return () => window.clearTimeout(timer);
+    }, [syncNote]);
     const [confirmResetId, setConfirmResetId] = useState<string | null>(null);
     const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
     const [confirmDeleteEntry, setConfirmDeleteEntry] = useState<string | null>(null);
@@ -1076,9 +1084,55 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
             <input type="file" accept=".json" className="hidden" ref={entryFileInputRef} onChange={handleEntryImportFile} />
             {viewMode === "list" ? (
                 <>
-                    <div className="flex items-center">
+                    <div className="flex items-center justify-between">
                         <h2 className="m-0 mx-2 ts-28 font-bold italic leading-none text-black">Presets</h2>
+                        <button
+                            type="button"
+                            disabled={syncStatus.missing === 0}
+                            title={syncStatus.missing === 0 ? "所有预设都已包含最新内置条目" : "把缺失的内置条目补进所有预设"}
+                            onClick={() => {
+                                const results = syncBuiltinEntriesIntoAllPresets();
+                                setPresets(loadPresets());
+                                setSyncStatus(presetSyncStatus());
+                                const total = results.reduce((sum, r) => sum + r.added, 0);
+                                setSyncNote(total ? ("已补入 " + total + " 条内置条目") : "已是最新");
+                            }}
+                            className="inline-flex h-8 items-center gap-1 rounded-full border border-black/10 bg-white px-3 text-[11px] font-bold text-gray-800 shadow-sm disabled:opacity-50"
+                        >
+                            <Replace size={13} />
+                            {syncStatus.missing === 0 ? "已是最新" : "全部补全"}
+                        </button>
                     </div>
+
+                    {syncStatus.missing > 0 && !syncStatus.dismissed ? (
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] leading-5 text-amber-900">
+                            <span>
+                                内置预设已更新：{syncStatus.affected.length} 个预设共缺 {syncStatus.missing} 条内置条目。
+                            </span>
+                            <span className="flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        const results = syncBuiltinEntriesIntoAllPresets();
+                                        setPresets(loadPresets());
+                                        setSyncStatus(presetSyncStatus());
+                                        const total = results.reduce((sum, r) => sum + r.added, 0);
+                                        setSyncNote(total ? ("已补入 " + total + " 条内置条目") : "已是最新");
+                                    }}
+                                    className="rounded-full border border-amber-300 bg-white px-3 py-1 font-semibold"
+                                >
+                                    全部补全
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => { dismissPresetSyncHint(); setSyncStatus(presetSyncStatus()); }}
+                                    className="rounded-full px-2 py-1 text-amber-700/80"
+                                >
+                                    忽略本次
+                                </button>
+                            </span>
+                        </div>
+                    ) : null}
 
                     {presets.length === 0 ? (
                         <div className="ui-empty mt-5">
@@ -1140,6 +1194,11 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
                         const enabledGenerationParameters = resolveEnabledGenerationParameters(preset);
                         return (
                             <div key={preset.id} className="flex flex-col gap-4 pb-[24px]">
+                                {syncNote ? (
+                                    <div className="fixed left-1/2 top-20 z-[9999] -translate-x-1/2 rounded-full bg-black/80 px-4 py-2 text-xs text-white shadow-lg">
+                                        {syncNote}
+                                    </div>
+                                ) : null}
                                 <div className="flex justify-center gap-2">
                                     <button
                                         type="button"
@@ -1148,6 +1207,23 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
                                     >
                                         <Copy size={15} strokeWidth={1.8} />
                                         <span>复制预设</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const { preset: merged, added } = syncBuiltinEntriesIntoPreset(preset);
+                                            if (!added.length) { setSyncNote("已是最新：没有缺失的内置条目"); return; }
+                                            const next = loadPresets().map((item) => (item.id === merged.id ? merged : item));
+                                            savePresets(next);
+                                            setPresets(next);
+                                            setSyncStatus(presetSyncStatus());
+                                            setSyncNote("已补入 " + added.length + " 条内置条目：" + added.slice(0, 4).join("、") + (added.length > 4 ? " 等" : ""));
+                                        }}
+                                        className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[20px] border border-black/10 bg-white px-4 text-xs font-bold text-gray-800 shadow-sm transition-all hover:bg-gray-50 hover:shadow-md active:scale-95"
+                                        title="只补缺失的内置条目，不覆盖你改过的内容，也不重排顺序"
+                                    >
+                                        <Replace size={15} strokeWidth={1.8} />
+                                        <span>补全内置条目</span>
                                     </button>
                                     <button
                                         type="button"
