@@ -4120,7 +4120,12 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     // currentPageIndex is the single source of truth → CSS settles to it, no race.
     swipeLayerRef.current?.classList.remove("phone-swipe-dragging");
     setSwipeDrag(0);
-    if (targetPageIndex !== page) setCurrentPageIndex(targetPageIndex);
+    if (targetPageIndex !== page) {
+      setCurrentPageIndex(targetPageIndex);
+    } else if (!editMode && dx < -swipeThreshold) {
+      // 桌面任意位置左滑（已到最后一页 / 只有一页）→ 回到待机画面
+      setShowStandby(true);
+    }
   }, [editMode, getSwipePageWidth, pageCount, setSwipeDrag]);
 
   // A canceled pointer (including rotation/OS gesture takeover) must not be treated
@@ -4159,6 +4164,24 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       window.removeEventListener("resize", resetSwipeAfterRotation);
     };
   }, [setSwipeDrag]);
+
+  // 切到后台再回来时重新展示待机画面（「设置 → 待机」关闭启动待机后不再自动弹出）
+  useEffect(() => {
+    let hiddenAt = 0;
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        return;
+      }
+      const hiddenFor = hiddenAt ? Date.now() - hiddenAt : 0;
+      hiddenAt = 0;
+      if (hiddenFor < 1000) return;
+      if (!loadStandbyHomeConfig().showOnLaunch) return;
+      setShowStandby(true);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
 
   const handleCloseXiaohongshu = useCallback((isBusy?: boolean) => {
     const shouldKeepMounted = isBusy ?? xiaohongshuBusy;
