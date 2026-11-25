@@ -78,6 +78,8 @@ export function StandbyHome({
   const [lines, setLines] = useState<StandbyLine[]>([]);
   const [lineLoading, setLineLoading] = useState(false);
   const [currentLine, setCurrentLine] = useState<StandbyLine | null>(null);
+  // 说话状态：点击后临时切换配套立绘，4 秒后自动恢复普通立绘
+  const [speaking, setSpeaking] = useState(false);
   const [showLinesPanel, setShowLinesPanel] = useState(false);
   const [showScalePanel, setShowScalePanel] = useState(false);
   // 立绘大小拖动草稿（松手才落盘，避免频繁重写体积很大的立绘配置）
@@ -160,6 +162,13 @@ export function StandbyHome({
     window.addEventListener(STANDBY_REGENERATE_LINES_EVENT, handler);
     return () => window.removeEventListener(STANDBY_REGENERATE_LINES_EVENT, handler);
   }, [resolvedCharacter, lines, refreshLines]);
+
+  // 说完 4 秒后切回普通立绘（台词气泡保留，可手动收起）
+  useEffect(() => {
+    if (!speaking) return;
+    const timer = window.setTimeout(() => setSpeaking(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [speaking, currentLine]);
 
   // ---- 切换角色 ----
   const characterIndex = validCharacters.findIndex(c => c.id === resolvedCharacter?.id);
@@ -262,8 +271,8 @@ export function StandbyHome({
       };
 
   const spriteUrl = asset?.sprite || resolvedCharacter.avatar || "";
-  // 说话时优先用配套立绘（如害羞差分），没有就沿用普通立绘
-  const displaySprite = (currentLine && asset?.speakingSprite) ? asset.speakingSprite : spriteUrl;
+  // 说话时优先用配套立绘（如害羞差分），4 秒后自动切回普通立绘
+  const displaySprite = (speaking && asset?.speakingSprite) ? asset.speakingSprite : spriteUrl;
   // 立绘缩放倍率（可在设置页或待机首页快捷按钮调整）
   const spriteScale = normalizeSpriteScale(
     scaleDraft && scaleDraft.characterId === resolvedCharacter.id
@@ -326,6 +335,7 @@ export function StandbyHome({
           if (lineLoading) return;
           const pick = pickRandomLine({ characterId: resolvedCharacter.id, date: todayIsoDate(), lines, updatedAt: "" });
           setCurrentLine(pick);
+          setSpeaking(true);
         }}>
           {displaySprite ? (
             <div
@@ -335,7 +345,7 @@ export function StandbyHome({
               <div
                 role="img"
                 aria-label={resolvedCharacter.name}
-                className={`standby-home-sprite${currentLine ? " is-speaking" : ""}`}
+                className="standby-home-sprite"
                 style={{ backgroundImage: `url("${displaySprite}")` }}
               />
             </div>
@@ -362,64 +372,76 @@ export function StandbyHome({
         )}
       </div>
 
-      {/* 台词气泡 */}
-      {currentLine && (
-        <div className="standby-home-line-bubble" role="status">
-          <p className="standby-home-line-text">{currentLine.text}</p>
-          <div className="standby-home-line-actions">
-            <button
-              className="standby-home-line-btn"
-              onClick={() => setShowLinesPanel(v => !v)}
-            >
-              <FileText size={14} strokeWidth={1.8} /> 台词
-            </button>
-            <button
-              className="standby-home-line-btn"
-              onClick={() => {
-                const pick = pickRandomLine({ characterId: resolvedCharacter.id, date: todayIsoDate(), lines, updatedAt: "" });
-                if (pick) setCurrentLine(pick);
-              }}
-            >
-              <RefreshCw size={14} strokeWidth={1.8} /> 换一句
-            </button>
-            <button
-              className="standby-home-line-btn"
-              onClick={() => setCurrentLine(null)}
-            >
-              <X size={14} strokeWidth={1.8} /> 收起
-            </button>
-          </div>
-        </div>
-      )}
+      {/* 台词气泡（绝对定位悬浮，不挤压立绘） */}
+      {(currentLine || showLinesPanel) && (
+        <div className="standby-home-bubble-layer">
+          {currentLine && (
+            <div className="standby-home-line-bubble" role="status">
+              <p className="standby-home-line-text">{currentLine.text}</p>
+              <div className="standby-home-line-actions">
+                <button
+                  className="standby-home-line-btn"
+                  onClick={() => setShowLinesPanel(v => !v)}
+                >
+                  <FileText size={14} strokeWidth={1.8} /> 台词
+                </button>
+                <button
+                  className="standby-home-line-btn"
+                  onClick={() => {
+                    const pick = pickRandomLine({ characterId: resolvedCharacter.id, date: todayIsoDate(), lines, updatedAt: "" });
+                    if (pick) setCurrentLine(pick);
+                    setSpeaking(true);
+                  }}
+                >
+                  <RefreshCw size={14} strokeWidth={1.8} /> 换一句
+                </button>
+                <button
+                  className="standby-home-line-btn"
+                  onClick={() => {
+                    setCurrentLine(null);
+                    setSpeaking(false);
+                    setShowLinesPanel(false);
+                  }}
+                >
+                  <X size={14} strokeWidth={1.8} /> 收起
+                </button>
+              </div>
+            </div>
+          )}
 
-      {/* 台词列表抽屉 */}
-      {showLinesPanel && (
-        <div className="standby-home-lines-panel" role="dialog" aria-label="今日台词">
-          <div className="standby-home-lines-header">
-            <span>今日台词（{lines.length}/{STANDBY_LINES_PER_DAY}）</span>
-            <button
-              className="standby-home-refresh-btn"
-              disabled={lineLoading}
-              onClick={() => void refreshLines(resolvedCharacter, lines)}
-            >
-              <RefreshCw size={14} className={lineLoading ? "spin" : ""} />
-              {lineLoading ? "生成中…" : "换一批"}
-            </button>
-          </div>
-          <ul>
-            {lines.map(line => (
-              <li
-                key={line.id}
-                className={currentLine?.id === line.id ? "is-current" : ""}
-                onClick={() => setCurrentLine(line)}
-              >
-                {line.text}
-              </li>
-            ))}
-            {lines.length === 0 && (
-              <li className="is-empty">暂无台词，点上面「换一批」生成</li>
-            )}
-          </ul>
+          {/* 台词列表抽屉 */}
+          {showLinesPanel && (
+            <div className="standby-home-lines-panel" role="dialog" aria-label="今日台词">
+              <div className="standby-home-lines-header">
+                <span>今日台词（{lines.length}/{STANDBY_LINES_PER_DAY}）</span>
+                <button
+                  className="standby-home-refresh-btn"
+                  disabled={lineLoading}
+                  onClick={() => void refreshLines(resolvedCharacter, lines)}
+                >
+                  <RefreshCw size={14} className={lineLoading ? "spin" : ""} />
+                  {lineLoading ? "生成中…" : "换一批"}
+                </button>
+              </div>
+              <ul>
+                {lines.map(line => (
+                  <li
+                    key={line.id}
+                    className={currentLine?.id === line.id ? "is-current" : ""}
+                    onClick={() => {
+                      setCurrentLine(line);
+                      setSpeaking(true);
+                    }}
+                  >
+                    {line.text}
+                  </li>
+                ))}
+                {lines.length === 0 && (
+                  <li className="is-empty">暂无台词，点上面「换一批」生成</li>
+                )}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 

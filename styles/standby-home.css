@@ -142,18 +142,9 @@
   pointer-events: none;
 }
 
-.standby-home-sprite.is-speaking {
-  animation: standby-talk 0.5s ease-in-out infinite;
-}
-
 @keyframes standby-breathe {
   0%, 100% { transform: translateY(0) scale(1); }
   50% { transform: translateY(-4px) scale(1.01); }
-}
-
-@keyframes standby-talk {
-  0%, 100% { transform: translateY(0) scale(1); }
-  50% { transform: translateY(-2px) scale(1.02) rotate(-0.6deg); }
 }
 
 .standby-home-sprite-fallback {
@@ -222,12 +213,24 @@
 .standby-home-prev { left: 2px; }
 .standby-home-next { right: 2px; }
 
-/* --- 台词气泡 --- */
+/* --- 台词气泡（悬浮层，不占布局、不挤压立绘） --- */
+
+.standby-home-bubble-layer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 112px);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 18px;
+  max-height: 58%;
+  pointer-events: none;
+}
 
 .standby-home-line-bubble {
-  position: relative;
-  z-index: 3;
-  margin: -10px 18px 0;
+  pointer-events: auto;
   padding: 14px 16px 12px;
   background: rgba(16, 18, 24, 0.88);
   -webkit-backdrop-filter: blur(18px) saturate(150%);
@@ -235,7 +238,6 @@
   border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
-  max-width: calc(100% - 36px);
   animation: standby-bubble-in 0.28s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -281,9 +283,7 @@
 /* --- 台词列表抽屉 --- */
 
 .standby-home-lines-panel {
-  position: relative;
-  z-index: 4;
-  margin: 10px 18px 0;
+  pointer-events: auto;
   padding: 12px 14px 14px;
   background: rgba(16, 18, 24, 0.9);
   -webkit-backdrop-filter: blur(18px) saturate(150%);
@@ -550,7 +550,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .standby-home-sprite { animation: none; }
-  .standby-home-sprite.is-speaking { animation: none; }
   .standby-home-sprite-frame { transition: none; }
   .standby-home-line-bubble,
   .standby-home-lines-panel { animation: none; }
