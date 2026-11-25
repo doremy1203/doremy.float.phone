@@ -9,6 +9,8 @@ export type StandbyCharacterAsset = {
   speakingSprite: string;
   /** 背景图片 URL；空字符串表示跟随桌面壁纸 */
   background: string;
+  /** 立绘缩放倍率（0.5 ~ 2.0，默认 1） */
+  spriteScale: number;
   updatedAt: string;
 };
 
@@ -28,6 +30,18 @@ export const STANDBY_HOME_UPDATED_EVENT = "ai-phone-standby-home-updated";
 registerKvMigration(STANDBY_HOME_STORAGE_KEY);
 
 export const STANDBY_ASSET_MAX_BYTES = 10 * 1024 * 1024; // 10MB per file
+
+/** 立绘缩放倍率的取值范围 */
+export const STANDBY_SPRITE_SCALE_MIN = 0.5;
+export const STANDBY_SPRITE_SCALE_MAX = 2;
+export const STANDBY_SPRITE_SCALE_DEFAULT = 1;
+
+/** 把任意输入收敛到合法的立绘缩放倍率 */
+export function normalizeSpriteScale(value: unknown): number {
+  const num = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(num)) return STANDBY_SPRITE_SCALE_DEFAULT;
+  return Math.min(STANDBY_SPRITE_SCALE_MAX, Math.max(STANDBY_SPRITE_SCALE_MIN, num));
+}
 
 export const DEFAULT_STANDBY_HOME_CONFIG: StandbyHomeConfig = {
   characters: {},
@@ -54,6 +68,7 @@ function normalizeAsset(value: unknown): StandbyCharacterAsset | null {
     sprite: normalizeAssetUrl(source.sprite),
     speakingSprite: normalizeAssetUrl(source.speakingSprite),
     background: normalizeAssetUrl(source.background),
+    spriteScale: normalizeSpriteScale(source.spriteScale),
     updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : new Date().toISOString(),
   };
 }
@@ -103,7 +118,7 @@ export function saveStandbyHomeConfig(patch: Partial<StandbyHomeConfig>): Standb
 /** 更新单个角色的立绘/背景 */
 export function saveStandbyCharacterAsset(
   characterId: string,
-  patch: Partial<Pick<StandbyCharacterAsset, "sprite" | "speakingSprite" | "background">>,
+  patch: Partial<Pick<StandbyCharacterAsset, "sprite" | "speakingSprite" | "background" | "spriteScale">>,
 ): StandbyHomeConfig {
   if (!characterId) return loadStandbyHomeConfig();
   const current = loadStandbyHomeConfig();
@@ -112,6 +127,7 @@ export function saveStandbyCharacterAsset(
     sprite: "",
     speakingSprite: "",
     background: "",
+    spriteScale: STANDBY_SPRITE_SCALE_DEFAULT,
     updatedAt: "",
   };
   const nextAsset: StandbyCharacterAsset = {
@@ -121,6 +137,9 @@ export function saveStandbyCharacterAsset(
       ? normalizeAssetUrl(patch.speakingSprite)
       : (prev.speakingSprite ?? ""),
     background: "background" in patch ? normalizeAssetUrl(patch.background) : prev.background,
+    spriteScale: "spriteScale" in patch
+      ? normalizeSpriteScale(patch.spriteScale)
+      : normalizeSpriteScale(prev.spriteScale),
     updatedAt: new Date().toISOString(),
   };
   return saveStandbyHomeConfig({
@@ -135,6 +154,7 @@ export function getStandbyCharacterAsset(config: StandbyHomeConfig, characterId:
       sprite: "",
       speakingSprite: "",
       background: "",
+      spriteScale: STANDBY_SPRITE_SCALE_DEFAULT,
       updatedAt: "",
     }
   );

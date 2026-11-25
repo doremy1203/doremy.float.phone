@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { ChevronUp, Home, MessageCircle, Settings, RefreshCw, FileText, X } from "lucide-react";
+import { ChevronUp, Home, MessageCircle, Settings, RefreshCw, FileText, X, Maximize2 } from "lucide-react";
 
 import type { Character } from "@/lib/character-types";
 import {
   getStandbyCharacterAsset,
   loadStandbyHomeConfig,
+  normalizeSpriteScale,
+  saveStandbyCharacterAsset,
   type StandbyHomeConfig,
 } from "@/lib/standby-storage";
 import {
@@ -77,6 +79,9 @@ export function StandbyHome({
   const [lineLoading, setLineLoading] = useState(false);
   const [currentLine, setCurrentLine] = useState<StandbyLine | null>(null);
   const [showLinesPanel, setShowLinesPanel] = useState(false);
+  const [showScalePanel, setShowScalePanel] = useState(false);
+  // 立绘大小拖动草稿（松手才落盘，避免频繁重写体积很大的立绘配置）
+  const [scaleDraft, setScaleDraft] = useState<{ characterId: string; value: number } | null>(null);
 
   const validCharacters = useMemo(
     () => characters.filter(c => !!c.id && !!c.name),
@@ -259,6 +264,21 @@ export function StandbyHome({
   const spriteUrl = asset?.sprite || resolvedCharacter.avatar || "";
   // 说话时优先用配套立绘（如害羞差分），没有就沿用普通立绘
   const displaySprite = (currentLine && asset?.speakingSprite) ? asset.speakingSprite : spriteUrl;
+  // 立绘缩放倍率（可在设置页或待机首页快捷按钮调整）
+  const spriteScale = normalizeSpriteScale(
+    scaleDraft && scaleDraft.characterId === resolvedCharacter.id
+      ? scaleDraft.value
+      : asset?.spriteScale,
+  );
+  const commitSpriteScale = (value: number) => {
+    const next = normalizeSpriteScale(value);
+    if (next === normalizeSpriteScale(asset?.spriteScale)) {
+      setScaleDraft(null);
+      return;
+    }
+    setConfig(saveStandbyCharacterAsset(resolvedCharacter.id, { spriteScale: next }));
+    setScaleDraft(null);
+  };
 
   return (
     <div
@@ -309,11 +329,16 @@ export function StandbyHome({
         }}>
           {displaySprite ? (
             <div
-              role="img"
-              aria-label={resolvedCharacter.name}
-              className={`standby-home-sprite${currentLine ? " is-speaking" : ""}`}
-              style={{ backgroundImage: `url("${displaySprite}")` }}
-            />
+              className="standby-home-sprite-frame"
+              style={{ "--standby-sprite-scale": String(spriteScale) } as CSSProperties}
+            >
+              <div
+                role="img"
+                aria-label={resolvedCharacter.name}
+                className={`standby-home-sprite${currentLine ? " is-speaking" : ""}`}
+                style={{ backgroundImage: `url("${displaySprite}")` }}
+              />
+            </div>
           ) : (
             <div className="standby-home-sprite-fallback" aria-hidden="true">
               {resolvedCharacter.name.slice(0, 1)}
@@ -400,12 +425,55 @@ export function StandbyHome({
 
       {/* 底部：上滑提示 + 和 ta 聊聊 + 手势提示 */}
       <footer className="standby-home-bottom">
+        {showScalePanel && (
+          <div
+            className="standby-home-scale-panel"
+            role="dialog"
+            aria-label="立绘大小"
+            onPointerDown={e => e.stopPropagation()}
+            onPointerMove={e => e.stopPropagation()}
+            onPointerUp={e => e.stopPropagation()}
+          >
+            <span className="standby-home-scale-label">立绘大小</span>
+            <input
+              type="range"
+              min={0.5}
+              max={2}
+              step={0.05}
+              value={spriteScale}
+              aria-label="立绘大小"
+              onChange={e => setScaleDraft({
+                characterId: resolvedCharacter.id,
+                value: Number(e.target.value),
+              })}
+              onPointerUp={e => commitSpriteScale(Number(e.currentTarget.value))}
+              onKeyUp={e => commitSpriteScale(Number(e.currentTarget.value))}
+              onBlur={e => commitSpriteScale(Number(e.currentTarget.value))}
+            />
+            <span className="standby-home-scale-value">{Math.round(spriteScale * 100)}%</span>
+            <button
+              type="button"
+              className="standby-home-scale-reset"
+              onClick={() => commitSpriteScale(1)}
+            >
+              重置
+            </button>
+          </div>
+        )}
         <div className="standby-home-hint">
           轻点立绘说话 · 左右滑动换人 · 空白处上滑回桌面
         </div>
         <div className="standby-home-actions">
           <button className="standby-home-chat-btn" onClick={() => onEnterChat?.(resolvedCharacter.id)}>
             <MessageCircle size={16} strokeWidth={1.8} /> 和 ta 聊聊
+          </button>
+          <button
+            className="standby-home-desktop-btn"
+            onClick={() => setShowScalePanel(v => !v)}
+            aria-label="调整立绘大小"
+            aria-expanded={showScalePanel}
+          >
+            <Maximize2 size={16} strokeWidth={1.8} />
           </button>
           <button className="standby-home-desktop-btn" onClick={onExitHome} aria-label="上滑进入桌面">
             <ChevronUp size={16} strokeWidth={1.8} />

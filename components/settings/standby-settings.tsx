@@ -9,6 +9,7 @@ import type { Character } from "@/lib/character-types";
 import {
   getStandbyCharacterAsset,
   loadStandbyHomeConfig,
+  normalizeSpriteScale,
   readFileAsDataUrl,
   requestStandbyNow,
   saveStandbyCharacterAsset,
@@ -94,6 +95,23 @@ export function StandbySettingsPage({ onNotice }: StandbySettingsPageProps) {
     const next = saveStandbyCharacterAsset(activeId, { [kind]: "" });
     setConfig(next);
     onNotice(ASSET_LABELS[kind].cleared);
+  };
+
+  // 立绘大小：拖动时只更新本地预览，松手才落盘，避免频繁写入大图配置
+  const [scaleDraft, setScaleDraft] = useState(1);
+  useEffect(() => {
+    setScaleDraft(normalizeSpriteScale(activeAsset?.spriteScale));
+  }, [activeAsset?.characterId, activeAsset?.spriteScale]);
+
+  const commitScale = (activeId: string, value: number) => {
+    const next = normalizeSpriteScale(value);
+    const current = normalizeSpriteScale(getStandbyCharacterAsset(config, activeId).spriteScale);
+    if (next === current) {
+      setScaleDraft(next);
+      return;
+    }
+    setConfig(saveStandbyCharacterAsset(activeId, { spriteScale: next }));
+    onNotice(`立绘大小已设为 ${Math.round(next * 100)}%`);
   };
 
   const openFile = (kind: AssetKind) => {
@@ -224,6 +242,45 @@ export function StandbySettingsPage({ onNotice }: StandbySettingsPageProps) {
             onChoose={() => openFile("sprite")}
             onClear={() => clearAsset(activeChar.id, "sprite")}
           />
+          <div className="g-card" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div>
+                <div className="ts-15 font-semibold text-[var(--c-text)]">立绘大小</div>
+                <div className="ts-12 text-[var(--c-icon)]" style={{ marginTop: 2 }}>
+                  觉得太大或太小都能调，待机首页底部也能快捷调整
+                </div>
+              </div>
+              <button
+                type="button"
+                className="ui-btn ui-btn-ghost"
+                onClick={() => commitScale(activeChar.id, 1)}
+              >
+                重置
+              </button>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span className="ts-12 text-[var(--c-icon)]">50%</span>
+              <input
+                type="range"
+                min={0.5}
+                max={2}
+                step={0.05}
+                value={scaleDraft}
+                aria-label="立绘大小"
+                style={{ flex: 1, minWidth: 0, accentColor: "var(--c-accent, #7c98ff)" }}
+                onChange={e => setScaleDraft(Number(e.target.value))}
+                onPointerUp={e => commitScale(activeChar.id, Number(e.currentTarget.value))}
+                onKeyUp={e => commitScale(activeChar.id, Number(e.currentTarget.value))}
+                onBlur={e => commitScale(activeChar.id, Number(e.currentTarget.value))}
+              />
+              <span
+                className="ts-12 text-[var(--c-text)]"
+                style={{ minWidth: 42, textAlign: "right", fontVariantNumeric: "tabular-nums" }}
+              >
+                {Math.round(scaleDraft * 100)}%
+              </span>
+            </div>
+          </div>
           <AssetCard
             title={`${activeChar.name} 的说话立绘`}
             desc="点击立绘说话时临时切换（如害羞 / 张嘴差分），说完自动恢复"
