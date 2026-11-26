@@ -179,6 +179,8 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
       const next = applyInspectionGeneratedContent(owner.id, bundle);
       setPhone(next);
       return next;
+    } catch {
+      return null;
     } finally {
       setGenerating(false);
     }
@@ -208,7 +210,12 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
 
   const handleRefresh = useCallback(async () => {
     if (generating) return;
-    await runGenerate();
+    const next = await runGenerate();
+    if (!next) {
+      setBubble("……刷新失败了，等一下再试。");
+      setBubbleOpen(true);
+      return;
+    }
     void requestComment(tab, "刚刚刷新了整部手机的内容");
   }, [generating, runGenerate, requestComment, tab]);
 
@@ -350,6 +357,7 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
           type="button"
           className="inspection-refresh-btn"
           onClick={() => void handleRefresh()}
+          onPointerDown={event => event.stopPropagation()}
           disabled={generating}
           aria-label="刷新手机内容"
         >

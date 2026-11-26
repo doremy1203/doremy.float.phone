@@ -66,7 +66,36 @@
   background: rgba(255, 255, 255, 0.06);
   color: #dfe1ea;
   cursor: pointer;
+  touch-action: manipulation;
   transition: background-color 0.14s ease, transform 0.14s ease;
+}
+
+.inspection-refresh-btn {
+  height: 34px;
+  padding: 0 12px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  color: #dfe1ea;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color 0.14s ease, transform 0.14s ease;
+}
+
+.inspection-refresh-btn:active {
+  background: rgba(255, 255, 255, 0.14);
+  transform: scale(0.96);
+}
+
+.inspection-refresh-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .inspection-icon-btn:active {
