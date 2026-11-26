@@ -19971,26 +19971,3 @@
 .cp-scroll-guard > * {
   flex-shrink: 0;
 }
-
-/* ========= 查岗入口（角色卡片右上角） ========= */
-.cp-inspection-btn {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 3;
-  padding: 4px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.82);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.cp-inspection-btn:active {
-  background: rgba(255, 255, 255, 0.22);
-  color: #fff;
-}
