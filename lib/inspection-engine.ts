@@ -20,6 +20,24 @@ type ChatTurn = { role: "system" | "user" | "assistant"; content: string };
 
 const TONES: InspectionPhotoTone[] = ["silver", "graphite", "mist", "shadow"];
 
+/** 查岗固定请求超时，避免接口卡住导致刷新按钮一直不可用 */
+const INSPECTION_LLM_TIMEOUT_MS = 25000;
+
+async function callInspectionLLM(
+  config: ApiConfig,
+  messages: ChatTurn[],
+  options: { temperature?: number; max_tokens?: number; label?: string },
+): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), INSPECTION_LLM_TIMEOUT_MS);
+  try {
+    const result = await simpleLLMCall(config, messages, { ...options, signal: controller.signal });
+    return result.content ?? null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 查岗使用该角色「聊天」绑定的 API；没配置时回落到第一条可用 API */
 export function resolveInspectionApiConfig(characterId: string): ApiConfig | null {
   try {
@@ -85,12 +103,12 @@ export async function decideInspectionPermission(owner: Character): Promise<{ al
     },
   ];
   try {
-    const result = await simpleLLMCall(config, messages, {
+    const content = await callInspectionLLM(config, messages, {
       temperature: 0.8,
       max_tokens: 160,
       label: "inspection-permission",
     });
-    const parsed = extractJsonObject(result.content || "");
+    const parsed = extractJsonObject(content || "");
     if (!parsed) return { allow: true, reason: "……给，看吧。" };
     const reason = cleanLine(parsed.reason, 60);
     return {
@@ -145,12 +163,12 @@ export async function generateInspectionBundle(
   ];
 
   try {
-    const result = await simpleLLMCall(config, messages, {
+    const content = await callInspectionLLM(config, messages, {
       temperature: 0.95,
       max_tokens: 1600,
       label: "inspection-bundle",
     });
-    const parsed = extractJsonObject(result.content || "");
+    const parsed = extractJsonObject(content || "");
     if (!parsed) return null;
 
     const validFriendIds = new Set(friends.map(friend => friend.id));
@@ -261,12 +279,12 @@ export async function generateFriendReply(
   ];
 
   try {
-    const result = await simpleLLMCall(config, messages, {
+    const content = await callInspectionLLM(config, messages, {
       temperature: 0.9,
       max_tokens: 160,
       label: "inspection-friend-reply",
     });
-    const reply = cleanLine(result.content, 160);
+    const reply = cleanLine(content, 160);
     return reply || null;
   } catch {
     return null;
@@ -297,73 +315,111 @@ export async function generateInspectionComment(
     },
   ];
   try {
-    const result = await simpleLLMCall(config, messages, {
+    const content = await callInspectionLLM(config, messages, {
       temperature: 0.9,
       max_tokens: 100,
       label: "inspection-comment",
     });
-    return cleanLine(result.content, 60) || null;
+    return cleanLine(content, 60) || null;
   } catch {
     return null;
   }
 }
 
-/** 本地兜底：没配置 API 时也能看到一份合理内容 */
+function shuffle<T>(list: T[]): T[] {
+  const next = [...list];
+  for (let i = next.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [next[i], next[j]] = [next[j], next[i]];
+  }
+  return next;
+}
+
+/** 本地兜底：没配置 API 时也能看到一份合理内容；每次刷新随机组合，刷新能看到变化 */
 export function buildFallbackBundle(owner: Character, friends: Character[]): InspectionGeneratedBundle {
-  const plans = [
-    { title: "周末的时间", body: `把周六下午空出来，想去找${owner.name === "我" ? "你" : "你"}。` },
+  const planPool = [
+    { title: "周末的时间", body: "把周六下午空出来，想去找你。" },
     { title: "要记得买", body: "常喝的那款咖啡豆快没了，顺便买点牛奶。" },
     { title: "还没回的消息", body: "有一条消息看到了没回，想着当面说比较好。" },
+    { title: "下次一起", body: "那家店想去很久了，等你有空。" },
+    { title: "该收拾了", body: "房间乱得有点过分，周末大扫除。" },
+    { title: "早睡计划", body: "从今天开始一点前睡，先坚持三天。" },
   ];
-  const unsaid = [
+  const unsaidPool = [
     { title: "其实很在意", body: "今天看到你和别人聊得开心，有点不是滋味，但又不想显得小气。" },
     { title: "想说但算了", body: "本来想问你周末有没有空，打了又删掉了。" },
     { title: "关于那天", body: "那天说话可能有点重，其实不是那个意思。" },
+    { title: "有点想你", body: "这句话打好几次了，还是没发出去。" },
+    { title: "别太累", body: "想让你少熬一点夜，又怕自己管太多。" },
+    { title: "照片没删", body: "那张合照一直留在相册里，没舍得删。" },
   ];
-  const memos = [
-    ...plans.map(item => ({ category: "plan" as const, ...item })),
-    ...unsaid.map(item => ({ category: "unsaid" as const, ...item })),
-  ];
-  const photos = [
+  const photoPool = [
     { title: "傍晚", caption: "窗外颜色很好看，随手拍的。", location: "窗边", timeLabel: "18:42", tone: "silver" as const },
     { title: "咖啡", caption: "今天第三杯了。", location: "楼下", timeLabel: "15:10", tone: "graphite" as const },
     { title: "回家路上", caption: "路灯亮起来的那一瞬间。", location: "街角", timeLabel: "20:06", tone: "mist" as const },
     { title: "书桌", caption: "摊了一桌子，懒得收。", location: "家", timeLabel: "23:17", tone: "shadow" as const },
     { title: "雨天", caption: "忘记带伞的一天。", location: "公司楼下", timeLabel: "09:05", tone: "silver" as const },
     { title: "夜宵", caption: "说好只吃一点的。", location: "巷口", timeLabel: "22:38", tone: "graphite" as const },
+    { title: "天空", caption: "抬头的时候刚好有云散开。", location: "天台", timeLabel: "17:21", tone: "mist" as const },
+    { title: "新杯子", caption: "买了很久，今天才拆。", location: "家", timeLabel: "13:46", tone: "shadow" as const },
+    { title: "地铁", caption: "人很多，站了一路。", location: "地铁站", timeLabel: "08:32", tone: "graphite" as const },
+    { title: "花", caption: "路过花店，顺手带了一支。", location: "花店", timeLabel: "16:08", tone: "silver" as const },
   ];
+
+  const memos = [
+    ...shuffle(planPool).slice(0, 3).map(item => ({ category: "plan" as const, ...item })),
+    ...shuffle(unsaidPool).slice(0, 3).map(item => ({ category: "unsaid" as const, ...item })),
+  ];
+  const photos = shuffle(photoPool).slice(0, 6);
+
   const conversations: InspectionGeneratedBundle["conversations"] = {};
-  friends.slice(0, 6).forEach((friend, index) => {
-    const variants = [
+  friends.slice(0, 6).forEach(friend => {
+    const variants: { direction: "incoming" | "outgoing"; text: string }[][] = [
       [
-        { direction: "incoming" as const, text: `${owner.name}，周末出来吗？` },
-        { direction: "outgoing" as const, text: "看情况，最近有点忙。" },
-        { direction: "incoming" as const, text: "行吧，忙完记得说一声。" },
+        { direction: "incoming", text: `${owner.name}，周末出来吗？` },
+        { direction: "outgoing", text: "看情况，最近有点忙。" },
+        { direction: "incoming", text: "行吧，忙完记得说一声。" },
       ],
       [
-        { direction: "outgoing" as const, text: "上次那家店叫什么来着？" },
-        { direction: "incoming" as const, text: "你怎么又忘了，我发你定位。" },
+        { direction: "outgoing", text: "上次那家店叫什么来着？" },
+        { direction: "incoming", text: "你怎么又忘了，我发你定位。" },
+        { direction: "outgoing", text: "收到，谢了。" },
       ],
       [
-        { direction: "incoming" as const, text: "你最近是不是没睡好？" },
-        { direction: "outgoing" as const, text: "有一点，过两天就好了。" },
-        { direction: "incoming" as const, text: "别硬撑。" },
+        { direction: "incoming", text: "你最近是不是没睡好？" },
+        { direction: "outgoing", text: "有一点，过两天就好了。" },
+        { direction: "incoming", text: "别硬撑。" },
+      ],
+      [
+        { direction: "incoming", text: `${friend.name}：照片我修好了，回头发你。` },
+        { direction: "outgoing", text: "不急，你慢慢弄。" },
+      ],
+      [
+        { direction: "outgoing", text: "晚上有空吗，想找你聊两句。" },
+        { direction: "incoming", text: "有啊，怎么了？" },
+        { direction: "outgoing", text: "没什么，见面说。" },
+      ],
+      [
+        { direction: "incoming", text: "你又把东西落我这了。" },
+        { direction: "outgoing", text: "明天顺路去拿。" },
       ],
     ];
-    conversations[friend.id] = variants[index % variants.length];
+    conversations[friend.id] = variants[Math.floor(Math.random() * variants.length)];
   });
   return { conversations, memos, photos };
 }
 
-const COMMENT_FALLBACK: Record<string, string> = {
-  chat: "……聊天记录也要一条条看？",
-  moments: "动态就那些，没什么好看的。",
-  memos: "备忘录别看太久，有点丢人。",
-  photos: "相册你随便翻吧，反正也没几张。",
+const COMMENT_FALLBACK: Record<string, string[]> = {
+  chat: ["……聊天记录也要一条条看？", "看就看，别笑我。", "都翻到这儿了，还装没看见。"],
+  moments: ["动态就那些，没什么好看的。", "那条是随手发的，别当真。", "你翻得比我自己还仔细。"],
+  memos: ["备忘录别看太久，有点丢人。", "计划那栏……你就当没看见吧。", "说不出口的话，现在被你看见了。"],
+  photos: ["相册你随便翻吧，反正也没几张。", "那张拍得不好，删掉行不行。", "怎么翻到这张了。"],
 };
 
 export function buildFallbackComment(page: string): string {
-  return COMMENT_FALLBACK[page] || "……看够了吗？";
+  const list = COMMENT_FALLBACK[page];
+  if (list && list.length > 0) return list[Math.floor(Math.random() * list.length)];
+  return "……看够了吗？";
 }
 
 /** 把查岗过程中的互动写入该角色的长期记忆（参与后续检索与看法更新） */

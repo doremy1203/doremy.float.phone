@@ -170,8 +170,12 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
   const runGenerate = useCallback(async (): Promise<InspectionPhoneState | null> => {
     if (!owner) return null;
     setGenerating(true);
+    const startedAt = Date.now();
     try {
       const bundle = await generateInspectionBundle(owner, friends) ?? buildFallbackBundle(owner, friends);
+      // 兜底内容几乎是瞬时返回的，保留一点最短加载时间，避免点击后毫无反馈
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < 600) await new Promise(resolve => window.setTimeout(resolve, 600 - elapsed));
       const next = applyInspectionGeneratedContent(owner.id, bundle);
       setPhone(next);
       return next;
@@ -344,12 +348,13 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
         <div className="inspection-title">{owner.name} 的手机</div>
         <button
           type="button"
-          className="inspection-icon-btn"
+          className="inspection-refresh-btn"
           onClick={() => void handleRefresh()}
           disabled={generating}
           aria-label="刷新手机内容"
         >
-          <RefreshCw size={17} strokeWidth={1.8} className={generating ? "spin" : ""} />
+          <RefreshCw size={15} strokeWidth={1.8} className={generating ? "spin" : ""} />
+          {generating ? "刷新中" : "刷新"}
         </button>
       </header>
 
@@ -369,6 +374,12 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
       )}
 
       <div className="inspection-body">
+        {generating && (
+          <div className="inspection-refreshing" role="status">
+            <RefreshCw size={13} strokeWidth={2} className="spin" />
+            正在刷新手机内容…
+          </div>
+        )}
         {tab === "chat" && !activeChat && (
           <div className="inspection-chat-list">
             <div className="inspection-chat-row">
