@@ -100,6 +100,8 @@ import { DEFAULT_CHECKPHONE_BILINGUAL_PROMPT } from "@/lib/bilingual-prompt-defa
 
 type CheckPhoneAppProps = {
   onClose: () => void;
+  /** 打开「查岗」新交互（查看角色手机：权限弹窗 + 四模块 + 实时发言） */
+  onStartInspection?: (characterId: string) => void;
 };
 
 type ManifestState = {
@@ -289,7 +291,7 @@ function getAppIconClass(appId: CheckPhoneAppId, isDock = false) {
   return baseClass;
 }
 
-export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
+export function CheckPhoneApp({ onClose, onStartInspection }: CheckPhoneAppProps) {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [activeCharId, setActiveCharId] = useState<string | null>(null);
   const [states, setStates] = useState<Record<string, ManifestState>>({});
@@ -1205,6 +1207,20 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
                   <div className="cp-name-badge">
                     {character.name || "Unknown"}
                   </div>
+
+                  {onStartInspection && (
+                    <button
+                      type="button"
+                      className="cp-inspection-btn"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onStartInspection(character.id);
+                      }}
+                      onKeyDown={(event) => event.stopPropagation()}
+                    >
+                      查岗
+                    </button>
+                  )}
 
                   {/* Decryption status indicator */}
                   <div className={`cp-status-indicator ${isDecrypted ? 'cp-status-indicator--decrypted' : 'cp-status-indicator--encrypted'}`}>

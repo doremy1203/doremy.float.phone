@@ -43,6 +43,7 @@ import { MascotPreviewHost } from "@/components/mascot/mascot-preview-host";
 import { useMusicControlsOptional } from "@/lib/music-context";
 import { PhoneResourcesApp, type ResourceSubPage } from "@/components/phone-resources-app";
 import { CheckPhoneApp } from "@/components/checkphone/checkphone-app";
+import { InspectionApp } from "@/components/inspection/inspection-app";
 import { ShoppingApp } from "@/components/shopping/shopping-app";
 import { GameHubApp } from "@/components/game/game-hub-app";
 import { MixologyApp } from "@/components/mixology/mixology-app";
@@ -1224,6 +1225,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [standbyCharacterId, setStandbyCharacterId] = useState<string | null>(
     () => loadStandbyHomeConfig().lastCharacterId || null,
   );
+  const [inspectionCharId, setInspectionCharId] = useState<string | null>(null);
   const [characters, setCharacters] = useState<Character[]>(() => loadCharacters());
   useEffect(() => {
     const syncCharacters = () => setCharacters(loadCharacters());
@@ -4569,7 +4571,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     }
 
     if (activeApp === "checkphone") {
-      return <CheckPhoneApp onClose={() => setActiveApp(null)} />;
+      return <CheckPhoneApp onClose={() => setActiveApp(null)} onStartInspection={id => setInspectionCharId(id)} />;
     }
 
     if (activeApp === "shopping") {
@@ -5533,6 +5535,14 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                   clone keeps theme variables + glass effect selectors
                   (.phone-shell[data-icon-effect] etc.); follows pointer via ref */}
               <div ref={ghostRef} className="drag-ghost" />
+
+              {/* 查岗：查看角色手机（权限弹窗 + 聊天/动态/备忘录/相册 + 实时发言） */}
+              {inspectionCharId && (
+                <InspectionApp
+                  characterId={inspectionCharId}
+                  onClose={() => setInspectionCharId(null)}
+                />
+              )}
 
               {/* 待机首页：App 启动先展示，上滑 / 按钮进桌面 */}
               {showStandby && (
