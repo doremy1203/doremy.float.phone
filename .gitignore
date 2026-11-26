@@ -37,6 +37,11 @@ tools/weixin-local-assistant/config.txt
 !.env.example
 !.env.template
 
+# Cloudflare OpenNext build output and local development state.
+.open-next/
+.wrangler/
+.dev.vars
+
 # Android local build outputs and signing material.
 .gradle/
 android-shell/.gradle/
