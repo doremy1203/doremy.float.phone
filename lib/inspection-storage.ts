@@ -28,15 +28,24 @@ export type InspectionChatMessage = {
   timeLabel: string;
 };
 
+/** 根据人设 / 记忆生成出来的手机好友（不属于全局角色） */
+export type InspectionNpc = {
+  id: string;
+  name: string;
+  relation: string;
+};
+
 /** 某个角色手机里持久化的内容（真实聊天 / 动态不在这里，展示时实时读取） */
 export type InspectionPhoneState = {
   characterId: string;
   /** 用户在该角色通讯录里的备注 */
   remarkForUser: string;
-  /** 与该角色好友（其他 NPC）的聊天记录，key = 好友 characterId */
+  /** 与该角色好友（其他 NPC）的聊天记录，key = 好友 characterId 或 npc id */
   conversations: Record<string, InspectionChatMessage[]>;
   memos: InspectionMemo[];
   photos: InspectionPhoto[];
+  /** 人设 / 记忆衍生出的手机好友 */
+  npcs: InspectionNpc[];
   generatedAt: string;
   updatedAt: string;
 };
@@ -62,6 +71,27 @@ function createId(prefix: string): string {
 function cleanText(value: unknown, maxLength: number): string {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+}
+
+/** 由名字推导稳定的 NPC id，刷新时同名 NPC 不会重复 */
+export function inspectionNpcId(name: string): string {
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = (hash * 31 + name.charCodeAt(index)) | 0;
+  }
+  return `npc_${Math.abs(hash).toString(36)}`;
+}
+
+function normalizeNpc(raw: unknown): InspectionNpc | null {
+  if (!raw || typeof raw !== "object") return null;
+  const source = raw as Partial<InspectionNpc>;
+  const name = cleanText(source.name, 20);
+  if (!name) return null;
+  return {
+    id: typeof source.id === "string" && source.id ? source.id : inspectionNpcId(name),
+    name,
+    relation: cleanText(source.relation, 40),
+  };
 }
 
 function normalizeMemo(raw: unknown): InspectionMemo | null {
@@ -140,6 +170,9 @@ function normalizeState(raw: unknown, characterId: string): InspectionPhoneState
     photos: Array.isArray(source.photos)
       ? source.photos.map(normalizePhoto).filter((item): item is InspectionPhoto => !!item).slice(0, INSPECTION_MAX_PHOTOS)
       : [],
+    npcs: Array.isArray(source.npcs)
+      ? source.npcs.map(normalizeNpc).filter((item): item is InspectionNpc => !!item).slice(0, 4)
+      : [],
     generatedAt: typeof source.generatedAt === "string" ? source.generatedAt : "",
     updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : "",
   };
@@ -177,6 +210,7 @@ export function createEmptyInspectionPhone(characterId: string): InspectionPhone
     conversations: {},
     memos: [],
     photos: [],
+    npcs: [],
     generatedAt: "",
     updatedAt: new Date().toISOString(),
   };
@@ -237,6 +271,7 @@ export function applyInspectionGeneratedContent(
     conversations?: Record<string, Omit<InspectionChatMessage, "id" | "timeLabel">[]>;
     memos?: unknown[];
     photos?: unknown[];
+    npcs?: unknown[];
   },
 ): InspectionPhoneState {
   return mutatePhone(characterId, state => {
@@ -259,11 +294,16 @@ export function applyInspectionGeneratedContent(
       .map(normalizePhoto)
       .filter((item): item is InspectionPhoto => !!item)
       .slice(0, INSPECTION_MAX_PHOTOS);
+    const npcs = (payload.npcs ?? [])
+      .map(normalizeNpc)
+      .filter((item): item is InspectionNpc => !!item)
+      .slice(0, 4);
     return {
       ...state,
       conversations,
       memos,
       photos,
+      npcs,
       generatedAt: new Date().toISOString(),
     };
   });

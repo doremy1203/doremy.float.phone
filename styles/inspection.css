@@ -45,13 +45,27 @@
   background: linear-gradient(180deg, rgba(10, 11, 14, 0.92) 0%, rgba(10, 11, 14, 0) 100%);
 }
 
-.inspection-title {
+.inspection-title-group {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+
+.inspection-title {
   text-align: center;
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.02em;
   color: #f3f4f8;
+}
+
+.inspection-updated {
+  font-size: 10px;
+  line-height: 1.2;
+  color: #6f7382;
 }
 
 .inspection-icon-btn {

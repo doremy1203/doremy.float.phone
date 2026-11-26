@@ -92,9 +92,23 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
   const [askBusy, setAskBusy] = useState(false);
   const [askResult, setAskResult] = useState<{ allow: boolean; reason: string } | null>(null);
   const [phone, setPhone] = useState<InspectionPhoneState | null>(() => loadInspectionPhone(characterId));
+
+  // 人设 / 记忆衍生出的手机好友，和真实角色一起出现在聊天列表里
+  const allFriends = useMemo<Character[]>(() => {
+    const npcFriends: Character[] = (phone?.npcs ?? []).map(npc => ({
+      id: npc.id,
+      name: npc.name,
+      avatar: null,
+      persona: npc.relation,
+      createdAt: "",
+      updatedAt: "",
+    }));
+    return [...friends, ...npcFriends];
+  }, [friends, phone?.npcs]);
   const [tab, setTab] = useState<TabKey>("chat");
   const [activeChat, setActiveChat] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [justRefreshed, setJustRefreshed] = useState(false);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [remarkEditing, setRemarkEditing] = useState(false);
@@ -172,7 +186,7 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
     setGenerating(true);
     const startedAt = Date.now();
     try {
-      const bundle = await generateInspectionBundle(owner, friends) ?? buildFallbackBundle(owner, friends);
+      const bundle = await generateInspectionBundle(owner, allFriends) ?? buildFallbackBundle(owner, allFriends);
       // 兜底内容几乎是瞬时返回的，保留一点最短加载时间，避免点击后毫无反馈
       const elapsed = Date.now() - startedAt;
       if (elapsed < 600) await new Promise(resolve => window.setTimeout(resolve, 600 - elapsed));
@@ -184,7 +198,7 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
     } finally {
       setGenerating(false);
     }
-  }, [owner, friends]);
+  }, [owner, allFriends]);
 
   const enterPhone = useCallback(async () => {
     setPhase("phone");
@@ -216,6 +230,8 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
       setBubbleOpen(true);
       return;
     }
+    setJustRefreshed(true);
+    window.setTimeout(() => setJustRefreshed(false), 1800);
     void requestComment(tab, "刚刚刷新了整部手机的内容");
   }, [generating, runGenerate, requestComment, tab]);
 
@@ -227,7 +243,7 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
 
   const openChat = (id: string) => {
     setActiveChat(id);
-    const friend = friends.find(item => item.id === id);
+    const friend = allFriends.find(item => item.id === id);
     void requestComment("chat", friend ? `正在看我和${friend.name}的聊天记录` : "正在看我们俩的真实聊天记录");
   };
 
@@ -235,7 +251,7 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
     if (!owner || !activeChat || activeChat === USER_THREAD_ID || sending) return;
     const text = draft.trim();
     if (!text) return;
-    const friend = friends.find(item => item.id === activeChat);
+    const friend = allFriends.find(item => item.id === activeChat);
     setSending(true);
     setDraft("");
     let next = appendInspectionChatMessage(characterId, activeChat, { direction: "outgoing", text });
@@ -340,7 +356,7 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
   }
 
   const state = phone ?? createEmptyInspectionPhone(characterId);
-  const activeFriend = activeChat ? friends.find(item => item.id === activeChat) ?? null : null;
+  const activeFriend = activeChat ? allFriends.find(item => item.id === activeChat) ?? null : null;
   const activeMessages: InspectionChatMessage[] = activeChat === USER_THREAD_ID
     ? realThread
     : (activeChat ? state.conversations[activeChat] ?? [] : []);
@@ -352,7 +368,13 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
         <button type="button" className="inspection-icon-btn" onClick={onClose} aria-label="关闭查岗">
           <ArrowLeft size={18} strokeWidth={1.8} />
         </button>
-        <div className="inspection-title">{owner.name} 的手机</div>
+        <div className="inspection-title-group">
+          <div className="inspection-title">{owner.name} 的手机</div>
+          <div className="inspection-updated">
+            {state.generatedAt ? `更新于 ${formatShortTime(state.generatedAt)}` : "尚未生成"}
+            {justRefreshed ? " · 已刷新" : ""}
+          </div>
+        </div>
         <button
           type="button"
           className="inspection-refresh-btn"
@@ -362,7 +384,7 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
           aria-label="刷新手机内容"
         >
           <RefreshCw size={15} strokeWidth={1.8} className={generating ? "spin" : ""} />
-          {generating ? "刷新中" : "刷新"}
+          {generating ? "刷新中" : justRefreshed ? "已刷新" : "刷新"}
         </button>
       </header>
 
@@ -406,10 +428,10 @@ export function InspectionApp({ characterId, onClose }: InspectionAppProps) {
               </button>
             </div>
 
-            {friends.length === 0 && (
+            {allFriends.length === 0 && (
               <div className="inspection-empty-hint">ta 的手机里还没有其他好友。</div>
             )}
-            {friends.map(friend => {
+            {allFriends.map(friend => {
               const thread = state.conversations[friend.id] ?? [];
               const last = thread[thread.length - 1];
               return (

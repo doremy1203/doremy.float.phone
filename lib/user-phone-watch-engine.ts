@@ -3,7 +3,9 @@ import type { ApiConfig } from "./settings-types";
 import type { ChatSession } from "./chat-storage";
 import { loadChatSessions, pushChatMessage, resolveSessionCharacterId, saveChatSessions } from "./chat-storage";
 import { addMomentComment, addMomentPost } from "./moments-storage";
-import { saveMemoryEntry } from "./memory-storage";
+import { saveMemoryEntry, loadMemoryConfig } from "./memory-storage";
+import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { formatClock } from "./inspection-storage";
 import { resolveInspectionApiConfig } from "./inspection-engine";
 import { simpleLLMCall } from "./api-helpers";
@@ -44,6 +46,25 @@ async function callWatchLLM(config: ApiConfig, messages: ChatTurn[]): Promise<st
     return null;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** 取该角色的核心记忆 + 与查岗相关的长期记忆 */
+async function buildWatchMemoryBlock(characterId: string, context: string): Promise<string> {
+  try {
+    const config = loadMemoryConfig();
+    const task = Promise.all([
+      retrieveCoreMemoriesForPrompt(characterId, config),
+      retrieveMemoriesForPrompt(characterId, context, config),
+    ]).then(([core, longTerm]) => (
+      [formatCoreMemories(core), formatLongTermMemories(longTerm)].filter(Boolean).join("\n").slice(0, 1600)
+    ));
+    const timeout = new Promise<string>(resolve => {
+      setTimeout(() => resolve(""), 4000);
+    });
+    return await Promise.race([task, timeout]);
+  } catch {
+    return "";
   }
 }
 
@@ -109,19 +130,24 @@ export async function generateUserPhoneWatchScript(
   const config = resolveInspectionApiConfig(character.id);
   if (!config) return fallback;
 
+  const memory = await buildWatchMemoryBlock(character.id, "对方 手机 好友 聊天 动态 备注 关系 秘密");
+  const persona = (character.persona || character.briefPersona || "沉默、观察力强").slice(0, 700);
+  const personality = (character.personality || "").slice(0, 200);
   const prompt = [
-    `你在扮演「${character.name}」。人设：${(character.persona || character.briefPersona || "沉默、观察力强").slice(0, 320)}`,
-    `此刻你已经获得对方许可，正在翻看对方的手机，你只能看和做下面这些事，不能删东西。`,
-    `对方有一个好友叫「${friendName}」。请生成一段符合你性格的操作内容，严格输出 JSON：`,
+    `你在扮演「${character.name}」。人设：${persona}${personality ? `\n性格：${personality}` : ""}`,
+    `此刻你已经获得对方许可，正在翻看对方的手机。你只能看和做下面这些事，不能删东西。`,
+    `手机里唯一允许出现的好友是「${friendName}」。绝对禁止出现任何其他好友、新人物、新名字、品牌名或联系方式；消息与回复里只允许提到「${friendName}」。`,
+    memory ? `关于你和对方的记忆（优先使用，不要编造与记忆冲突的事实）：\n${memory}` : "（暂无可用记忆，不要编造具体往事）",
+    `请严格结合人设和上面的记忆，输出 JSON：`,
     `{`,
     `  "friendMessage": "你以对方身份发给「${friendName}」的一条私聊，1 句，像对方会说的话",`,
-    `  "friendReply": "「${friendName}」看到后可能的回复，1 句",`,
+    `  "friendReply": "「${friendName}」看到后可能的回复，1 句，必须符合你们已知的关系",`,
     `  "remark": "你把对方手机里自己的备注改成什么，2-6 个字，可带占有欲或亲昵感",`,
-    `  "momentText": "你以对方身份发的一条动态，1-2 句",`,
+    `  "momentText": "你以对方身份发的一条动态，1-2 句，可以呼应记忆里的日常",`,
     `  "comment": "你在对方一条动态下以对方身份留的评论，1 句",`,
     `  "bubbles": ["翻聊天列表时的一句话", "看到私聊时的一句话", "改备注时的一句话", "翻动态时的一句话", "结束时的收尾话"]`,
     `}`,
-    `要求：全部内容用中文，符合你的人设，不要解释，只输出 JSON。`,
+    `要求：全部内容用中文，符合你的人设与记忆；不要解释，只输出 JSON。`,
   ].join("\n");
 
   const raw = await callWatchLLM(config, [{ role: "user", content: prompt }]);

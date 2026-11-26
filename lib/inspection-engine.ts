@@ -2,11 +2,15 @@ import type { Character } from "./character-types";
 import type { ApiConfig } from "./settings-types";
 import { loadApiConfigs, loadBindingConfig, resolveBinding } from "./settings-storage";
 import { simpleLLMCall } from "./api-helpers";
-import { saveMemoryEntry } from "./memory-storage";
+import { saveMemoryEntry, loadMemoryConfig } from "./memory-storage";
+import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import {
   formatClock,
+  inspectionNpcId,
   type InspectionChatMessage,
   type InspectionMemoCategory,
+  type InspectionNpc,
   type InspectionPhotoTone,
 } from "./inspection-storage";
 
@@ -14,6 +18,7 @@ export type InspectionGeneratedBundle = {
   conversations: Record<string, { direction: "incoming" | "outgoing"; text: string }[]>;
   memos: { category: InspectionMemoCategory; title: string; body: string }[];
   photos: { title: string; caption: string; location?: string; timeLabel?: string; tone?: InspectionPhotoTone }[];
+  npcs: InspectionNpc[];
 };
 
 type ChatTurn = { role: "system" | "user" | "assistant"; content: string };
@@ -53,6 +58,26 @@ export function resolveInspectionApiConfig(characterId: string): ApiConfig | nul
   return loadApiConfigs()[0] ?? null;
 }
 
+/** 取该角色的核心记忆 + 与手机内容相关的长期记忆，拼成提示词片段 */
+async function buildMemoryBlock(characterId: string, context: string): Promise<string> {
+  try {
+    const config = loadMemoryConfig();
+    const task = Promise.all([
+      retrieveCoreMemoriesForPrompt(characterId, config),
+      retrieveMemoriesForPrompt(characterId, context, config),
+    ]).then(([core, longTerm]) => (
+      [formatCoreMemories(core), formatLongTermMemories(longTerm)].filter(Boolean).join("\n").slice(0, 1600)
+    ));
+    // 记忆检索可能走向量接口，限时避免拖慢刷新
+    const timeout = new Promise<string>(resolve => {
+      setTimeout(() => resolve(""), 4000);
+    });
+    return await Promise.race([task, timeout]);
+  } catch {
+    return "";
+  }
+}
+
 function personaBlock(character: Character): string {
   const persona = (character.persona || "").trim().slice(0, 600);
   const personality = (character.personality || "").trim().slice(0, 160);
@@ -87,6 +112,7 @@ export async function decideInspectionPermission(owner: Character): Promise<{ al
   if (!config) {
     return { allow: true, reason: "……你翻吧，别乱删东西就行。" };
   }
+  const memory = await buildMemoryBlock(owner.id, "对方 关系 手机 秘密 信任");
   const messages: ChatTurn[] = [
     {
       role: "system",
@@ -95,7 +121,8 @@ export async function decideInspectionPermission(owner: Character): Promise<{ al
         "只输出 JSON：{\"allow\": true/false, \"reason\": \"一句中文回应，不超过 40 字\"}",
         "不要输出解释、不要 markdown。同意与否要符合人设与你们的关系。",
         personaBlock(owner),
-      ].join("\n"),
+        memory ? `你与对方的记忆：\n${memory}` : "",
+      ].filter(Boolean).join("\n"),
     },
     {
       role: "user",
@@ -126,12 +153,14 @@ export async function generateInspectionBundle(
   friends: Character[],
 ): Promise<InspectionGeneratedBundle | null> {
   const config = resolveInspectionApiConfig(owner.id);
-  if (!config || friends.length === 0) return null;
+  if (!config) return null;
 
+  const memory = await buildMemoryBlock(owner.id, "好友 聊天 计划 说不出口的话 相册 日常 关系 工作");
   const friendLines = friends
     .slice(0, 6)
     .map(friend => `- ${friend.id}｜${friend.name}`)
-    .join("\n");
+    .join("\n") || "（暂无已有好友）";
+  const refreshStamp = new Date().toLocaleString("zh-CN", { hour12: false });
 
   const messages: ChatTurn[] = [
     {
@@ -139,24 +168,31 @@ export async function generateInspectionBundle(
       content: [
         "你在为一个虚拟手机 App 生成「角色手机」里的隐私内容，供用户查看。",
         "只输出一个 JSON 对象，不要解释、不要 markdown 代码块：",
-        "{\"friends\":[{\"friendId\":\"\",\"messages\":[{\"direction\":\"incoming|outgoing\",\"text\":\"\"}]}],",
+        "{\"npcs\":[{\"name\":\"\",\"relation\":\"\"}],",
+        "\"friends\":[{\"friendId\":\"\",\"npcName\":\"\",\"messages\":[{\"direction\":\"incoming|outgoing\",\"text\":\"\"}]}],",
         "\"memos\":[{\"category\":\"plan|unsaid\",\"title\":\"\",\"body\":\"\"}],",
         "\"photos\":[{\"title\":\"\",\"caption\":\"\",\"location\":\"\",\"timeLabel\":\"\",\"tone\":\"silver|graphite|mist|shadow\"}]}",
         "规则：",
         "1. outgoing = 这个角色自己发出的消息；incoming = 好友发来的消息。",
-        "2. 每个好友 3~4 条消息，像真实日常聊天，口语化，可用表情。",
-        "3. memos 共 6 条：category=plan 是「计划」（待办、约好的事），category=unsaid 是「说不出口的话」（没敢发给某人的心里话）。",
-        "4. photos 共 6 条：普通的手机相册条目，标题短、caption 一句描述，tone 是色调。",
-        "5. 内容必须贴合角色人设，不要出现真实隐私、联系方式或长段落。",
+        "2. 已有好友（给出 friendId）每人 3~4 条消息；另外生成 2~3 个与这个角色人设 / 记忆相关的手机好友，写进 npcs，并在 friends 里用 npcName 给他们各写 3~4 条消息。",
+        "3. NPC 必须是这个人生活中真实会认识的人（同事、旧友、家人、常去的店老板等），关系自然；不要出现与角色无关的陌生人，也不要编造用户不认识的重名。",
+        "4. memos 共 6 条：category=plan 是「计划」（待办、约好的事），category=unsaid 是「说不出口的话」（没敢发给某人的心里话）。",
+        "5. photos 共 6 条：普通的手机相册条目，标题短、caption 一句描述，tone 是色调。",
+        "6. 所有内容必须贴合角色人设与下面的记忆；记忆里没有的事实不要凭空编造，可以合理补全日常细节。",
+        "7. 内容要像这一部真实的手机，不要出现真实隐私、联系方式或长段落。",
+        "8. 每次刷新都要产出与上一次不同的新内容，不要复用旧句子。",
         personaBlock(owner),
       ].join("\n"),
     },
     {
       role: "user",
       content: [
-        "这个角色手机里的好友列表（friendId｜名字）：",
+        "这个角色手机里已有的好友（friendId｜名字）：",
         friendLines,
         "",
+        memory ? `关于这个角色和你们的记忆：\n${memory}` : "（暂无可用记忆）",
+        "",
+        `本次刷新时间：${refreshStamp}`,
         "请按上面的 JSON 结构输出内容。",
       ].join("\n"),
     },
@@ -171,14 +207,30 @@ export async function generateInspectionBundle(
     const parsed = extractJsonObject(content || "");
     if (!parsed) return null;
 
-    const validFriendIds = new Set(friends.map(friend => friend.id));
+    const npcs: InspectionNpc[] = [];
+    if (Array.isArray(parsed.npcs)) {
+      for (const raw of parsed.npcs) {
+        if (!raw || typeof raw !== "object") continue;
+        const item = raw as Record<string, unknown>;
+        const name = cleanLine(item.name, 12);
+        if (!name) continue;
+        const id = inspectionNpcId(name);
+        if (npcs.some(npc => npc.id === id)) continue;
+        npcs.push({ id, name, relation: cleanLine(item.relation, 30) });
+        if (npcs.length >= 3) break;
+      }
+    }
+    const npcIdsByName = new Map(npcs.map(npc => [npc.name, npc.id]));
+    const validFriendIds = new Set([...friends.map(friend => friend.id), ...npcs.map(npc => npc.id)]);
     const conversations: InspectionGeneratedBundle["conversations"] = {};
     if (Array.isArray(parsed.friends)) {
       for (const entry of parsed.friends) {
         if (!entry || typeof entry !== "object") continue;
         const item = entry as Record<string, unknown>;
         const friendId = cleanLine(item.friendId, 60);
-        if (!validFriendIds.has(friendId) || !Array.isArray(item.messages)) continue;
+        const npcName = cleanLine(item.npcName, 20);
+        const resolvedId = validFriendIds.has(friendId) ? friendId : (npcIdsByName.get(npcName) ?? "");
+        if (!resolvedId || !Array.isArray(item.messages)) continue;
         const list = item.messages
           .map(raw => {
             if (!raw || typeof raw !== "object") return null;
@@ -192,7 +244,7 @@ export async function generateInspectionBundle(
           })
           .filter((msg): msg is { direction: "incoming" | "outgoing"; text: string } => !!msg)
           .slice(0, 6);
-        if (list.length > 0) conversations[friendId] = list;
+        if (list.length > 0) conversations[resolvedId] = list;
       }
     }
 
@@ -237,8 +289,13 @@ export async function generateInspectionBundle(
         .slice(0, 9)
       : [];
 
-    if (Object.keys(conversations).length === 0 && memos.length === 0 && photos.length === 0) return null;
-    return { conversations, memos, photos };
+    if (
+      Object.keys(conversations).length === 0
+      && memos.length === 0
+      && photos.length === 0
+      && npcs.length === 0
+    ) return null;
+    return { conversations, memos, photos, npcs };
   } catch {
     return null;
   }
@@ -299,15 +356,18 @@ export async function generateInspectionComment(
 ): Promise<string | null> {
   const config = resolveInspectionApiConfig(owner.id);
   if (!config) return null;
+  const memory = await buildMemoryBlock(owner.id, `${pageLabel} ${context} 对方 秘密`);
   const messages: ChatTurn[] = [
     {
       role: "system",
       content: [
         "你在扮演下面这个角色。对方正在翻看你的手机，你能看到 TA 当前在看什么。",
         "针对当前页面用一句话回应，可以嘴硬、尴尬、撒娇、心虚或无所谓，符合人设。",
+        "如果下面的记忆和当前页面有关，可以自然地提到，但不要生硬复述。",
         "只输出这一句话，不要引号、不要旁白、不要解释，不超过 30 个字。",
         personaBlock(owner),
-      ].join("\n"),
+        memory ? `相关记忆：\n${memory}` : "",
+      ].filter(Boolean).join("\n"),
     },
     {
       role: "user",
@@ -406,7 +466,7 @@ export function buildFallbackBundle(owner: Character, friends: Character[]): Ins
     ];
     conversations[friend.id] = variants[Math.floor(Math.random() * variants.length)];
   });
-  return { conversations, memos, photos };
+  return { conversations, memos, photos, npcs: [] };
 }
 
 const COMMENT_FALLBACK: Record<string, string[]> = {
