@@ -44,6 +44,7 @@ import { useMusicControlsOptional } from "@/lib/music-context";
 import { PhoneResourcesApp, type ResourceSubPage } from "@/components/phone-resources-app";
 import { CheckPhoneApp } from "@/components/checkphone/checkphone-app";
 import { InspectionApp } from "@/components/inspection/inspection-app";
+import { UserPhoneWatch } from "@/components/inspection/user-phone-watch";
 import { ShoppingApp } from "@/components/shopping/shopping-app";
 import { GameHubApp } from "@/components/game/game-hub-app";
 import { MixologyApp } from "@/components/mixology/mixology-app";
@@ -136,7 +137,8 @@ import { WidgetRenderer } from "@/components/widgets/widget-renderer";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
-import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, createOrGetSession, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
+import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, createOrGetSession, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, resolveSessionCharacterId, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
+import { USER_PHONE_CHECK_REQUEST_EVENT, isUserPhoneCheckIntent, type UserPhoneCheckRequestDetail } from "@/lib/user-phone-check";
 import { ensureGlobalBindingDefaults, resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
@@ -1226,7 +1228,63 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     () => loadStandbyHomeConfig().lastCharacterId || null,
   );
   const [inspectionCharId, setInspectionCharId] = useState<string | null>(null);
+  const [userPhoneCheckRequest, setUserPhoneCheckRequest] = useState<string | null>(null);
+  const [userPhoneWatchId, setUserPhoneWatchId] = useState<string | null>(null);
+  const lastUserPhoneCheckAtRef = useRef(0);
   const [characters, setCharacters] = useState<Character[]>(() => loadCharacters());
+  // 角色查岗：聊天顶栏按钮 / 用户消息里的「查我手机」都会发起权限申请
+  useEffect(() => {
+    const accept = (characterId: string) => {
+      if (!characterId || userPhoneWatchId) return;
+      const now = Date.now();
+      if (now - lastUserPhoneCheckAtRef.current < 4000) return;
+      lastUserPhoneCheckAtRef.current = now;
+      setUserPhoneCheckRequest(characterId);
+    };
+    const handleRequest = (event: Event) => {
+      const detail = (event as CustomEvent<UserPhoneCheckRequestDetail>).detail;
+      accept(detail?.characterId ?? "");
+    };
+    const handleMessagePushed = (event: Event) => {
+      if (userPhoneCheckRequest || userPhoneWatchId) return;
+      const message = (event as CustomEvent<{ message?: ChatMessage }>).detail?.message;
+      if (!message || !message.sessionId) return;
+      if (message.role === "assistant") {
+        // 角色通过聊天主动提出查岗：低频、每个角色 24 小时最多一次
+        if (message.mediaType) return;
+        const session = loadChatSessions().find(item => item.id === message.sessionId);
+        if (!session || session.isGroup) return;
+        const characterId = resolveSessionCharacterId(session);
+        if (!characterId) return;
+        const cooldownKey = `user-phone-check-initiated:${characterId}`;
+        const lastAt = Number(kvGet(cooldownKey) || 0);
+        if (Number.isFinite(lastAt) && Date.now() - lastAt < 24 * 60 * 60 * 1000) return;
+        if (Math.random() > 0.08) return;
+        kvSet(cooldownKey, String(Date.now()));
+        window.setTimeout(() => {
+          pushChatMessage({
+            sessionId: message.sessionId,
+            role: "assistant",
+            content: "……让我看看你的手机，可以吗？",
+            status: "sent",
+          });
+          setUserPhoneCheckRequest(characterId);
+        }, 1400);
+        return;
+      }
+      if (message.role !== "user") return;
+      if (!isUserPhoneCheckIntent(message.content ?? "")) return;
+      const session = loadChatSessions().find(item => item.id === message.sessionId);
+      const characterId = session ? resolveSessionCharacterId(session) : null;
+      if (characterId) accept(characterId);
+    };
+    window.addEventListener(USER_PHONE_CHECK_REQUEST_EVENT, handleRequest);
+    window.addEventListener(CHAT_MESSAGE_PUSHED_EVENT, handleMessagePushed);
+    return () => {
+      window.removeEventListener(USER_PHONE_CHECK_REQUEST_EVENT, handleRequest);
+      window.removeEventListener(CHAT_MESSAGE_PUSHED_EVENT, handleMessagePushed);
+    };
+  }, [userPhoneCheckRequest, userPhoneWatchId]);
   useEffect(() => {
     const syncCharacters = () => setCharacters(loadCharacters());
     const lockNow = () => setShowStandby(true);
@@ -5541,6 +5599,56 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                 <InspectionApp
                   characterId={inspectionCharId}
                   onClose={() => setInspectionCharId(null)}
+                />
+              )}
+
+              {/* 角色查岗：权限申请（最终决定权在用户） */}
+              {userPhoneCheckRequest && !userPhoneWatchId && (() => {
+                const requestCharacterId = userPhoneCheckRequest;
+                const target = characters.find(item => item.id === requestCharacterId) ?? null;
+                return (
+                  <div className="upw-permission" role="dialog" aria-modal="true" aria-label="查岗权限申请">
+                    <div className="upw-permission-card">
+                      <span
+                        className="upw-permission-avatar"
+                        style={target?.avatar ? { backgroundImage: `url("${target.avatar}")` } : undefined}
+                        aria-hidden
+                      >
+                        {target?.avatar ? null : (target?.name ?? "ta").slice(0, 1)}
+                      </span>
+                      <div className="upw-permission-title">「{target?.name ?? "ta"}」想看看你的手机</div>
+                      <div className="upw-permission-desc">
+                        同意后 ta 会自己翻看你的聊天和动态，你只能旁观；拒绝则 ta 无法查看。
+                      </div>
+                      <div className="upw-permission-actions">
+                        <button
+                          type="button"
+                          className="upw-permission-btn"
+                          onClick={() => setUserPhoneCheckRequest(null)}
+                        >
+                          拒绝
+                        </button>
+                        <button
+                          type="button"
+                          className="upw-permission-btn is-primary"
+                          onClick={() => {
+                            setUserPhoneWatchId(requestCharacterId);
+                            setUserPhoneCheckRequest(null);
+                          }}
+                        >
+                          允许
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* 角色查岗：用户只读旁观，角色自主操作 */}
+              {userPhoneWatchId && (
+                <UserPhoneWatch
+                  characterId={userPhoneWatchId}
+                  onDone={() => setUserPhoneWatchId(null)}
                 />
               )}
 

@@ -26,6 +26,7 @@ import { getStatusRegionConfig, isCustomStatusRegionActive, STATUS_REGION_UPDATE
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
 import { sendBrowserNotification } from "@/lib/browser-notification";
 import { dispatchChatMessageNotice } from "@/lib/chat-notification-events";
+import { requestUserPhoneCheck } from "@/lib/user-phone-check";
 import { shouldSendChatInputOnEnter } from "@/lib/chat-input-keyboard";
 import { useChatBottomReserve } from "./use-chat-bottom-reserve";
 import ReactMarkdown from "react-markdown";
@@ -60,7 +61,7 @@ import { useKeyboardDismissAutoSend } from "@/components/chat/use-keyboard-dismi
 import { cancelBailoutKey } from "@/lib/push-bailout-client";
 import { PENDING_REPLY_PREFIX } from "@/lib/friend-request-engine";
 import type { UserIdentity } from "@/components/settings/user-identity";
-import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, ChevronRight, Clapperboard, Clock, Gift, Languages, Loader2, MoreHorizontal, X } from "lucide-react";
+import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, ChevronRight, Clapperboard, Clock, Eye, Gift, Languages, Loader2, MoreHorizontal, X } from "lucide-react";
 import { setDebugChatState } from "@/lib/debug-store";
 import { SessionCustomCSS } from "@/components/ui/session-custom-css";
 import { setChatActive } from "@/lib/music-action-queue";
@@ -6173,6 +6174,17 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
                         )}
                     </span>
                     <span className="page-header-right">
+                        {!session.isGroup && character && (
+                            <button
+                                className="page-back-btn"
+                                type="button"
+                                onClick={() => requestUserPhoneCheck(character.id, "button")}
+                                aria-label="查岗"
+                                title="让 TA 查我的手机"
+                            >
+                                <Eye size={21} strokeWidth={1.5} />
+                            </button>
+                        )}
                         {/* 历史检索入口统一放在聊天信息页，避免聊天室顶栏重复放置。 */}
                         <button className="page-back-btn" type="button" onClick={() => setShowSettings(true)} aria-label="更多">
                             <MoreHorizontal size={22} strokeWidth={1.5} />
