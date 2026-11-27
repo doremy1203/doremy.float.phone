@@ -1041,8 +1041,10 @@
   padding: 20px 0 36px;
 }
 
-/* 窄屏统一采用流式尺寸，不为单一设计稿宽度建立专用断点。 */
-@media (hover: none) {
+/* 窄屏统一采用流式尺寸，不为单一设计稿宽度建立专用断点。
+   (max-width: 500px) 兜底：部分安卓壳 WebView 会把 hover 误报为 hover，
+   导致只靠 (hover: none) 的手机端布局整段失效、退回桌面版样机。 */
+@media (hover: none), (max-width: 500px) {
   .icon-grid,
   .dock {
     --slot-size: clamp(48px, calc((100vw - 96px) / 4), 66px);
@@ -1058,9 +1060,12 @@
   }
 }
 
-/* ── Mobile responsive ── */
+/* ── Mobile responsive ──
+   (max-width: 500px) 兜底：安卓壳 WebView 里 hover 可能被误报为 hover，
+   仅以 (hover: none) 为条件时整套手机端布局不会命中，界面会缩成桌面版样机。
+   hover 能力正常的设备仍走 (hover: none)；桌面宽屏（>500px 且可 hover）不受影响。 */
 
-@media (hover: none) {
+@media (hover: none), (max-width: 500px) {
 
   /* 用户在设置里显式开启「显示系统状态栏」且运行时不在全屏时，控制器才会挂
      data-pwa-display-mode 标记（见 pwa-manifest-injector）：此时所有 App 共用系统
