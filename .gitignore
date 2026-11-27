@@ -37,6 +37,9 @@ tools/weixin-local-assistant/config.txt
 !.env.example
 !.env.template
 
+# Vercel CLI 本地关联信息（projectId/orgId），不入库。
+.vercel/
+
 # Android local build outputs and signing material.
 .gradle/
 android-shell/.gradle/

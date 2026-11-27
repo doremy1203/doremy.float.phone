@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=20.18.1"
+  },
   "scripts": {
     "dev": "node --max-old-space-size=4096 scripts/local-next-server.mjs --dev",
     "build": "node scripts/build-weixin-assistant-dist.mjs && node scripts/build-personal-push-dist.mjs && next build && node scripts/restore-backdrop-filter.mjs",
