@@ -1,6 +1,8 @@
 package app.floatphone.shell
 
 import android.app.AppOpsManager
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import org.json.JSONArray
 import android.app.NotificationManager
 import android.content.Context
@@ -18,6 +20,7 @@ import android.os.Build
 import android.os.Process
 import android.provider.AlarmClock
 import android.provider.Settings
+import android.provider.Telephony
 import android.view.KeyEvent
 import org.json.JSONObject
 
@@ -254,13 +257,14 @@ class DeviceActionBridge(private val context: Context) {
     }
 
     /**
-     * 开关勿扰。on=true → 全部静音（INTERRUPTION_FILTER_NONE 之外的最严档），
-     * on=false → 恢复正常（INTERRUPTION_FILTER_ALL）。
+     * 开关勿扰。只切“是否进入勿扰”，**绝不改用户的勿扰策略**：
+     * 用户允许的闹钟、重要联系人、重要应用通知都按他原本的系统设置保留。
      *
-     * 用 NONE/ALL 这两个最明确的档位，不用 PRIORITY（它依赖用户自己配的
-     * 允许名单，行为不可预测，角色说不清到底静音了什么）。
+     * 如果用户本来就在勿扰里，什么都不动；结束后恢复到他进来前的档位。
+     * 如果用户原本没开勿扰，用 PRIORITY 档（系统会按用户自己的允许列表放行），
+     * 不使用 NONE，也不调用 setNotificationPolicy 覆盖策略。
      */
-    fun setDnd(on: Boolean): JSONObject {
+    fun setDnd(on: Boolean, untilEpochMs: Long = 0L): JSONObject {
         if (!canSetDnd()) {
             return JSONObject().put("ok", false)
                 .put("reason", "还没有「勿扰模式」访问权限")
@@ -268,11 +272,35 @@ class DeviceActionBridge(private val context: Context) {
         }
         return try {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.setInterruptionFilter(
-                if (on) NotificationManager.INTERRUPTION_FILTER_NONE
-                else NotificationManager.INTERRUPTION_FILTER_ALL,
-            )
-            JSONObject().put("ok", true).put("on", on)
+            val prefs = context.getSharedPreferences("device_action_dnd_v1", Context.MODE_PRIVATE)
+            if (on) {
+                if (!prefs.getBoolean("saved", false)) {
+                    prefs.edit()
+                        .putBoolean("saved", true)
+                        .putInt("filter", nm.currentInterruptionFilter)
+                        .apply()
+                }
+                // 用户原本已经在勿扰：完全尊重他的策略，不再覆盖。
+                if (nm.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_ALL) {
+                    nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_PRIORITY)
+                }
+                if (untilEpochMs > System.currentTimeMillis() + 5_000L) {
+                    DndAutoRestore.schedule(context, untilEpochMs)
+                }
+            } else {
+                nm.setInterruptionFilter(
+                    if (prefs.getBoolean("saved", false)) prefs.getInt(
+                        "filter", NotificationManager.INTERRUPTION_FILTER_ALL,
+                    ) else NotificationManager.INTERRUPTION_FILTER_ALL,
+                )
+                prefs.edit().putBoolean("saved", false).apply()
+                DndAutoRestore.cancel(context)
+            }
+            val mediaAllowed = runCatching {
+                (nm.notificationPolicy?.priorityCategories ?: 0) and
+                    NotificationManager.Policy.PRIORITY_CATEGORY_MEDIA != 0
+            }.getOrDefault(false)
+            JSONObject().put("ok", true).put("on", on).put("allowMedia", mediaAllowed)
         } catch (e: Throwable) {
             JSONObject().put("ok", false).put("reason", e.message ?: "勿扰模式不可用")
         }
@@ -833,6 +861,89 @@ class DeviceActionBridge(private val context: Context) {
         }
     }
 
+    /**
+     * 当前前台应用包名/名称。专注网页切出去时用它判断「离开的是不是白名单应用」，
+     * 避免用户只是去查资料/回消息也被记违规。
+     */
+    fun foregroundApp(): JSONObject {
+        if (!hasUsageStatsAccess()) {
+            return JSONObject().put("ok", false)
+                .put("reason", "还没有「使用情况访问」权限")
+                .put("needPermission", "usage_stats")
+        }
+        return try {
+            val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val now = System.currentTimeMillis()
+            val events = usm.queryEvents(now - 15_000L, now)
+            var pkg = ""
+            val ev = UsageEvents.Event()
+            while (events.hasNextEvent()) {
+                events.getNextEvent(ev)
+                if (ev.eventType == UsageEvents.Event.ACTIVITY_RESUMED) pkg = ev.packageName ?: ""
+            }
+            if (pkg.isBlank()) {
+                return JSONObject().put("ok", false).put("reason", "暂时读不到当前应用")
+            }
+            val label = runCatching {
+                val pm = context.packageManager
+                pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+            }.getOrDefault("")
+            JSONObject().put("ok", true).put("package", pkg).put("label", label)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", e.message ?: "读取当前应用失败")
+        }
+    }
+
+    /**
+     * 从 startMs 到现在用户依次打开过的前台应用。离开专注页面后只查「回来时
+     * 当前应用」会把 Float 自己当成离开目标，必须用这段时间的应用轨迹判断。
+     */
+    fun foregroundPackagesSince(startMs: Long): JSONObject {
+        if (!hasUsageStatsAccess()) {
+            return JSONObject().put("ok", false)
+                .put("reason", "还没有「使用情况访问」权限")
+                .put("needPermission", "usage_stats")
+        }
+        return try {
+            val now = System.currentTimeMillis()
+            val from = startMs.coerceAtLeast(now - 6 * 3600_000L)
+            val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val events = usm.queryEvents(from, now)
+            val seen = LinkedHashSet<String>()
+            val arr = JSONArray()
+            val ev = UsageEvents.Event()
+            val ignored = mutableSetOf(context.packageName, "com.android.systemui")
+            runCatching {
+                val home = context.packageManager.resolveActivity(
+                    Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)
+                home?.activityInfo?.packageName?.let { ignored.add(it) }
+            }
+            runCatching {
+                val ime = Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+                if (!ime.isNullOrBlank()) ignored.add(ime.substringBefore('/'))
+            }
+            runCatching {
+                val dial = context.packageManager.resolveActivity(Intent(Intent.ACTION_DIAL), 0)
+                dial?.activityInfo?.packageName?.let { ignored.add(it) }
+            }
+            runCatching { Telephony.Sms.getDefaultSmsPackage(context)?.let { ignored.add(it) } }
+            while (events.hasNextEvent()) {
+                events.getNextEvent(ev)
+                if (ev.eventType != UsageEvents.Event.ACTIVITY_RESUMED) continue
+                val pkg = ev.packageName ?: continue
+                if (pkg in ignored || !seen.add(pkg)) continue
+                val label = runCatching {
+                    val pm = context.packageManager
+                    pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+                }.getOrDefault("")
+                arr.put(JSONObject().put("package", pkg).put("label", label).put("at", ev.timeStamp))
+            }
+            JSONObject().put("ok", true).put("packages", arr)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", e.message ?: "读取应用轨迹失败")
+        }
+    }
+
     // ── 打开系统设置页（引导用户授权用）──
 
     /**
@@ -894,5 +1005,7 @@ class DeviceActionBridge(private val context: Context) {
         .put("openUrl", true)
         .put("usageStats", true)
         .put("usageStatsGranted", hasUsageStatsAccess())
+        .put("foregroundApp", true)
+        .put("lockSchedule", true)
         .toString()
 }

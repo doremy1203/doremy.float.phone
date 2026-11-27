@@ -17,56 +17,6 @@ function formatLifeRange(startAt?: string | null, endAt?: string | null): string
   return formatLifeDateTime(startAt) + "—" + formatLifeDateTime(endAt);
 }
 
-/** 生活记忆里的玩家统一用 {{user}}；显示时再由页面/宏系统解析成实际称呼。 */
-function normalizeLifeMemoryUserReference(text: string): string {
-  return text.replace(/你/g, "{{user}}");
-}
-
-/**
- * Shared fact bridge: only confirmed life-scene facts involving this character
- * are surfaced in their normal chat context. Guesses and interpretations are
- * deliberately excluded so the character cannot acquire fabricated memories.
- */
-export function buildLifeMemoryContext(characterId: string, limit = 10): string {
-  const state = loadVirtualLifeState();
-  if (!state.settings.enabled) return "";
-  // Schedule settlement context is a separate source from confirmed shared memories.
-  // Disabling shared-memory writes must not silently remove the character's dated
-  // schedule history from chat prompts.
-  const facts = (state.settings.saveConfirmedEventsToMemory ? state.memories : [])
-    .filter(memory => memory.participants.includes(characterId) && memory.fact.trim())
-    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
-    .slice(0, Math.max(0, Math.min(limit, 30)))
-    .reverse();
-  // Completed schedule slots are synced separately from confirmed shared memories.
-  // Keep their planned time range explicit so “that period ended” cannot be mistaken
-  // for an untimed event or merged with a different day.
-  const completedScheduleEvents = state.events
-    .filter(event => event.kind === "activity"
-      && event.status === "completed"
-      && event.participantIds.includes(characterId)
-      && event.settlementKey?.startsWith("schedule:")
-      && event.startsAt && event.endsAt)
-    .sort((a, b) => (b.endsAt || "").localeCompare(a.endsAt || ""))
-    .slice(0, 6)
-    .reverse();
-  if (!facts.length && !completedScheduleEvents.length) return "";
-  return [
-    facts.length ? "【虚拟生活共同记忆｜已发生事实】" : "",
-    facts.length ? "以下是角色本人参与过的生活场景事件摘要。它们是已记录事实，不是猜测；不要擅自扩写成未发生的细节。" : "",
-    ...facts.map(fact => {
-      const linkedEvent = state.events.find(event => event.id === fact.eventId);
-      const timeRange = linkedEvent?.startsAt && linkedEvent.endsAt
-        ? "（活动时间：" + formatLifeRange(linkedEvent.startsAt, linkedEvent.endsAt) + "）"
-        : "";
-      return `- ${formatLifeDateTime(fact.occurredAt)}${timeRange}：${normalizeLifeMemoryUserReference(fact.fact)}`;
-    }),
-    completedScheduleEvents.length ? "【近期已结算日程｜含明确时间段】" : "",
-    completedScheduleEvents.length ? "以下是已到结束时间的行程计划记录，只能说明日程时段已经结算，不代表计划中的每个细节都已被确认发生。" : "",
-    ...completedScheduleEvents.map(event => `- ${formatLifeRange(event.startsAt, event.endsAt)}｜${event.title}${event.locationName ? "｜地点：" + event.locationName : ""}`),
-  ].filter(Boolean).join("\n");
-}
-
 /**
  * Live presence shared with online chat. This is current character state, not
  * a fabricated memory; the prompt must respect sleep, work and actual location.

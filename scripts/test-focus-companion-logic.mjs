@@ -34,7 +34,7 @@ function extractFn(name) {
 const FN = ['cfg', 'sdk', 'pad2', 'fmtDur', 'canGenWall', 'wallMode', 'wlParseVerdict',
   'activeWlPasses', 'wlTrust', 'wlTrustAdd', 'scheduleWlCheckin', 'cancelWlCheckinNative',
   'scheduleAlarm', 'scheduleMorning', 'bookSystemAlarm', 'bookSystemAlarmForAppt',
-  'apptTimesOf', 'apptAdvance', 'apptGap', 'apptMaxNudge', 'sessionEndAt'];
+  'apptTimesOf', 'apptAdvance', 'apptGap', 'apptMaxNudge', 'sessionEndAt', 'dkey', 'lockDraftTimes'];
 const src = FN.map(extractFn).join('\n\n');
 
 const TASKS = [], ALARMS = [], DBU = [], TL = [], TOASTS = [];
@@ -148,6 +148,14 @@ run(`scheduleAlarm({ time: '07:30', charId: 'c1' })`).then(() => {}).catch(() =>
   T('2 轮专注的截止 = 开始 + 2×25 分钟 + 1×5 分钟休息', lockEnd === 1000000 + 55 * 60000, String(lockEnd));
   const pausedEnd = run(`sessionEndAt({ startAt: 1000000, cycles: 2, focusMin: 25, breakMin: 5, phaseEndsAt: 1000000 + 40 * 60000, cycle: 2 })`);
   T('暂停顺延后至少覆盖当前阶段', pausedEnd >= 1000000 + 40 * 60000, String(pausedEnd));
+
+  console.log('== 9. 定时锁机时间段 ==');
+  run(`S.draft = {}; S.draft.lockDate = '2026-11-26'; S.draft.lockStart = '22:00'; S.draft.lockEnd = '23:00';`);
+  const lock1 = run(`lockDraftTimes()`);
+  T('同日 22:00→23:00 = 60 分钟', lock1 && lock1.endAt - lock1.startAt === 3600000, lock1 ? String((lock1.endAt - lock1.startAt) / 60000) : 'null');
+  run(`S.draft.lockEnd = '06:00';`);
+  const lock2 = run(`lockDraftTimes()`);
+  T('跨夜 22:00→次日 06:00 = 480 分钟', lock2 && lock2.endAt - lock2.startAt === 8 * 3600000, lock2 ? String((lock2.endAt - lock2.startAt) / 60000) : 'null');
 
   console.log('\\n结果: PASS ' + pass + ' / FAIL ' + fail);
   process.exit(fail ? 1 : 0);

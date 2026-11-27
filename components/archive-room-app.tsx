@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import JSZip from "jszip";
 import { Archive, ArrowLeft, AudioLines, Check, File, Image as ImageIcon, LoaderCircle, RefreshCw, Search, Trash2, Video, X, Copy, HardDrive, ShieldAlert, Star } from "lucide-react";
 import { deleteEmptyMediaEntries, deleteMediaRef, listMediaCacheSummaries, loadMediaBlob, loadMediaObjectUrl, type MediaCacheSummary } from "@/lib/media-cache-storage";
+import { purgeMediaReferences } from "@/lib/media-reference-cleanup";
 import { collectMediaReferenceUsage, findMediaGenerationOrigin, loadMediaGenerationOrigins } from "@/lib/media-reference-usage";
 import { downloadFile } from "@/lib/download-utils";
 
@@ -84,6 +85,7 @@ export function ArchiveRoomApp({ onClose, onNotice }: Props) {
   const [visualDuplicateIds, setVisualDuplicateIds] = useState<Set<string>>(new Set());
   const [duplicateGroups, setDuplicateGroups] = useState<string[][]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmForceDelete, setConfirmForceDelete] = useState(false);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
   const [emptyCount, setEmptyCount] = useState(0);
   const [meta, setMeta] = useState<Record<string, ArchiveMeta>>(() => loadArchiveMeta());
@@ -101,16 +103,25 @@ export function ArchiveRoomApp({ onClose, onNotice }: Props) {
         const usedBy = new Set(usage.get(item.id) || []);
         for (const owner of item.retainedBy) usedBy.add(`保留标记：${owner}`);
         const origin = findMediaGenerationOrigin(item.createdAt, origins);
+        /* 直接引用优先于“生成时间 ±5 秒”的推断：照片墙的照片就算当初由朋友圈
+           的提示词生成，它现在的归属也是照片墙，不能继续标朋友圈。 */
+        const directLabel = ["照片墙", "聊天", "自定义 APP", "朋友圈", "生活"]
+          .map(prefix => [...usedBy].find(label => label.startsWith(prefix)))
+          .find(Boolean);
         return {
           ...item,
           ref: refFor(item.id),
           usedBy: [...usedBy],
-          origin: origin
-            ? (origin.appId === "moments" ? "朋友圈（帖子配图已另存，这是缓存副本）" : `${origin.label} 生成图缓存`)
-            : undefined,
+          origin: directLabel
+            ? `${directLabel.split("：")[0]}（直接引用）`
+            : origin
+              ? (origin.appId === "moments" ? "朋友圈（帖子配图已另存，这是缓存副本）" : `${origin.label} 生成图缓存`)
+              : undefined,
         };
       }).sort((a, b) => b.createdAt - a.createdAt));
       setSelected([]);
+      setConfirmDelete(false);
+      setConfirmForceDelete(false);
       setConfirmEmpty(false);
     } catch (error) {
       onNotice?.("读取媒体库失败：" + (error instanceof Error ? error.message : String(error)));
@@ -251,7 +262,7 @@ export function ArchiveRoomApp({ onClose, onNotice }: Props) {
     return true;
   }), [items, tab, duplicateIds, filter, query, meta]);
 
-  const toggle = (id: string) => { setConfirmDelete(false); setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); };
+  const toggle = (id: string) => { setConfirmDelete(false); setConfirmForceDelete(false); setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); };
   const patchMeta = (id: string, patch: Partial<ArchiveMeta>) => {
     const next = { ...meta, [id]: { ...(meta[id] ?? {}), ...patch } };
     setMeta(next); saveArchiveMeta(next);
@@ -301,21 +312,37 @@ export function ArchiveRoomApp({ onClose, onNotice }: Props) {
     const favorited = targets.filter(item => meta[item.id]?.favorite === true);
     if (favorited.length) { onNotice?.(`所选项目中有 ${favorited.length} 个已收藏文件；为防止误删，已阻止本次删除。请取消收藏后再操作。`); setConfirmDelete(false); return; }
     const referenced = targets.filter(item => item.usedBy.length > 0);
-    if (referenced.length) {
-      const sources = [...new Set(referenced.flatMap(item => item.usedBy))].slice(0, 4).join("、");
-      onNotice?.(`所选项目中有 ${referenced.length} 个仍被其他功能引用（${sources}${referenced.length > 1 ? "等" : ""}），已阻止删除。请先解除对应引用，避免照片墙、聊天或自定义 APP 留下失效记录。`);
+    if (referenced.length && !confirmForceDelete) {
+      const sources = [...new Set(referenced.flatMap(item => item.usedBy))].slice(0, 6).join("、");
       setConfirmDelete(false);
+      setConfirmForceDelete(true);
+      onNotice?.(`所选项目中有 ${referenced.length} 个仍被引用（${sources}${referenced.length > 1 ? "等" : ""}）。再次点击「确认强制删除」会连同这些引用一起删除，相关位置会留下失效图片。`);
       return;
     }
-    if (targets.length > 1 && !confirmDelete) {
+    if (targets.length > 1 && !confirmDelete && !confirmForceDelete) {
       setConfirmDelete(true);
       onNotice?.(`准备删除 ${targets.length} 个未被引用的媒体文件。再次点击确认后才会执行。收藏项不会被删除。`);
       return;
     }
     try {
-      await Promise.all(targets.map(item => deleteMediaRef(item.ref)));
+      let cleared = { photoWall: 0, moments: 0, customApps: 0 };
+      if (confirmForceDelete) {
+        for (const item of targets) {
+          const result = await purgeMediaReferences(item.ref);
+          cleared = {
+            photoWall: cleared.photoWall + result.photoWall,
+            moments: cleared.moments + result.moments,
+            customApps: cleared.customApps + result.customApps,
+          };
+        }
+      }
+      await Promise.all(targets.map(item => deleteMediaRef(item.ref, { force: confirmForceDelete })));
       setConfirmDelete(false);
-      onNotice?.(`已删除 ${targets.length} 个媒体文件。`);
+      setConfirmForceDelete(false);
+      const clearedText = cleared.photoWall + cleared.moments + cleared.customApps > 0
+        ? ` 同时清理了照片墙 ${cleared.photoWall} 处、朋友圈 ${cleared.moments} 处、自定义 APP ${cleared.customApps} 处引用；聊天消息里的旧图仍保留原始记录。`
+        : "";
+      onNotice?.(`已删除 ${targets.length} 个媒体文件。${clearedText}`);
       await refresh();
     } catch (error) {
       onNotice?.("删除失败：" + (error instanceof Error ? error.message : String(error)));
@@ -378,7 +405,7 @@ export function ArchiveRoomApp({ onClose, onNotice }: Props) {
       <div className="mt-2 flex items-center gap-2">
         <button onClick={()=>void downloadSelected()} className="flex-1 rounded-xl border border-stone-300 px-3 py-2.5 text-sm font-medium text-stone-700">{selected.length===1?"下载这张":"逐张下载"}</button>
         <button onClick={()=>void exportSelected()} className="flex-1 rounded-xl border border-stone-300 px-3 py-2.5 text-sm font-medium text-stone-700">导出 ZIP</button>
-        <button onClick={()=>void deleteSelected()} className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-rose-600 px-3 py-2.5 text-sm font-medium text-white"><Trash2 size={16}/>{confirmDelete?"确认删除":"删除所选"}</button>
+        <button onClick={()=>void deleteSelected()} className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-rose-600 px-3 py-2.5 text-sm font-medium text-white"><Trash2 size={16}/>{confirmForceDelete?"确认强制删除":confirmDelete?"确认删除":"删除所选"}</button>
       </div>
     </footer>}
   </div>;

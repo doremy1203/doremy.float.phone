@@ -7,12 +7,20 @@ const source = readFileSync(new URL("../lib/life/life-output.ts", import.meta.ur
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
 }).outputText;
+// life-output 现在会先剥 DSML 标记；测试里用真实实现而不是桩。
+const dsmlSource = readFileSync(new URL("../lib/dsml-tool-calls.ts", import.meta.url), "utf8");
+const dsmlCompiled = ts.transpileModule(dsmlSource, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+}).outputText;
+const dsmlBox = { exports: {} };
+vm.runInNewContext(dsmlCompiled, { module: dsmlBox, exports: dsmlBox.exports, Date, JSON, String, RegExp, Map, console }, { filename: "dsml-tool-calls.cjs" });
 const moduleBox = { exports: {} };
 const sandbox = {
   module: moduleBox,
   exports: moduleBox.exports,
   require: (id) => {
     if (id === "jsonrepair") return { jsonrepair: (value) => value };
+    if (id === "../dsml-tool-calls") return dsmlBox.exports;
     throw new Error("unexpected require: " + id);
   },
   console, JSON, Set, Map, Array, String, Number, Boolean, RegExp, Date,

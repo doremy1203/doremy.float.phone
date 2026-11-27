@@ -23,6 +23,9 @@ import android.os.Looper
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.Base64
 import org.json.JSONObject
 import java.io.OutputStream
@@ -94,6 +97,7 @@ class MainActivity : AppCompatActivity() {
             private set
         @Volatile private var nativeCrashRecorderInstalled = false
         private const val MAX_WEB_CONSOLE_LOGS = 200
+        private const val REQ_NATIVE_SPEECH = 0x5150
         private val webConsoleLogs = java.util.Collections.synchronizedList(mutableListOf<String>())
         private fun recordWebConsoleMessage(message: String) {
             synchronized(webConsoleLogs) {
@@ -215,6 +219,9 @@ class MainActivity : AppCompatActivity() {
     private var recoveryOverlay: View? = null
     private var recoveryBoot = false
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var nativeSpeechRecognizer: SpeechRecognizer? = null
+    private var nativeSpeechGeneration = 0
+    private var nativeSpeechPendingLang: String? = null
 
     // Native custom view used by HTML5 video players embedded in the WebView.
     private var webVideoCustomView: View? = null
@@ -1217,10 +1224,14 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         // 登记给 ShellBus：浮窗服务/无障碍服务要把事件投回页面，需要这个引用。
         // WebView 只能在主线程访问，投递时由 ShellBus 统一 post 到主线程。
         ShellBus.webView = webView
+        // 文件队列式调试桥：release 包也能由 Shizuku/shell 通过 /sdcard 读写执行页面 JS。
+        // 必须在 loadUrl 之前注册，页面里的 AndroidHarness 才不会丢。
+        HarnessAgent.attach(this, webView)
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 trustedShellUrl = url ?: trustedShellUrl
+                HarnessAgent.updateUrl(url)
                 if (!secureBridgeDocumentStartInstalled && isTrustedShellPage()) {
                     view.evaluateJavascript(secureBridgeBootstrapScript(), null)
                 }
@@ -1237,6 +1248,8 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
                 super.onPageFinished(view, url)
                 if (isTrustedShellOrigin(url)) {
                     trustedShellUrl = url
+                    HarnessAgent.updateUrl(url)
+                    HarnessAgent.start(this@MainActivity, view)
                     getSharedPreferences("float_startup_diagnostics", Context.MODE_PRIVATE)
                         .edit()
                         .putBoolean("launch_in_progress", false)
@@ -1581,6 +1594,7 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
 
     override fun onDestroy() {
         runCatching { abandonCallAudioFocusInternal() }
+        HarnessAgent.stop()
         // Recovery mode intentionally returns before creating a WebView. Keep its
         // lifecycle safe: touching a lateinit WebView here would crash the recovery UI.
         if (::webView.isInitialized) {
@@ -1589,8 +1603,147 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
             runCatching { webView.stopLoading() }
             runCatching { webView.destroy() }
         }
+        runCatching { destroyNativeSpeech() }
         runCatching { sharedVideoExecutor.shutdownNow() }
         super.onDestroy()
+    }
+
+    private fun emitNativeSpeech(payload: JSONObject) {
+        if (!::webView.isInitialized || !isTrustedShellPage()) return
+        val js = "window.__aiPhoneNativeSpeech && window.__aiPhoneNativeSpeech(${payload.toString()});"
+        webView.post {
+            if (::webView.isInitialized) {
+                runCatching { webView.evaluateJavascript(js, null) }
+            }
+        }
+    }
+
+    private fun destroyNativeSpeech() {
+        nativeSpeechGeneration += 1
+        val recognizer = nativeSpeechRecognizer
+        nativeSpeechRecognizer = null
+        if (recognizer != null) {
+            runCatching { recognizer.cancel() }
+            runCatching { recognizer.destroy() }
+        }
+    }
+
+    private fun nativeSpeechError(code: String, message: String) {
+        emitNativeSpeech(
+            JSONObject()
+                .put("type", "error")
+                .put("code", code)
+                .put("message", message),
+        )
+    }
+
+    private fun startNativeSpeechInternal(lang: String) {
+        destroyNativeSpeech()
+        val generation = nativeSpeechGeneration
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            nativeSpeechError("unavailable", "这台设备没有可用的系统语音识别服务")
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            nativeSpeechPendingLang = lang.ifBlank { "zh-CN" }
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_NATIVE_SPEECH)
+            return
+        }
+        val onDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
+        val recognizer = runCatching {
+            if (onDevice) SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+            else SpeechRecognizer.createSpeechRecognizer(this)
+        }.getOrNull()
+        if (recognizer == null) {
+            nativeSpeechError("unavailable", "系统语音识别启动失败")
+            return
+        }
+        nativeSpeechRecognizer = recognizer
+        recognizer.setRecognitionListener(object : RecognitionListener {
+            private fun stillCurrent(): Boolean = generation == nativeSpeechGeneration
+
+            override fun onReadyForSpeech(params: Bundle?) {
+                if (stillCurrent()) emitNativeSpeech(JSONObject().put("type", "ready"))
+            }
+
+            override fun onBeginningOfSpeech() = Unit
+            override fun onRmsChanged(rmsdB: Float) = Unit
+            override fun onBufferReceived(buffer: ByteArray?) = Unit
+            override fun onEndOfSpeech() {
+                if (stillCurrent()) emitNativeSpeech(JSONObject().put("type", "end"))
+            }
+
+            override fun onError(error: Int) {
+                if (!stillCurrent()) return
+                val (code, message) = when (error) {
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "permission" to "麦克风权限被拒绝"
+                    SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "network" to "系统语音识别网络错误"
+                    SpeechRecognizer.ERROR_NO_MATCH -> "no_speech" to "没有听清，再说一次"
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "no_speech" to "没有检测到说话"
+                    SpeechRecognizer.ERROR_AUDIO -> "audio" to "录音出错"
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "busy" to "语音识别正忙，稍后再试"
+                    SpeechRecognizer.ERROR_SERVER, SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "server" to "系统语音识别服务出错"
+                    SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "language" to "系统语音服务不支持中文"
+                    SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "language" to "系统语音服务没有中文语言包"
+                    SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT -> "language" to "系统语音服务无法检查语言支持"
+                    SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> "busy" to "语音识别请求太频繁，稍后再试"
+                    else -> "unknown" to "系统语音识别失败（$error）"
+                }
+                nativeSpeechError(code, message)
+                destroyNativeSpeech()
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                if (!stillCurrent()) return
+                val text = partialResults
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                    ?.trim()
+                    .orEmpty()
+                if (text.isNotEmpty()) {
+                    emitNativeSpeech(JSONObject().put("type", "partial").put("text", text))
+                }
+            }
+
+            override fun onResults(results: Bundle?) {
+                if (!stillCurrent()) return
+                val text = results
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                    ?.trim()
+                    .orEmpty()
+                if (text.isBlank()) nativeSpeechError("no_speech", "没有识别到内容")
+                else emitNativeSpeech(JSONObject().put("type", "final").put("text", text))
+                destroyNativeSpeech()
+            }
+
+            override fun onEvent(eventType: Int, params: Bundle?) = Unit
+        })
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang.ifBlank { "zh-CN" })
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            // 有离线语言包时优先离线；没有时系统服务会自行回退。
+            @Suppress("DEPRECATION")
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+        }
+        runCatching { recognizer.startListening(intent) }.onFailure {
+            nativeSpeechError("unavailable", it.message ?: "系统语音识别启动失败")
+            destroyNativeSpeech()
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_NATIVE_SPEECH) return
+        val lang = nativeSpeechPendingLang
+        nativeSpeechPendingLang = null
+        if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED && lang != null) {
+            startNativeSpeechInternal(lang)
+        } else {
+            nativeSpeechError("permission", "需要麦克风权限才能语音输入")
+        }
     }
 
     /** 暴露给网页的原生桥（网页侧可用 window.AndroidShell 特性检测壳环境）。 */
@@ -1613,9 +1766,37 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
             val orientation = when (mode.trim().lowercase()) {
                 "landscape" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 "portrait" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-                else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             }
             runOnUiThread { requestedOrientation = orientation }
+            return true
+        }
+
+        /** 系统原生语音识别：不经过用户自己的语音模型/API，回调通过 __aiPhoneNativeSpeech。 */
+        @JavascriptInterface
+        fun startNativeSpeech(lang: String): String {
+            if (!isTrustedShellPage()) return JSONObject().put("ok", false).toString()
+            runOnUiThread { startNativeSpeechInternal(lang) }
+            return JSONObject().put("ok", true).toString()
+        }
+
+        @JavascriptInterface
+        fun nativeSpeechInfo(): String = JSONObject()
+            .put("available", SpeechRecognizer.isRecognitionAvailable(this@MainActivity))
+            .put("onDevice", Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(this@MainActivity))
+            .toString()
+
+        @JavascriptInterface
+        fun stopNativeSpeech(): Boolean {
+            if (!isTrustedShellPage()) return false
+            runOnUiThread { runCatching { nativeSpeechRecognizer?.stopListening() } }
+            return true
+        }
+
+        @JavascriptInterface
+        fun cancelNativeSpeech(): Boolean {
+            if (!isTrustedShellPage()) return false
+            runOnUiThread { destroyNativeSpeech() }
             return true
         }
 
@@ -1908,7 +2089,7 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
 
         /** 勿扰模式开关（需要勿扰访问权限）。 */
         @JavascriptInterface
-        fun setDnd(on: Boolean): String = deviceAction.setDnd(on).toString()
+        fun setDnd(on: Boolean, untilEpochMs: Long): String = deviceAction.setDnd(on, untilEpochMs).toString()
 
         /** 按包名打开另一个应用。 */
         @JavascriptInterface
@@ -1925,6 +2106,15 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         @JavascriptInterface
         fun listInstalledApps(): String = deviceAction.listInstalledApps()
 
+        /** 当前前台应用（白名单离开豁免用）。 */
+        @JavascriptInterface
+        fun foregroundApp(): String = deviceAction.foregroundApp().toString()
+
+        /** 离开专注页面期间打开过的应用轨迹（白名单豁免用）。 */
+        @JavascriptInterface
+        fun foregroundPackagesSince(startMs: Long): String =
+            deviceAction.foregroundPackagesSince(startMs).toString()
+
         /** L2 看守锁：锁机名单 + 截止时间。网页层经权限门调用。 */
         @JavascriptInterface
         fun focusLockStart(packagesJson: String, untilEpochMs: Long): String =
@@ -1940,6 +2130,65 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
 
         @JavascriptInterface
         fun focusLockStatus(): String = FocusLockService.status(this@MainActivity).toString()
+
+        /** 角色小手段：只锁一个应用，密码由网页侧角色工具按好感度揭示。 */
+        @JavascriptInterface
+        fun appLockStart(json: String): String = runCatching {
+            val o = JSONObject(json)
+            PlayfulAppLockService.start(
+                this@MainActivity,
+                o.optString("target"),
+                o.optString("label"),
+                o.optString("charId"),
+                o.optString("charName"),
+                o.optString("avatar"),
+                o.optJSONObject("style")?.toString() ?: "{}",
+                o.optInt("durationMinutes", 30),
+                o.optString("sessionId"),
+            ).toString()
+        }.getOrElse { JSONObject().put("ok", false).put("reason", it.message ?: "小手段启动失败").toString() }
+
+        @JavascriptInterface
+        fun appLockStop(): String = PlayfulAppLockService.stop(this@MainActivity).toString()
+
+        @JavascriptInterface
+        fun appLockTemporaryPass(minutes: Int): String =
+            PlayfulAppLockService.temporaryPass(this@MainActivity, minutes).toString()
+
+        @JavascriptInterface
+        fun appLockStatus(): String = PlayfulAppLockService.status(this@MainActivity).toString()
+
+        @JavascriptInterface
+        fun appLockReveal(): String =
+            JSONObject().put("ok", true).put("password", PlayfulAppLockService.reveal(this@MainActivity)).toString()
+
+        /** 长时段定时锁机：到点由原生闹钟启动，Float 没开也能锁。 */
+        @JavascriptInterface
+        fun focusLockSchedule(json: String): String = runCatching {
+            val o = JSONObject(json)
+            val ok = FocusLockScheduler.schedule(
+                this@MainActivity,
+                o.optString("id"),
+                o.optLong("startAt", 0L),
+                o.optLong("endAt", 0L),
+                o.optString("packages", "[]"),
+                o.optString("taLine"),
+                o.optString("charName"),
+                o.optBoolean("dnd", false),
+                o.optString("task"),
+                o.optString("charIds", "[]"),
+                o.optInt("minutes", 25),
+            )
+            JSONObject().put("ok", ok).toString()
+        }.getOrElse { JSONObject().put("ok", false).put("reason", it.message ?: "定时锁机排程失败").toString() }
+
+        @JavascriptInterface
+        fun focusLockScheduleCancel(id: String): Boolean =
+            FocusLockScheduler.cancel(this@MainActivity, id)
+
+        @JavascriptInterface
+        fun consumeScheduledFocus(): String =
+            ScheduledFocusStore.consume(this@MainActivity)
 
         /** 专注通行证查岗：原生闹钟到点直接弹浮层（网页/进程不在也能弹）。 */
         @JavascriptInterface
@@ -1969,6 +2218,23 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         /** 专注倒计时桌面组件：网页推一份会话状态（Chronometer 原生倒计时，无需每秒推送）。 */
         @JavascriptInterface
         fun focusWidgetUpdate(json: String): String = FocusWidgetProvider.update(this@MainActivity, json).toString()
+
+        /** 专注悬浮胶囊：剩余时间 + 任务勾选。 */
+        @JavascriptInterface
+        fun focusOverlayUpdate(json: String): String {
+            FocusOverlayService.update(this@MainActivity, json)
+            return JSONObject().put("ok", true).toString()
+        }
+
+        @JavascriptInterface
+        fun focusOverlayStop(): String {
+            FocusOverlayService.stop(this@MainActivity)
+            return JSONObject().put("ok", true).toString()
+        }
+
+        @JavascriptInterface
+        fun focusOverlayConsumeEvents(): String =
+            FocusOverlayService.consumeEvents(this@MainActivity)
 
         /** 专注倒计时桌面组件：拉起系统的「添加到桌面」引导。 */
         @JavascriptInterface

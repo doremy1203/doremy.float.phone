@@ -729,7 +729,9 @@ export function WatchTogetherApp({ onClose, onNotice }: Props) {
     if (localVideoObjectUrlRef.current) URL.revokeObjectURL(localVideoObjectUrlRef.current);
     localVideoFileRef.current = null;
     wholeVideoAbortRef.current?.abort();
-    try { screen.orientation?.unlock?.(); } catch { /* orientation lock is optional */ }
+    // 不再调用 screen.orientation.unlock()：在部分 Android WebView 上会把页面
+    // 交回传感器方向，用户会误以为「自动旋转被打开」。壳侧默认锁定竖屏，
+    // 真要横屏由原生桥显式请求。
   }, []);
 
 

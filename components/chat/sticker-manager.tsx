@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { Trash2, Plus, Smile, ImagePlus, Check, ChevronDown, ChevronRight, Info, Pencil, Sticker, Layers } from "lucide-react";
+import { Trash2, Plus, Smile, ImagePlus, Check, ChevronDown, ChevronRight, Info, Pencil, Sticker, Layers, Download, Upload } from "lucide-react";
 import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
 import {
@@ -26,6 +26,7 @@ import {
     type StickerPack,
 } from "@/lib/custom-sticker-storage";
 import { loadChatContacts } from "@/lib/chat-storage";
+import { exportStickerPackAsPng, importStickerPackFromPng } from "@/lib/sticker-pack-png";
 import { PageShell } from "@/components/ui/page-shell";
 import { ConfirmDialog } from "@/components/ui/modal";
 
@@ -36,9 +37,27 @@ export function StickerManager({ onBack }: { onBack: () => void }) {
     const [editingPack, setEditingPack] = useState<StickerPack | null>(null);
     const [showCreateDialog, setShowCreateDialog] = useState(false);
     const [deletingPackId, setDeletingPackId] = useState<string | null>(null);
+    const [managerPngBusy, setManagerPngBusy] = useState(false);
+    const [managerPngMessage, setManagerPngMessage] = useState("");
+    const managerPngRef = useRef<HTMLInputElement>(null);
 
     const refresh = () => setPacks(loadStickerPacks());
     useEffect(() => { refresh(); }, []);
+
+    const handleManagerImportPng = async (file: File | null) => {
+        if (!file || managerPngBusy) return;
+        setManagerPngBusy(true);
+        setManagerPngMessage("");
+        try {
+            const pack = await importStickerPackFromPng(file);
+            refresh();
+            setManagerPngMessage(`已导入「${pack.name}」· ${pack.stickers.length} 个表情`);
+        } catch (error) {
+            setManagerPngMessage(error instanceof Error ? error.message : "导入失败");
+        } finally {
+            setManagerPngBusy(false);
+        }
+    };
 
     const handleConfirmDeletePack = async () => {
         if (!deletingPackId) return;
@@ -57,8 +76,32 @@ export function StickerManager({ onBack }: { onBack: () => void }) {
     }
 
     return (
-        <PageShell title="表情包管理" onBack={onBack} className="absolute inset-0 z-[100]">
+        <PageShell
+            title="表情包管理"
+            onBack={onBack}
+            rightAction={(
+                <button
+                    type="button"
+                    onClick={() => managerPngRef.current?.click()}
+                    disabled={managerPngBusy}
+                    aria-label="导入图集 PNG"
+                    title="导入图集 PNG"
+                    className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--c-input)] text-[var(--c-text)] disabled:opacity-50"
+                >
+                    <Upload size={17} />
+                </button>
+            )}
+            className="absolute inset-0 z-[100]"
+        >
             <div className="px-5 pt-4 pb-8 h-full overflow-y-auto">
+                <input
+                    ref={managerPngRef}
+                    type="file"
+                    accept="image/png,.png"
+                    className="hidden"
+                    onChange={event => { void handleManagerImportPng(event.target.files?.[0] ?? null); event.target.value = ""; }}
+                />
+                {managerPngMessage && <div className="mb-3 rounded-xl bg-[var(--c-input)] px-3 py-2 text-[11px] text-[var(--c-icon)]">{managerPngMessage}</div>}
                 <div className="grid grid-cols-2 gap-4">
                     {packs.map((pack, i) => {
                         const assignedIds = getPackAssignments(pack.id);
@@ -355,6 +398,9 @@ function PackEditor({ pack, onBack }: { pack: StickerPack; onBack: () => void })
     const [isEditingPackName, setIsEditingPackName] = useState(false);
     const [isNoteExpanded, setIsNoteExpanded] = useState(false);
     const [showNoteInfo, setShowNoteInfo] = useState(false);
+    const [pngBusy, setPngBusy] = useState(false);
+    const [pngMessage, setPngMessage] = useState("");
+    const pngInputRef = useRef<HTMLInputElement>(null);
 
     const refreshPack = useCallback(() => {
         const fresh = loadStickerPacks().find(p => p.id === pack.id);
@@ -442,6 +488,35 @@ function PackEditor({ pack, onBack }: { pack: StickerPack; onBack: () => void })
     };
 
     const noteChanged = packNoteDraft.trim() !== (currentPack.note ?? "");
+
+    const handleExportPng = async () => {
+        if (pngBusy) return;
+        setPngBusy(true);
+        setPngMessage("");
+        try {
+            await exportStickerPackAsPng(pack.id);
+            setPngMessage("已导出图集 PNG；导入时会自动还原整套表情。");
+        } catch (error) {
+            setPngMessage(error instanceof Error ? error.message : "导出失败");
+        } finally {
+            setPngBusy(false);
+        }
+    };
+
+    const handleImportPng = async (file: File | null) => {
+        if (!file || pngBusy) return;
+        setPngBusy(true);
+        setPngMessage("");
+        try {
+            const imported = await importStickerPackFromPng(file);
+            setPngMessage(`已导入图集「${imported.name}」· ${imported.stickers.length} 个表情`);
+            onBack();
+        } catch (error) {
+            setPngMessage(error instanceof Error ? error.message : "导入失败");
+        } finally {
+            setPngBusy(false);
+        }
+    };
 
     return (
         <PageShell
@@ -554,7 +629,34 @@ function PackEditor({ pack, onBack }: { pack: StickerPack; onBack: () => void })
                             <Layers size={14} /> 批量导入
                         </button>
                     </div>
-                    
+
+                    <div className="mb-3 flex flex-wrap items-center gap-2 px-1">
+                        <button
+                            type="button"
+                            onClick={handleExportPng}
+                            disabled={pngBusy}
+                            className="flex items-center gap-1.5 rounded-full bg-[var(--c-input)] px-3 py-1.5 text-[11px] font-semibold text-[var(--c-text)] disabled:opacity-50"
+                        >
+                            <Download size={13} /> 导出图集 PNG
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => pngInputRef.current?.click()}
+                            disabled={pngBusy}
+                            className="flex items-center gap-1.5 rounded-full bg-[var(--c-input)] px-3 py-1.5 text-[11px] font-semibold text-[var(--c-text)] disabled:opacity-50"
+                        >
+                            <Upload size={13} /> 导入图集 PNG
+                        </button>
+                        <input
+                            ref={pngInputRef}
+                            type="file"
+                            accept="image/png,.png"
+                            className="hidden"
+                            onChange={event => { void handleImportPng(event.target.files?.[0] ?? null); event.target.value = ""; }}
+                        />
+                        {pngMessage && <span className="text-[10px] leading-relaxed text-[var(--c-icon)]">{pngMessage}</span>}
+                    </div>
+
                     <div className="grid grid-cols-3 gap-x-4 gap-y-6 pb-20">
                         {currentPack.stickers.map(s => (
                             <StickerCard

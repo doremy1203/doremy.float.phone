@@ -10,7 +10,7 @@ import { ConfirmDialog } from "@/components/ui/modal";
 import { Toggle, Input } from "@/components/ui/form";
 import { Alert } from "@/components/ui/feedback";
 
-const SUPPORTED_VOICE_PROVIDERS = new Set(["Minimax", "OpenAI"]);
+const SUPPORTED_VOICE_PROVIDERS = new Set(["Minimax", "OpenAI", "ElevenLabs", "FishAudio", "MiMo"]);
 const MINIMAX_BASE_URL_OPTIONS = [
     { id: "cn", label: "国内版", baseUrl: "https://api.minimaxi.com/v1" },
     { id: "global", label: "海外版", baseUrl: "https://api.minimax.io/v1" },
@@ -30,6 +30,9 @@ const VOICE_PROVIDER_OPTIONS = [
     { value: "OpenAI", label: "OpenAI TTS" },
     { value: "MinimaxCN", label: "Minimax 语音国内版" },
     { value: "MinimaxGlobal", label: "Minimax 语音海外版" },
+    { value: "ElevenLabs", label: "ElevenLabs" },
+    { value: "FishAudio", label: "Fish Audio" },
+    { value: "MiMo", label: "小米 MiMo" },
 ];
 
 const DEFAULT_VOICE_CONFIGS: VoiceApiConfig[] = [
@@ -161,6 +164,25 @@ const DEFAULT_MINIMAX_VOICES = [
     { id: "Cantonese_KindWoman", name: "粤语善良女声 (Cantonese_KindWoman)" },
 ];
 
+const DEFAULT_ELEVENLABS_VOICES = [
+    { id: "21m00Tcm4TlvDq8ikWAM", name: "Rachel" },
+    { id: "EXAVITQu4vr4xnSDxMaL", name: "Bella" },
+    { id: "TxGEqnHWrfWFTfGW9XjX", name: "Josh" },
+    { id: "pNInz6obvg0e6T5p1J3S", name: "Adam" },
+];
+const DEFAULT_FISH_VOICES = [
+    { id: "", name: "默认音色（不填 reference_id）" },
+];
+const DEFAULT_MIMO_VOICES = [
+    { id: "冰糖", name: "冰糖（中文女声）" },
+    { id: "茉莉", name: "茉莉（中文女声）" },
+    { id: "苏打", name: "苏打（中文男声）" },
+    { id: "白桦", name: "白桦（中文男声）" },
+    { id: "Mia", name: "Mia（English）" },
+    { id: "Chloe", name: "Chloe（English）" },
+    { id: "Milo", name: "Milo（English）" },
+    { id: "Dean", name: "Dean（English）" },
+];
 const DEFAULT_OPENAI_VOICES = [
     { id: "alloy", name: "Alloy" },
     { id: "echo", name: "Echo" },
@@ -182,7 +204,11 @@ function uniqueOptions(options: VoiceOption[]): VoiceOption[] {
 }
 
 function defaultVoiceOptions(provider: string): VoiceOption[] {
-    return provider === "OpenAI" ? DEFAULT_OPENAI_VOICES : DEFAULT_MINIMAX_VOICES;
+    if (provider === "OpenAI") return DEFAULT_OPENAI_VOICES;
+    if (provider === "ElevenLabs") return DEFAULT_ELEVENLABS_VOICES;
+    if (provider === "FishAudio") return DEFAULT_FISH_VOICES;
+    if (provider === "MiMo") return DEFAULT_MIMO_VOICES;
+    return DEFAULT_MINIMAX_VOICES;
 }
 
 function voiceOptionsForConfig(config: VoiceApiConfig, fetchedVoices: Record<string, VoiceOption[]>): VoiceOption[] {
@@ -221,7 +247,9 @@ function makeCloneVoiceId(config: VoiceApiConfig): string {
 }
 
 function providerSelectValue(config: VoiceApiConfig): string {
-    if (config.provider === "OpenAI") return "OpenAI";
+    if (config.provider === "OpenAI" || config.provider === "ElevenLabs" || config.provider === "FishAudio" || config.provider === "MiMo") {
+        return config.provider;
+    }
     return config.baseUrl === GLOBAL_MINIMAX_BASE_URL ? "MinimaxGlobal" : "MinimaxCN";
 }
 
@@ -313,6 +341,21 @@ export function VoiceSettings() {
             });
             setManualModelIds(prev => ({ ...prev, [id]: true }));
             setManualVoiceIds(prev => ({ ...prev, [id]: false }));
+            return;
+        }
+        if (providerOption === "ElevenLabs") {
+            updateConfig(id, { provider: "ElevenLabs", baseUrl: "https://api.elevenlabs.io", model: "eleven_multilingual_v2", defaultVoice: "21m00Tcm4TlvDq8ikWAM", outputFormat: "mp3" });
+            setManualModelIds(prev => ({ ...prev, [id]: true }));
+            return;
+        }
+        if (providerOption === "FishAudio") {
+            updateConfig(id, { provider: "FishAudio", baseUrl: "https://api.fish.audio", model: "speech-1.5", defaultVoice: "", outputFormat: "mp3" });
+            setManualModelIds(prev => ({ ...prev, [id]: true }));
+            return;
+        }
+        if (providerOption === "MiMo") {
+            updateConfig(id, { provider: "MiMo", baseUrl: "https://api.xiaomimimo.com/v1", model: "mimo-v2.5-tts", defaultVoice: "冰糖", outputFormat: "wav" });
+            setManualModelIds(prev => ({ ...prev, [id]: true }));
             return;
         }
         const wasMinimax = current?.provider === "Minimax";
@@ -737,6 +780,56 @@ export function VoiceSettings() {
                                                     />
                                                     <span className="menu-desc ml-1">通话「按住说话」用它把录音转成文字（非 iOS 设备生效），走同一个接口地址与密钥</span>
                                                 </div>
+                                            </>
+                                        )}
+
+                                        {["ElevenLabs", "FishAudio", "MiMo"].includes(config.provider) && (
+                                            <>
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="menu-desc ml-1">接口地址 (Base URL)</label>
+                                                    <Input type="text" value={config.baseUrl || ""} onChange={(e) => updateConfig(config.id, { baseUrl: e.target.value })} placeholder="按官方文档填写" />
+                                                </div>
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="menu-desc ml-1">语音模型 (TTS Model)</label>
+                                                    <Input type="text" value={config.model || ""} onChange={(e) => updateConfig(config.id, { model: e.target.value })} placeholder="官方模型 ID" />
+                                                </div>
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="menu-desc ml-1">输出格式</label>
+                                                    <select value={config.outputFormat || (config.provider === "MiMo" ? "wav" : "mp3")} onChange={(e) => updateConfig(config.id, { outputFormat: e.target.value })} className="ui-select">
+                                                        <option value="mp3">mp3</option>
+                                                        <option value="wav">wav</option>
+                                                        {config.provider === "MiMo" && <option value="pcm16">pcm16</option>}
+                                                    </select>
+                                                </div>
+                                                {config.provider === "MiMo" && (
+                                                    <div className="flex flex-col gap-1">
+                                                        <label className="menu-desc ml-1">风格 / 导演指令</label>
+                                                        <Input type="text" value={config.instructions || ""} onChange={(e) => updateConfig(config.id, { instructions: e.target.value })} placeholder="例如：语速偏快、语气轻松；MiMo 用这段控制语气" />
+                                                    </div>
+                                                )}
+                                                {config.provider === "ElevenLabs" && (
+                                                    <>
+                                                        <div className="flex flex-col gap-1">
+                                                            <div className="flex items-center justify-between px-1"><label className="menu-desc">稳定度 (Stability)</label><span className="menu-label font-medium">{(config.stability ?? 0.5).toFixed(2)}</span></div>
+                                                            <input type="range" min={0} max={1} step={0.05} value={config.stability ?? 0.5} onChange={(e) => updateConfig(config.id, { stability: Number(e.target.value) })} className="w-full accent-black" />
+                                                        </div>
+                                                        <div className="flex flex-col gap-1">
+                                                            <div className="flex items-center justify-between px-1"><label className="menu-desc">相似度 (Similarity)</label><span className="menu-label font-medium">{(config.similarityBoost ?? 0.75).toFixed(2)}</span></div>
+                                                            <input type="range" min={0} max={1} step={0.05} value={config.similarityBoost ?? 0.75} onChange={(e) => updateConfig(config.id, { similarityBoost: Number(e.target.value) })} className="w-full accent-black" />
+                                                        </div>
+                                                        <div className="flex flex-col gap-1">
+                                                            <div className="flex items-center justify-between px-1"><label className="menu-desc">风格强度 (Style)</label><span className="menu-label font-medium">{(config.style ?? 0).toFixed(2)}</span></div>
+                                                            <input type="range" min={0} max={1} step={0.05} value={config.style ?? 0} onChange={(e) => updateConfig(config.id, { style: Number(e.target.value) })} className="w-full accent-black" />
+                                                        </div>
+                                                        <div className="flex items-center justify-between"><label className="menu-desc">Speaker Boost</label><Toggle checked={config.speakerBoost !== false} onChange={(checked) => updateConfig(config.id, { speakerBoost: checked })} /></div>
+                                                    </>
+                                                )}
+                                                {config.provider === "FishAudio" && (
+                                                    <div className="flex flex-col gap-1">
+                                                        <div className="flex items-center justify-between px-1"><label className="menu-desc">语速 (Speed)</label><span className="menu-label font-medium">{(config.speechSpeed ?? 1).toFixed(1)}×</span></div>
+                                                        <input type="range" min={0.5} max={2} step={0.1} value={config.speechSpeed ?? 1} onChange={(e) => updateConfig(config.id, { speechSpeed: Number(e.target.value) })} className="w-full accent-black" />
+                                                    </div>
+                                                )}
                                             </>
                                         )}
 

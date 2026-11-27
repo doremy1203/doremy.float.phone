@@ -23,10 +23,10 @@ import {
     toolNameMatches,
 } from "./tool-storage";
 import { executeCustomAppToolCall } from "./custom-app-tool-runtime";
-import { executeLifeToolCall } from "./life/life-tools";
+import { executeLifeToolCall, isLifeToolName } from "./life/life-tools";
 import { appendLifeTimelineEntry, loadVirtualLifeState, saveVirtualLifeState } from "./life/life-storage";
 import { characterWorkspace, agentComputerRequest, isAgentComputerConfigured } from "./agent-computer";
-import { MEMO_CAPABILITY_ID, AGENT_COMPUTER_CAPABILITY_ID, CHECK_IN_REQUEST_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PHOTO_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, PHONE_WIDGET_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, SYSTEM_CALENDAR_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability, getInternalCapabilitySubToolDefinitions } from "./internal-capability-storage";
+import { CHARACTER_ECONOMY_CAPABILITY_ID, ANONYMOUS_QA_CAPABILITY_ID, CHARACTER_APP_LOCK_CAPABILITY_ID, MEMO_CAPABILITY_ID, AGENT_COMPUTER_CAPABILITY_ID, CHECK_IN_REQUEST_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PHOTO_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, PHONE_WIDGET_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, SYSTEM_CALENDAR_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability, getInternalCapabilitySubToolDefinitions } from "./internal-capability-storage";
 import { createPhotoWallId, loadPhotoWallState, savePhotoWallState, type PhotoWallDoodle, type PhotoWallCreationRecord, type PhotoWallPhoto } from "./photo-wall-storage";
 import { generateImageFromConfiguredApi } from "./image-generation-service";
 import {
@@ -38,7 +38,7 @@ import {
     loadPerceptionStatus,
     markQueryPerformed,
 } from "./perception";
-import { notifyDeviceAction, runDeviceAction } from "./device-action";
+import { notifyDeviceAction, runDeviceAction, listInstalledApps, appLockStart, appLockStop, appLockTemporaryPass, appLockStatus, appLockReveal } from "./device-action";
 import { renderWidgetHtml, injectWidgetCss } from "./widget/template";
 import { canGenerateAvatar, generateWidgetAvatar } from "./widget/avatar";
 import { loadWidgetConfig, saveWidgetData, loadWidgetData, loadWidgetProfiles, loadWidgetProfileData, saveWidgetProfileData } from "./widget/storage";
@@ -59,7 +59,14 @@ import { createShortcutCommand, deliverShortcutCommand, waitForShortcutCommand }
 import { loadMemoryEntriesByType, saveMemoryEntry } from "./memory-storage";
 import type { MemoryEntry } from "./memory-types";
 import { loadCharacters } from "./character-storage";
-import { loadChatSessions } from "./chat-storage";
+import { characterEarn, characterSpend, ensureCharacterLedger, loadCharacterLedger } from "./economy/character-ledger";
+import { createFamilyCardForCharacter, loadFamilyCards, spendWithFamilyCard } from "./economy/family-card";
+import { answerAnonymousQuestion, askAnonymousQuestion, loadAnonymousQa } from "./anonymous-qa";
+import { depositToJointFund, loadJointFundTransactions, loadJointFunds, setJointFundPlanForCharacter } from "./economy/joint-fund";
+import { recordWalletBookkeeping } from "./wallet-storage";
+import { createOrGetSession, loadChatMessages, loadChatSessions, resolveSessionCharacterId } from "./chat-storage";
+import { readCustomAppCollection } from "./custom-app-storage";
+import { FOCUS_COMPANION_APP_ID } from "./builtin-apps/focus-companion-meta";
 import { makeNativeToolName } from "./native-tool-name";
 import {
     deleteCalendarScheduleItem,
@@ -508,14 +515,14 @@ export async function executeToolCalls(toolCalls: ToolCall[], context?: ToolExec
     const results = new Array<ToolResult>(toolCalls.length);
     const independentCalls = toolCalls
         .map((call, index) => ({ call, index }))
-        .filter(item => !item.call.name.startsWith("life_"));
+        .filter(item => !isLifeToolName(item.call.name));
     await Promise.all(independentCalls.map(async ({ call, index }) => {
         throwIfAborted(context?.signal);
         results[index] = await executeSingleToolCall(call, context, { depth: 0 });
     }));
     for (let index = 0; index < toolCalls.length; index++) {
         const call = toolCalls[index];
-        if (!call.name.startsWith("life_")) continue;
+        if (!isLifeToolName(call.name)) continue;
         throwIfAborted(context?.signal);
         results[index] = await executeSingleToolCall(call, context, { depth: 0 });
     }
@@ -527,7 +534,7 @@ export async function executeToolCalls(toolCalls: ToolCall[], context?: ToolExec
                 let changed = false;
                 for (let index = 0; index < toolCalls.length; index++) {
                     const call = toolCalls[index];
-                    if (call.name.startsWith("life_")) continue; // Life tools record their own richer event.
+                    if (isLifeToolName(call.name)) continue; // Life tools record their own richer event.
                     const result = results[index];
                     const detail = result?.success === false
                         ? "调用未成功：" + (result.error || "工具返回失败")
@@ -651,6 +658,16 @@ function resolveNativeToolCall(call: ToolCall, context?: ToolExecutionContext): 
     return uniqueMatches.length === 1 ? { ...call, name: uniqueMatches[0] } : call;
 }
 
+/**
+ * 把模型泄漏到文本协议里的原生名（action_xxxx）解析回中文显示名。
+ * 仅用于「正在…」这类状态文案；解析不到时原样返回，不改变执行链。
+ */
+export function resolveToolCallDisplayName(name: string, context?: ToolExecutionContext): string {
+    const requested = String(name || "").trim();
+    if (!requested) return name;
+    return resolveNativeToolCall({ name: requested, args: {} }, context).name || requested;
+}
+
 async function executeSingleToolCall(
     call: ToolCall,
     context: ToolExecutionContext | undefined,
@@ -710,10 +727,10 @@ async function executeSingleToolCall(
     const tryCustomApp = () => executeCustomAppToolCall(call, context, nameMacroContext);
     const tryLife = () => executeLifeToolCall(call, context);
 
-    if (call.name.startsWith("life_")) {
-        const lifeResult = await tryLife();
-        if (lifeResult) return lifeResult;
-    }
+    // 生活工具现在对外用中文名（内部 ID 仍是 life_*），不能再靠前缀判断。
+    // executeLifeToolCall 对非生活工具会立即返回 null，所以这里可以安全地先试。
+    const lifeResult = await tryLife();
+    if (lifeResult) return lifeResult;
 
     if (preferredType === "internal") {
         const result = await tryInternal();
@@ -979,6 +996,9 @@ function normalizeInternalToolResult(result: ToolResult): ToolResult {
 
 async function executeInternalTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult | null> {
     if (["翻看备忘录","阅读备忘录","新建备忘录","修改备忘录","整理待办","整理档案盒","翻阅归档","删除备忘录","完成备忘录维护"].includes(call.name)) return executeMemoTool(call, context);
+    if (isCharacterEconomyToolName(call.name)) return executeCharacterEconomyTool(call, context);
+    if (isAnonymousQaToolName(call.name)) return executeAnonymousQaTool(call, context);
+    if (isAppLockToolName(call.name)) return executeAppLockTool(call, context);
     if (isNoteWallToolName(call.name)) return executeNoteWallTool(call, context);
     if (isPhotoWallToolName(call.name)) return executePhotoWallTool(call, context);
     if (isMusicControlToolName(call.name)) return executeMusicControlTool(call, context);
@@ -2497,6 +2517,345 @@ async function executeToolboxManagementTool(call: ToolCall): Promise<ToolResult>
             error: message,
             userNotice: `${call.name}失败：${message}`,
         };
+    }
+}
+
+function isAppLockToolName(name: string): boolean {
+    return name === "查看可锁应用" || name === "锁应用" || name === "解锁应用" || name === "查看应用锁" || name === "告诉应用锁密码" || name === "给临时通行证";
+}
+
+/** 好感度阈值优先读专注 APP 的角色应用限制设置；没装/没设置时用默认 60。 */
+function focusAppLockThreshold(): number {
+    try {
+        const rows = readCustomAppCollection(FOCUS_COMPANION_APP_ID, "settings");
+        const row = rows[rows.length - 1];
+        const data = row && typeof row.data === "object" && row.data ? row.data as Record<string, unknown> : {};
+        const rule = data.appLock && typeof data.appLock === "object" ? data.appLock as Record<string, unknown> : {};
+        const value = Number(rule.threshold ?? data.appLockThreshold ?? 60);
+        return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 60;
+    } catch {
+        return 60;
+    }
+}
+
+/** 锁屏返回时始终定位到发起角色的私聊，不把群聊当作角色的求情入口。 */
+function resolveAppLockChatSessionId(characterId: string): string {
+    try {
+        const existing = loadChatSessions()
+            .filter(session => !session.isGroup && (session.characterId === characterId || session.contactId === characterId))
+            .slice()
+            .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0];
+        return existing?.id || createOrGetSession(characterId).id;
+    } catch {
+        return "";
+    }
+}
+
+/** 从该角色最近的私聊消息里读 [好感度:N]；专注 APP 的应用限制使用同一套判定。 */
+function latestCharacterAffinity(characterId: string): number {
+    try {
+        const sessions = loadChatSessions()
+            .filter(session => !session.isGroup && (session.characterId === characterId || session.contactId === characterId))
+            .slice()
+            .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+        for (const session of sessions) {
+            const messages = loadChatMessages(session.id).slice(-80);
+            for (let index = messages.length - 1; index >= 0; index -= 1) {
+                const message = messages[index];
+                if (message.role !== "assistant") continue;
+                const stateValue = (message.stateValues || []).find(item => String(item.name || "").includes("好感度"));
+                if (stateValue && Number.isFinite(Number(stateValue.value))) {
+                    return Math.max(0, Math.min(100, Number(stateValue.value)));
+                }
+                const match = String(message.content || "").match(/\[好感度[:：]\s*(\d{1,3})\]/);
+                if (match) return Math.max(0, Math.min(100, Number(match[1]) || 0));
+            }
+        }
+    } catch { /* 读不到就按 0 处理，宁可不给密码 */ }
+    return 0;
+}
+
+async function executeAppLockTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+    const capability = getInternalCapability(CHARACTER_APP_LOCK_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") {
+        return { name: call.name, success: false, error: "角色锁应用能力未启用", continueConversation: false, persistToHistory: false, userNotice: "角色锁应用能力未启用" };
+    }
+    const characterId = context?.characterId;
+    if (!characterId) return { name: call.name, success: false, error: "缺少角色上下文", continueConversation: false, persistToHistory: false };
+    const character = loadCharacters().find(c => c.id === characterId);
+    try {
+        if (call.name === "查看可锁应用") {
+            const result = listInstalledApps();
+            if (!result.ok) throw new Error(result.reason || "读不到应用列表");
+            return { name: call.name, success: true, data: result.apps.slice(0, 100).map(a => `${a.label} (${a.package})`).join("\n"), userNotice: "看了看可以锁的应用" };
+        }
+        if (call.name === "给临时通行证") {
+            const status = appLockStatus();
+            if (!status.ok || !status.running) throw new Error("现在没有应用锁在生效");
+            if (status.charId !== characterId) throw new Error("这不是你发起的应用锁，不能替别人发通行证");
+            const minutes = Math.max(1, Math.min(5, Number(call.args?.minutes) || 1));
+            const result = appLockTemporaryPass(minutes);
+            if (!result.ok) throw new Error(result.reason || "临时通行证发放失败");
+            return { name: call.name, success: true, data: `已给用户 ${minutes} 分钟临时通行时间，到期后会自动恢复拦截。`, userNotice: `${character?.name || "TA"} 给了你 ${minutes} 分钟通行时间` };
+        }
+        if (call.name === "解锁应用") {
+            const status = appLockStatus();
+            if (!status.ok || !status.running) throw new Error("现在没有应用锁在生效");
+            if (status.charId !== characterId) throw new Error("这不是你发起的应用锁，不能替别人解除");
+            const result = appLockStop();
+            if (!result.ok) throw new Error(result.reason || "解锁失败");
+            return { name: call.name, success: true, data: "已解除当前应用锁", userNotice: "把应用锁解除了" };
+        }
+        if (call.name === "查看应用锁") {
+            const status = appLockStatus();
+            if (!status.ok) return { name: call.name, success: true, data: "当前没有应用锁", userNotice: "没有应用锁" };
+            if (!status.running) return { name: call.name, success: true, data: "当前没有应用锁", userNotice: "没有应用锁" };
+            const monitorNote = status.monitoringAvailable === false
+                ? "；但前台应用监测权限不可用，自动拦截可能失效，请检查使用情况访问或无障碍服务"
+                : "";
+            return { name: call.name, success: true, data: `正在锁：${status.label || status.target}${monitorNote}`, userNotice: "看了一眼应用锁" };
+        }
+        if (call.name === "告诉应用锁密码") {
+            const status = appLockStatus();
+            if (!status.ok || !status.running) throw new Error("现在没有应用锁在生效");
+            if (status.charId !== characterId) throw new Error("这个应用锁不是你下的");
+            const threshold = focusAppLockThreshold();
+            const score = latestCharacterAffinity(characterId);
+            if (score < threshold) {
+                return {
+                    name: call.name,
+                    success: true,
+                    data: `当前好感度 ${score}，低于告诉密码需要的 ${threshold}，暂时不能告知密码。`,
+                    userNotice: "TA 现在还不肯告诉你密码",
+                };
+            }
+            const revealed = appLockReveal();
+            if (!revealed.ok || !revealed.password) throw new Error(revealed.reason || "密码读取失败");
+            return {
+                name: call.name,
+                success: true,
+                data: `密码是 ${revealed.password}。只在私聊里告诉用户，不要公开，也不要在锁页/设置里展示。`,
+                userNotice: "TA 把密码悄悄告诉你了",
+                persistToHistory: false,
+            };
+        }
+        const wanted = String(call.args?.app || "").trim();
+        if (!wanted) throw new Error("需要 app（应用名或包名）");
+        const apps = listInstalledApps();
+        if (!apps.ok) throw new Error(apps.reason || "读不到应用列表");
+        const norm = (v: string) => v.trim().toLowerCase();
+        const app = apps.apps.find(a => norm(a.package) === norm(wanted))
+            || apps.apps.find(a => norm(a.label) === norm(wanted))
+            || apps.apps.find(a => norm(a.label).includes(norm(wanted)) || norm(wanted).includes(norm(a.label)));
+        if (!app) throw new Error("找不到应用：" + wanted);
+        const result = appLockStart({
+            target: app.package,
+            label: app.label,
+            charId: characterId,
+            charName: character?.name || "TA",
+            avatar: character?.avatar || "",
+            style: call.args?.style && typeof call.args.style === "object" ? call.args.style : {},
+            durationMinutes: Math.max(1, Math.min(360, Number(call.args?.durationMinutes) || 30)),
+            sessionId: resolveAppLockChatSessionId(characterId),
+        });
+        if (!result.ok) throw new Error(result.reason || "锁应用失败");
+        return { name: call.name, success: true, data: `已锁住「${app.label}」，最长 ${Math.max(1, Math.min(360, Number(call.args?.durationMinutes) || 30))} 分钟后自动解除。密码由系统生成；用户可以返回与你的私聊，申请临时通行或询问解锁密码。`, userNotice: `已为「${app.label}」开启使用限制` };
+    } catch (error) {
+        return { name: call.name, success: false, error: error instanceof Error ? error.message : String(error), continueConversation: false, persistToHistory: false, userNotice: "应用锁操作失败" };
+    }
+}
+
+function isAnonymousQaToolName(name: string): boolean {
+    return name === "匿名提问" || name === "回答匿名提问" || name === "查看匿名提问箱";
+}
+
+async function executeAnonymousQaTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+    const capability = getInternalCapability(ANONYMOUS_QA_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") {
+        return { name: call.name, success: false, error: "匿名提问箱能力未启用", continueConversation: false, persistToHistory: false, userNotice: "匿名提问箱能力未启用" };
+    }
+    const characterId = context?.characterId;
+    if (!characterId) return { name: call.name, success: false, error: "缺少角色上下文", continueConversation: false, persistToHistory: false };
+    try {
+        if (call.name === "匿名提问") {
+            const rawTargetType = String(call.args?.targetType || "").trim();
+            if (rawTargetType !== "character" && rawTargetType !== "user") {
+                throw new Error("targetType 必须明确填写 character 或 user");
+            }
+            const targetType = rawTargetType as "character" | "user";
+            const targetId = String(call.args?.targetId || "").trim();
+            if (!targetId) throw new Error("targetId 是必填项：问角色填写角色 ID，问用户填写 user");
+            const question = String(call.args?.question || "").trim();
+            if (!question) throw new Error("问题不能为空");
+            const row = askAnonymousQuestion({
+                askerType: "character", askerId: characterId,
+                targetType, targetId, question,
+                audience: "public",
+            });
+            return { name: call.name, success: true, data: `已匿名提问（${row.askerAlias}）：${question}`, userNotice: "匿名问了一个问题" };
+        }
+        if (call.name === "回答匿名提问") {
+            const questionId = String(call.args?.questionId || "").trim();
+            const answer = String(call.args?.answer || "").trim();
+            if (!questionId || !answer) throw new Error("需要 questionId 和 answer");
+            const target = loadAnonymousQa().find(q => q.id === questionId);
+            if (!target || target.targetType !== "character" || target.targetId !== characterId) throw new Error("这个问题不是问你的");
+            answerAnonymousQuestion(questionId, answer, { targetType: "character", targetId: characterId });
+            return { name: call.name, success: true, data: `已匿名回答：${answer}`, userNotice: "回答了一个匿名提问" };
+        }
+        const shared = loadAnonymousQa().slice(0, 40);
+        const lines = shared.map(q => `[${q.status === "answered" ? "已回答" : "待回答"}] ${q.askerAlias} → ${q.targetType === "user" ? "用户" : "另一位角色"}：${q.question}${q.answer ? "；回答：" + q.answer : ""}${q.targetType === "character" && q.targetId === characterId && q.status === "pending" ? "；这是问你的，可回答，questionId=" + q.id : ""}`);
+        return { name: call.name, success: true, data: lines.length ? lines.join("\n") : "共享匿名提问箱目前还没有问题", userNotice: "看了看匿名提问箱" };
+    } catch (error) {
+        return { name: call.name, success: false, error: error instanceof Error ? error.message : String(error), continueConversation: false, persistToHistory: false, userNotice: "匿名提问箱操作失败" };
+    }
+}
+
+function isCharacterEconomyToolName(name: string): boolean {
+    return name === "记录角色收入" || name === "记录角色支出" || name === "查看角色账本"
+        || name === "查看亲属卡" || name === "使用亲属卡" || name === "开亲属卡"
+        || name === "查看共同小金库" || name === "存入共同小金库" || name === "设置小金库定期存款" || name === "帮我记账";
+}
+
+async function executeCharacterEconomyTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+    const capability = getInternalCapability(CHARACTER_ECONOMY_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") {
+        return { name: call.name, success: false, error: "角色收支能力未启用", continueConversation: false, persistToHistory: false, userNotice: "角色收支能力未启用" };
+    }
+    const characterId = context?.characterId;
+    if (!characterId) {
+        return { name: call.name, success: false, error: "缺少角色上下文", continueConversation: false, persistToHistory: false };
+    }
+    try {
+        if (call.name === "帮我记账") {
+            const direction = String(call.args?.direction || "").trim();
+            if (direction !== "income" && direction !== "expense") throw new Error("请明确这笔是收入还是支出");
+            const amount = Number(call.args?.amount);
+            const title = String(call.args?.title || "").trim();
+            if (!Number.isFinite(amount) || amount <= 0 || !title) throw new Error("需要有效金额和用途/来源");
+            const category = String(call.args?.category || "其他").trim() || "其他";
+            const result = recordWalletBookkeeping({
+                direction,
+                amount,
+                title,
+                category,
+                note: String(call.args?.note || "").trim(),
+                occurredAt: call.args?.occurredAt ? String(call.args.occurredAt) : undefined,
+                reference: call.args?.reference ? String(call.args.reference) : undefined,
+            });
+            if (!result.ok) throw new Error(result.error || "用户钱包记账失败");
+            return {
+                name: call.name,
+                success: true,
+                data: `已为用户记下一笔${direction === "income" ? "收入" : "支出"}：¥${amount} · ${category} · ${title}。用户钱包余额 ¥${result.state.balance}`,
+                userNotice: `帮你记了一笔${direction === "income" ? "收入" : "支出"}：${title} · ¥${amount}`,
+            };
+        }
+        if (call.name === "记录角色收入") {
+            const amount = Number(call.args?.amount);
+            const note = String(call.args?.note || "").trim();
+            if (!Number.isFinite(amount) || amount <= 0) throw new Error("收入金额必须是正数");
+            if (!note) throw new Error("收入需要写清来源");
+            const category = String(call.args?.category || "其他").trim() || "其他";
+            const ledger = characterEarn(characterId, amount, category, note, call.args?.ref ? String(call.args.ref) : undefined);
+            return { name: call.name, success: true, data: `收入 ¥${amount}（${category}）已记账，余额 ¥${ledger.balance}`, userNotice: `记了一笔收入：${note} · ¥${amount}` };
+        }
+        if (call.name === "记录角色支出") {
+            const amount = Number(call.args?.amount);
+            const note = String(call.args?.note || "").trim();
+            if (!Number.isFinite(amount) || amount <= 0) throw new Error("支出金额必须是正数");
+            if (!note) throw new Error("支出需要写清用途");
+            const category = String(call.args?.category || "其他").trim() || "其他";
+            const ledger = characterSpend(characterId, amount, category, note, call.args?.ref ? String(call.args.ref) : undefined);
+            return { name: call.name, success: true, data: `支出 ¥${amount}（${category}）已记账，余额 ¥${ledger.balance}`, userNotice: `记了一笔支出：${note} · ¥${amount}` };
+        }
+        if (call.name === "查看亲属卡") {
+            const cards = loadFamilyCards().filter(card => card.issuerId === characterId || card.beneficiaryId === characterId);
+            return { name: call.name, success: true, data: cards.length ? cards.map(card => `${card.id} · ${card.label} · ${card.issuerType === "user" ? "用户给你" : "你给用户"} · 额度 ¥${card.monthlyLimit} · 已用 ¥${card.usedThisPeriod} · ${card.status === "active" ? "生效" : "暂停"}`).join("\n") : "现在没有和你相关的亲属卡", userNotice: cards.length ? "看了看亲属卡" : "没有亲属卡" };
+        }
+        if (call.name === "使用亲属卡") {
+            const cardId = String(call.args?.cardId || "").trim();
+            const amount = Number(call.args?.amount);
+            const title = String(call.args?.title || "").trim();
+            if (!cardId || !Number.isFinite(amount) || amount <= 0 || !title) throw new Error("需要 cardId、amount 和 title");
+            const card = loadFamilyCards().find(item => item.id === cardId);
+            if (!card) throw new Error("找不到这张亲属卡");
+            if (card.beneficiaryType !== "character" || card.beneficiaryId !== characterId) throw new Error("这张亲属卡不是给你的");
+            const result = spendWithFamilyCard(cardId, amount, title, String(call.args?.detail || title), "角色消费");
+            if (!result.ok) throw new Error(result.error || "亲属卡消费失败");
+            return { name: call.name, success: true, data: `已用亲属卡 ${cardId} 消费 ¥${amount}，本月已用 ¥${result.card?.usedThisPeriod}`, userNotice: `用亲属卡付了「${title}」 ¥${amount}` };
+        }
+        if (call.name === "开亲属卡") {
+            const label = String(call.args?.label || "").trim();
+            const monthlyLimit = Number(call.args?.monthlyLimit);
+            if (!label) throw new Error("需要卡名 label");
+            if (!Number.isFinite(monthlyLimit) || monthlyLimit <= 0) throw new Error("月额度必须是正数");
+            const resetDay = Number(call.args?.resetDay);
+            const card = createFamilyCardForCharacter(characterId, {
+                label,
+                monthlyLimit,
+                resetDay: Number.isFinite(resetDay) ? resetDay : 1,
+            });
+            return {
+                name: call.name,
+                success: true,
+                data: `已给用户开亲属卡「${card.label}」，每月额度 ¥${card.monthlyLimit}，卡 id=${card.id}。用户购物时可以选这张卡，消费从你的角色账本扣。`,
+                userNotice: `给你开了一张亲属卡「${card.label}」· 每月 ¥${card.monthlyLimit}`,
+            };
+        }
+        if (call.name === "查看共同小金库") {
+            const funds = loadJointFunds().filter(fund => fund.characterId === characterId);
+            const lines = funds.map(fund => {
+                const txs = loadJointFundTransactions(fund.id).slice(0, 5).map(tx => `${tx.memberType === "user" ? "用户" : "你"}${tx.kind === "deposit" ? "存入" : "取出"} ¥${tx.amount} · ${tx.note}`);
+                return `${fund.id} · ${fund.name} · 状态：${fund.status === "completed" ? "目标已达成" : fund.status === "paused" ? "已暂停" : "进行中"} · 目标 ¥${fund.goalAmount} · 已攒 ¥${fund.balance}\n${txs.join("\n")}`;
+            });
+            return { name: call.name, success: true, data: lines.length ? lines.join("\n\n") : "现在没有共同小金库", userNotice: lines.length ? "看了看共同小金库" : "没有共同小金库" };
+        }
+        if (call.name === "存入共同小金库") {
+            const fundId = String(call.args?.fundId || "").trim();
+            const amount = Number(call.args?.amount);
+            if (!fundId || !Number.isFinite(amount) || amount <= 0) throw new Error("需要 fundId 和 amount");
+            const fund = loadJointFunds().find(item => item.id === fundId);
+            if (!fund || fund.characterId !== characterId) throw new Error("这个小金库不是你和用户的");
+            const result = depositToJointFund(fundId, "character", characterId, amount, String(call.args?.note || "角色存入"));
+            if (!result.ok) throw new Error(result.error || "存入失败");
+            return { name: call.name, success: true, data: `已存入 ¥${amount}，小金库余额 ¥${result.fund?.balance}`, userNotice: `往共同小金库存了 ¥${amount}` };
+        }
+        if (call.name === "设置小金库定期存款") {
+            const session = context?.sessionId ? loadChatSessions().find(item => item.id === context.sessionId) : undefined;
+            if (context?.appId !== "chat" || context.sourceEngine !== "chat" || !session || session.isGroup || resolveSessionCharacterId(session) !== characterId) {
+                throw new Error("请在与自己的私聊中设置定期存款，方便目标完成后回来询问你。");
+            }
+            const fundId = String(call.args?.fundId || "").trim();
+            const cadence = String(call.args?.cadence || "").trim();
+            const amount = Number(call.args?.amount);
+            if (!fundId || !["daily", "weekly", "monthly"].includes(cadence) || !Number.isFinite(amount) || amount <= 0) {
+                throw new Error("需要有效的小金库、定期频率和每次存入金额");
+            }
+            const fund = loadJointFunds().find(item => item.id === fundId && item.characterId === characterId && item.status === "active");
+            if (!fund) throw new Error("只能为你自己参与且仍在进行中的小金库设置定期存款");
+            const plan = setJointFundPlanForCharacter(characterId, { fundId, cadence: cadence as "daily" | "weekly" | "monthly", amount, sessionId: session.id });
+            if (!plan) throw new Error("定期存款计划设置失败");
+            const cadenceLabel = cadence === "daily" ? "每天" : cadence === "weekly" ? "每周" : "每月";
+            return {
+                name: call.name,
+                success: true,
+                data: `已设置「${fund.name}」定期存款：${cadenceLabel}存入 ¥${amount}，从你的角色账本扣款。目标达成后计划会自动停止；如果还有其他进行中的小金库，会再问你是否要更换目标。`,
+                userNotice: `为「${fund.name}」设置了${cadenceLabel}定期存入 ¥${amount}`,
+            };
+        }
+        const limit = Math.max(1, Math.min(100, Number(call.args?.limit) || 20));
+        const ledger = ensureCharacterLedger(characterId);
+        const latest = loadCharacterLedger(characterId);
+        const lines = (latest?.transactions || []).slice(-limit).reverse().map(tx => `${tx.amount > 0 ? "+" : "-"}¥${Math.abs(tx.amount)} · ${tx.category} · ${tx.note} · 余额 ¥${tx.balanceAfter}`);
+        return {
+            name: call.name,
+            success: true,
+            data: `余额 ¥${ledger.balance}` + "\n" + (lines.length ? lines.join("\n") : "还没有收支记录"),
+            userNotice: `你的余额是 ¥${ledger.balance}`,
+        };
+    } catch (error) {
+        return { name: call.name, success: false, error: error instanceof Error ? error.message : String(error), continueConversation: false, persistToHistory: false, userNotice: "账本没有记上" };
     }
 }
 

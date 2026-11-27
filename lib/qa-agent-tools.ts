@@ -1298,6 +1298,44 @@ const diagnoseLegacyAliasTool: QaTool = {
     run: (args, context) => diagnoseTool.run(args, context),
 };
 
+/* 仅 debug/开发模式：工坊 AI 可以在本页执行任意 JS，用来修数据、调试 DOM/IndexedDB。
+   release 构建（NODE_ENV=production）不会注册这个工具。 */
+const workshopHarnessEvalTool: QaTool = {
+    name: "运行调试代码",
+    nativeName: "harness_eval",
+    parameters: {
+        type: "object",
+        properties: {
+            code: { type: "string", description: "要在本页执行的 JS 表达式；支持 await，返回结果会回传" },
+            confirm: { type: "boolean", description: "必须为 true；这是高权限调试工具" },
+        },
+        required: ["code", "confirm"],
+    },
+    description: "仅在 debug/开发包可用：在当前网页执行任意 JS（可读写 IndexedDB/KV/DOM）。用于修复数据、验证页面逻辑；release 不注册。必须 confirm=true。",
+    schemaLines: [
+        "  参数：",
+        "    · code (必填) — JS 表达式，支持 await",
+        "    · confirm (必填) — 必须 true",
+        '  调用：[执行动作:运行调试代码({"code":"document.title","confirm":true})]',
+    ],
+    async run(args) {
+        if (args.confirm !== true) return "高权限调试代码必须 confirm=true。";
+        if (process.env.NODE_ENV === "production") return "release 构建未开放本机调试代码。";
+        const code = String(args.code || "").trim();
+        if (!code) return "code 不能为空。";
+        try {
+            const AsyncFunction = Object.getPrototypeOf(async function () { /* noop */ }).constructor as new (...parts: string[]) => (...values: unknown[]) => Promise<unknown>;
+            const fn = new AsyncFunction(`"use strict"; return (${code});`);
+            const value = await fn();
+            let text = "";
+            try { text = JSON.stringify(value); } catch { text = String(value); }
+            return (text || String(value)).slice(0, 12000);
+        } catch (error) {
+            return "执行失败：" + (error instanceof Error ? error.message : String(error));
+        }
+    },
+};
+
 const repoQueryTool: QaTool = {
     name: "仓库查询",
     nativeName: "repo_query",
@@ -1378,6 +1416,7 @@ const UNIFIED_BASE_TOOLS: QaTool[] = [
     contentToolByNative("submit_contribution"),
     diagnoseTool,
     feedbackTool,
+    ...(process.env.NODE_ENV !== "production" ? [workshopHarnessEvalTool] : []),
 ];
 const UNIFIED_GITHUB_READ_TOOLS: QaTool[] = [githubSearchTool, repoQueryTool];
 const UNIFIED_GITHUB_WRITE_TOOLS: QaTool[] = [branchOpsTool, githubPullCreateTool, githubPullMergeTool, githubIssueUpdateTool, githubSyncUpstreamTool];
@@ -1396,6 +1435,7 @@ export function getQaTools(): QaTool[] {
 // Set 去重（部分工具两边都在）
 export const QA_TOOLS: QaTool[] = [...new Set([
     ...UNIFIED_BASE_TOOLS,
+    workshopHarnessEvalTool,
     ...UNIFIED_GITHUB_READ_TOOLS,
     ...UNIFIED_GITHUB_WRITE_TOOLS,
     ...QA_COMPUTER_TOOLS,

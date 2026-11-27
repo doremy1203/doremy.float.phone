@@ -11,6 +11,9 @@ import {
 } from "./life-runtime";
 
 export type LifeToolDefinition = {
+  /** Stable internal id used by scheduling, capability gates and persisted data. */
+  id: string;
+  /** Chinese display name shown to the model and in the toolbox UI. */
   name: string;
   description: string;
   parameterSchema: string;
@@ -18,7 +21,8 @@ export type LifeToolDefinition = {
 
 export const LIFE_TOOL_DEFINITIONS: LifeToolDefinition[] = [
   {
-    name: "life_view_schedule",
+    id: "life_view_schedule",
+    name: "查看角色日程",
     description: "查询角色本人未来 1 至 7 天的日程。只读，不会修改安排；在答应邀约、调整计划、安排见面或判断自己有没有空闲之前，先调用它确认真实行程。",
     parameterSchema: JSON.stringify({
       type: "object",
@@ -26,7 +30,8 @@ export const LIFE_TOOL_DEFINITIONS: LifeToolDefinition[] = [
     }),
   },
   {
-    name: "life_propose_invitation",
+    id: "life_propose_invitation",
+    name: "发起生活邀约",
     description: "角色主动向玩家发起邀约。只要你有具体的时间、地点或想一起做的事，就主动调用，不要只口头问“要不要出来”；邀约会进入玩家的待处理列表，由玩家决定是否接受。",
     parameterSchema: JSON.stringify({
       type: "object",
@@ -40,7 +45,8 @@ export const LIFE_TOOL_DEFINITIONS: LifeToolDefinition[] = [
     }),
   },
   {
-    name: "life_request_follow",
+    id: "life_request_follow",
+    name: "申请跟随行程",
     description: "角色主动申请陪伴并跟随玩家的实际行程。只要你想陪在对方身边、想跟对方一起走接下来的路，就主动调用；申请不会自动生效，玩家可以接受或拒绝。",
     parameterSchema: JSON.stringify({
       type: "object",
@@ -51,7 +57,8 @@ export const LIFE_TOOL_DEFINITIONS: LifeToolDefinition[] = [
     }),
   },
   {
-    name: "life_move_location",
+    id: "life_move_location",
+    name: "角色前往地点",
     description: "让角色立刻动身去某个地点，或直接去玩家当前所在地点找人。想见面、临时起意、想送东西、想当面说清楚时，优先直接调用它，不要只在台词里说“我来了”。会保留原有日程、只替换当前正在进行的时段；不覆盖已确认约会和玩家手动安排。省略 locationId 即前往玩家当前所在地点。",
     parameterSchema: JSON.stringify({
       type: "object",
@@ -64,7 +71,8 @@ export const LIFE_TOOL_DEFINITIONS: LifeToolDefinition[] = [
     }),
   },
   {
-    name: "life_create_schedule",
+    id: "life_create_schedule",
+    name: "新建角色日程",
     description: "为角色本人创建未来 7 天内的新日程。当现有安排里没有你想做的事、或你需要为未来的约定留出时间时，主动创建。先查询已有安排；不得覆盖手动安排、约会或特殊活动。",
     parameterSchema: JSON.stringify({
       type: "object",
@@ -78,7 +86,8 @@ export const LIFE_TOOL_DEFINITIONS: LifeToolDefinition[] = [
     }),
   },
   {
-    name: "life_change_schedule",
+    id: "life_change_schedule",
+    name: "调整角色日程",
     description: "修改角色本人尚未开始的自动生成日程或角色自主创建的未来日程；当计划有变、玩家提出改时间地点、或你想把安排挪到对方所在地点时，主动调用并传入 scheduleId。不得覆盖用户手动安排、约会或特殊活动。",
     parameterSchema: JSON.stringify({
       type: "object",
@@ -93,7 +102,8 @@ export const LIFE_TOOL_DEFINITIONS: LifeToolDefinition[] = [
     }),
   },
   {
-    name: "life_cancel_schedule",
+    id: "life_cancel_schedule",
+    name: "取消角色日程",
     description: "取消角色本人尚未开始的自动生成或角色自主创建的未来日程，并将该时段保留为自由时间。当某项安排不再需要、或你想空出时间陪对方时主动调用。不能取消用户手动安排、约会、特殊活动或已经开始的日程。",
     parameterSchema: JSON.stringify({
       type: "object",
@@ -103,8 +113,12 @@ export const LIFE_TOOL_DEFINITIONS: LifeToolDefinition[] = [
   },
 ];
 
-function asArgs(value: unknown): Record<string, unknown> {
-  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+/** 判断一个工具名是否属于生活工具：兼容中文显示名和历史 life_* 内部 ID。 */
+export function isLifeToolName(name: string): boolean {
+  return LIFE_TOOL_DEFINITIONS.some(tool => tool.id === name || tool.name === name);
+}
+
+function asArgs(value: unknown): Record<string, unknown> {  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
   if (typeof value === "string") {
     try {
       const parsed = JSON.parse(value);
@@ -134,29 +148,32 @@ export async function executeLifeToolCall(
   call: { name: string; args: unknown },
   context?: { appId?: string; characterId?: string },
 ) {
-  if (!LIFE_TOOL_DEFINITIONS.some(tool => tool.name === call.name)) return null;
-  const capabilityId = call.name === "life_propose_invitation"
+  const definition = LIFE_TOOL_DEFINITIONS.find(tool => tool.id === call.name || tool.name === call.name);
+  if (!definition) return null;
+  const toolId = definition.id;
+  const capabilityId = toolId === "life_propose_invitation"
     ? LIFE_INVITATION_CAPABILITY_ID
-    : call.name === "life_request_follow"
+    : toolId === "life_request_follow"
       ? LIFE_FOLLOW_CAPABILITY_ID
       : LIFE_SCHEDULE_CAPABILITY_ID;
   const capability = getInternalCapability(capabilityId);
   if (!capability || !capability.enabled || capability.mode === "off") {
-    return result(call.name, false, undefined, "此生活工具能力未启用，请在系统设置 → 聊天工具箱 → Internal Capabilities 中开启对应项目。");
+    return result(definition.name, false, undefined, "此生活工具能力未启用，请在系统设置 → 聊天工具箱 → Internal Capabilities 中开启对应项目。");
   }
-  const name = call.name;
+  // 对外展示和工具结果统一用中文名；内部分支按稳定 ID 判断。
+  const name = definition.name;
   // The calling surface is not restricted: any chat/tool-enabled app may use life actions
   // as long as the invoking character can be resolved and the global life settings allow it.
   const characterId = resolveInvokingCharacterId(context?.characterId);
   if (!characterId) return result(name, false, undefined, "无法确定正在调用工具的角色身份。");
   const state = loadVirtualLifeState();
-  if (!state.settings.enabled || (name !== "life_view_schedule" && !state.settings.enableCharacterAutonomy)) {
-    return result(name, false, undefined, name === "life_view_schedule"
+  if (!state.settings.enabled || (toolId !== "life_view_schedule" && !state.settings.enableCharacterAutonomy)) {
+    return result(name, false, undefined, toolId === "life_view_schedule"
       ? "生活引擎当前已关闭。"
       : "生活引擎或角色自主行动当前已关闭。");
   }
   const args = asArgs(call.args);
-  if (name === "life_view_schedule") {
+  if (toolId === "life_view_schedule") {
     const rawDays = Number(args.days);
     const days = Number.isFinite(rawDays) ? Math.max(1, Math.min(7, Math.floor(rawDays))) : 7;
     const now = resolveActorLifeNow(getActorClock(state, "character", characterId));
@@ -173,7 +190,7 @@ export async function executeLifeToolCall(
       }));
     return result(name, true, JSON.stringify({ characterId, from: now.toISOString(), to: until.toISOString(), days, schedules }));
   }
-  if (name === "life_propose_invitation") {
+  if (toolId === "life_propose_invitation") {
     if (!state.settings.enableInvitations) return result(name, false, undefined, "角色主动邀约已在自定义设置中关闭。");
     const time = new Date(cleanText(args.time, 80));
     const activity = cleanText(args.activity, 160);
@@ -195,7 +212,7 @@ export async function executeLifeToolCall(
     return result(name, true, JSON.stringify({ created: true, activity, time: time.toISOString(), location: location?.name ?? "地点待定", status: "proposed", message: "邀约已提交给玩家，等待玩家接受或拒绝。" }));
   }
 
-  if (name === "life_request_follow") {
+  if (toolId === "life_request_follow") {
     if (!state.settings.enableFollowRequestTool) return result(name, false, undefined, "角色陪伴申请已在自定义设置中关闭。");
     const playerNow = resolveActorLifeNow(getActorClock(state, "player", "player"));
     const characterNow = resolveActorLifeNow(getActorClock(state, "character", characterId));
@@ -216,7 +233,7 @@ export async function executeLifeToolCall(
     return result(name, true, JSON.stringify({ created: true, durationMinutes: duration, reason, status: "proposed", message: "陪伴申请已提交给玩家，等待玩家接受或拒绝。" }));
   }
 
-  if (name === "life_move_location") {
+  if (toolId === "life_move_location") {
     if (!state.settings.enableScheduleChangeTool) return result(name, false, undefined, "角色自主调整日程已在自定义设置中关闭。");
     const rawTarget = cleanText(args.locationId, 100);
     const wantsPlayer = !rawTarget || /^(player|me|玩家|你|user)$/i.test(rawTarget);
@@ -228,7 +245,7 @@ export async function executeLifeToolCall(
         ?? state.locations.find(item => (item.aliases ?? []).includes(rawTarget));
     if (!location) {
       return result(name, false, undefined, wantsPlayer
-        ? "找不到玩家当前所在地点；请改用具体地点 ID，或先用 life_view_schedule 确认可用地点。"
+        ? "找不到玩家当前所在地点；请改用具体地点 ID，或先用「查看角色日程」确认可用地点。"
         : "地点不存在。请使用地点库中的规范地点 ID 或准确名称。");
     }
     const now = resolveActorLifeNow(getActorClock(state, "character", characterId));
@@ -289,12 +306,12 @@ export async function executeLifeToolCall(
     }));
   }
 
-  if (name === "life_create_schedule" || name === "life_change_schedule") {
+  if (toolId === "life_create_schedule" || toolId === "life_change_schedule") {
     if (!state.settings.enableScheduleChangeTool) return result(name, false, undefined, "角色自主调整日程已在自定义设置中关闭。");
     const now = resolveActorLifeNow(getActorClock(state, "character", characterId));
     const scheduleId = cleanText(args.scheduleId, 160);
     let baseState = state;
-    if (name === "life_change_schedule" && scheduleId) {
+    if (toolId === "life_change_schedule" && scheduleId) {
       const existing = state.schedules.find(slot => slot.id === scheduleId
         && slot.ownerType === "character" && slot.ownerId === characterId
         && (slot.source === "weekly-generation" || slot.source === "character-tool")
@@ -313,7 +330,7 @@ export async function executeLifeToolCall(
     const actorName = loadCharacters().find(item => item.id === characterId)?.name ?? "角色";
     const logged = appendLifeTimelineEntry(changed.state, {
       category: "schedule",
-      title: (name === "life_create_schedule" ? "角色创建了日程：" : "角色调整了日程：") + cleanText(args.title, 120),
+      title: (toolId === "life_create_schedule" ? "角色创建了日程：" : "角色调整了日程：") + cleanText(args.title, 120),
       details: cleanText(args.startAt, 80) + " – " + cleanText(args.endAt, 80),
       actorId: characterId, actorName,
       locationName: changed.state.locations.find(item => item.id === cleanText(args.locationId, 100))?.name,
@@ -323,7 +340,7 @@ export async function executeLifeToolCall(
     return result(name, true, JSON.stringify({ createdOrUpdated: true, title: cleanText(args.title, 120), startAt: cleanText(args.startAt, 80), endAt: cleanText(args.endAt, 80), message: "角色日程已保存；用户手动安排和已确认活动未被覆盖。" }));
   }
 
-  if (name === "life_cancel_schedule") {
+  if (toolId === "life_cancel_schedule") {
     if (!state.settings.enableScheduleChangeTool) return result(name, false, undefined, "角色自主调整日程已在自定义设置中关闭。");
     const scheduleId = cleanText(args.scheduleId, 160);
     const now = resolveActorLifeNow(getActorClock(state, "character", characterId));

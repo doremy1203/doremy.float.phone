@@ -1199,7 +1199,13 @@ export function formatRichMediaForHistory(msg: ChatMessage, userName: string, ch
             if (d?.fileType === "image" && isImageGenerationMediaMessage(msg)) {
                 return formatImageGenerationDirective(msg);
             }
-            return msg.content;
+            {
+                if (d?.fileType && d.fileType !== "file") return msg.content;
+                const fileText = String(d?.fileText || "").trim();
+                if (!fileText) return `${msg.content}\n（这个文件无法读取文字，只能看到文件名）`;
+                const excerpt = fileText.length > 10000 ? `${fileText.slice(0, 10000)}\n…（文件较长，只读取了前 10000 字）` : fileText;
+                return `${msg.content}\n【文件内容${d?.fileTextTruncated ? "（节选）" : ""}】\n${excerpt}`;
+            }
         case "audio":
             return `[语音条:${d?.label ?? "语音消息"}]`;
         case "location":

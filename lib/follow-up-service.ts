@@ -51,6 +51,7 @@ import {
 import {
     loadTimedWakeSchedules,
     removeTimedWakeSchedule,
+    appendTimedWakeSchedule,
     type TimedWakeSchedule,
 } from "./timed-wake-storage";
 import {
@@ -114,6 +115,7 @@ function resolveTimedWakeElapsedMinutes(sched: TimedWakeSchedule, history: ChatM
 // ── Module state ───────────────────────────────────────────
 let stopInterval: (() => void) | null = null;
 let periodCareUpdateHandler: (() => void) | null = null;
+let anonymousQaReplyHandler: ((event: Event) => void) | null = null;
 const firingSet = new Set<string>(); // sessions currently mid-API-call
 const cancelledWhileFiring = new Set<string>(); // cancelled during in-flight API call
 const timedWakeFiringSet = new Set<string>();
@@ -167,6 +169,16 @@ export function startFollowUpService() {
             pollMenstrualPeriodCare(Date.now());
         };
         window.addEventListener("menstrual-period-care-updated", periodCareUpdateHandler);
+        anonymousQaReplyHandler = (event: Event) => {
+            const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
+            if (!detail?.sessionId) return;
+            // A question is a targeted proactive turn, not a broadcast notification.
+            void requestBackgroundChatReply(detail.sessionId, {
+                appId: "chat",
+                appTags: ["chat", "text", "anonymous_qa"],
+            });
+        };
+        window.addEventListener("anonymous-qa-reply-requested", anonymousQaReplyHandler);
         scheduledOutboxVisibilityHandler = () => {
             if (!document.hidden) extendScheduledOutboxGrace();
         };
@@ -182,6 +194,10 @@ export function stopFollowUpService() {
     if (stopInterval) { stopInterval(); stopInterval = null; }
     if (typeof window !== "undefined" && periodCareUpdateHandler) {
         window.removeEventListener("menstrual-period-care-updated", periodCareUpdateHandler);
+        if (anonymousQaReplyHandler) {
+            window.removeEventListener("anonymous-qa-reply-requested", anonymousQaReplyHandler);
+            anonymousQaReplyHandler = null;
+        }
         periodCareUpdateHandler = null;
     }
     if (typeof window !== "undefined") {
@@ -804,11 +820,30 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
         const session = sessions.find(s => s.id === sched.sessionId);
         if (!session || resolveSessionCharacterId(session) !== sched.characterId) return;
         if (isLifeCharacterSleeping(session.id)) {
-            void cancelBailoutKey(`timedwake:${sched.id}`);
+            if (sched.retryIfSleeping) {
+                const retryAt = Date.now() + 30 * 60_000;
+                appendTimedWakeSchedule({
+                    ...sched,
+                    fireAt: retryAt,
+                    delayMinutes: Math.max(1, Math.ceil((retryAt - sched.createdAt) / 60_000)),
+                });
+            } else {
+                void cancelBailoutKey(`timedwake:${sched.id}`);
+            }
             return;
         }
         turn = beginTurn({ kind: "timed_wake", characterId: sched.characterId, sessionId: session.id });
-        if (!turn) return;
+        if (!turn) {
+            if (sched.retryIfBusy) {
+                const retryAt = Date.now() + 60_000;
+                appendTimedWakeSchedule({
+                    ...sched,
+                    fireAt: retryAt,
+                    delayMinutes: Math.max(1, Math.ceil((retryAt - sched.createdAt) / 60_000)),
+                });
+            }
+            return;
+        }
 
         const latestMessages = loadChatMessages(session.id);
         const elapsedMinutes = resolveTimedWakeElapsedMinutes(sched, latestMessages, Date.now());

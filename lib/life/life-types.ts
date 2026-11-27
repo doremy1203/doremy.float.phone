@@ -271,6 +271,12 @@ export type LifeSceneMessage = {
   /** Reference to a scene gallery image; keeps image bytes in the media store, not the chat log. */
   imageId?: string;
   replyToMessageId?: string;
+  /**
+   * 消息级可见范围快照。生活现场是限时群聊：同一 scene 内当时在场的
+   * 玩家/角色共享对话；中途加入不补看历史，离开后不再接收新消息。
+   * 旧消息没有这个字段时，读取侧按当前 scene.participants 兜底。
+   */
+  visibleTo?: string[];
 };
 
 export type LifeSceneImage = {

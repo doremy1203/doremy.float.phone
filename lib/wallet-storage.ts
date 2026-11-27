@@ -406,6 +406,99 @@ export function adjustWalletCardAccount(
   return { ok: true, state: next, transaction };
 }
 
+/**
+ * 角色替用户补记一笔真实收支。保留发生时间，并用关联标识/短时间指纹防止同一笔交易重复入账。
+ * 收入和支出都会同步调整钱包余额；支出余额不足时拒绝写入。
+ */
+export function recordWalletBookkeeping(input: {
+  direction: "income" | "expense";
+  amount: number;
+  title: string;
+  category?: string;
+  note?: string;
+  occurredAt?: string | number;
+  reference?: string;
+}): WalletPaymentResult {
+  const current = loadWalletState();
+  const amount = normalizeMoney(input.amount);
+  const title = cleanText(input.title, 120);
+  const category = cleanText(input.category, 80) || "其他";
+  const note = cleanText(input.note, 300);
+  if (input.direction !== "income" && input.direction !== "expense") return { ok: false, state: current, error: "收支方向无效。" };
+  if (amount <= 0) return { ok: false, state: current, error: "记账金额必须大于 0。" };
+  if (!title) return { ok: false, state: current, error: "请说明这笔收支的用途或来源。" };
+  const reference = cleanText(input.reference, 100);
+  if (reference && current.transactions.some(tx => tx.relatedOrderId === `role_bookkeeping:${reference}`)) {
+    return { ok: false, state: current, error: "这笔交易已经记过账了，没有重复添加。" };
+  }
+  const occurred = input.occurredAt === undefined || input.occurredAt === null || input.occurredAt === ""
+    ? new Date()
+    : new Date(input.occurredAt);
+  if (Number.isNaN(occurred.getTime())) return { ok: false, state: current, error: "发生时间无法识别，请使用明确日期或时间。" };
+  const duplicateWindow = 2 * 60 * 1000;
+  const duplicate = current.transactions.find(tx =>
+    tx.kind === (input.direction === "income" ? "transfer_in" : "payment")
+    && Math.abs(tx.amount) === amount
+    && tx.title.trim().toLowerCase() === title.toLowerCase()
+    && tx.category === category
+    && Math.abs(new Date(tx.createdAt).getTime() - occurred.getTime()) <= duplicateWindow
+  );
+  if (duplicate) return { ok: false, state: current, error: "发现一笔金额、用途和时间都相同的记录，已阻止重复记账。" };
+  const signedAmount = input.direction === "income" ? amount : -amount;
+  const occurredAt = occurred.getTime();
+  const chronological = current.transactions
+    .slice()
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  // 从最早一笔已知流水反推出账本期初余额，再按时间重放全部流水。
+  // 不能只修正“发生时间之后”的 balanceAfter：初始余额流水本身也可能晚于补记时间，
+  // 否则会把期初余额错误地当成 0，导致后续工资等流水被重算成 250 而不是 10250。
+  const first = chronological[0];
+  const openingBalance = first
+    ? normalizeSignedMoney(first.balanceAfter - first.amount)
+    : current.balance;
+  const replayedExistingBalance = chronological.reduce(
+    (balance, tx) => normalizeMoney(balance + tx.amount),
+    openingBalance,
+  );
+  const openingBalanceOffset = normalizeSignedMoney(current.balance - replayedExistingBalance);
+  const currentBalanceAfterRaw = normalizeSignedMoney(current.balance + signedAmount);
+  if (currentBalanceAfterRaw < 0) {
+    return { ok: false, state: current, error: "钱包余额不足，无法记录这笔支出。" };
+  }
+  const currentBalanceAfter = normalizeMoney(currentBalanceAfterRaw);
+  const transaction = createTransaction({
+    accountId: WALLET_BALANCE_ACCOUNT_ID,
+    accountType: "balance",
+    title,
+    amount: signedAmount,
+    kind: input.direction === "income" ? "transfer_in" : "payment",
+    category,
+    detail: note || (input.direction === "income" ? "角色协助记录收入" : "角色协助记录支出"),
+    balanceAfter: 0,
+    relatedOrderId: reference ? `role_bookkeeping:${reference}` : undefined,
+  });
+  transaction.createdAt = occurred.toISOString();
+  const timeline = [...chronological, transaction]
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  let runningBalance = openingBalance + openingBalanceOffset;
+  let insertedBalance = 0;
+  const replayed = timeline.map(tx => {
+    // 先保留有符号结果用于余额不足校验，不能用 normalizeMoney 提前把负数截成 0。
+    runningBalance = normalizeSignedMoney(runningBalance + tx.amount);
+    if (tx.id === transaction.id) insertedBalance = runningBalance;
+    return { ...tx, balanceAfter: normalizeMoney(runningBalance) };
+  });
+  if (insertedBalance < 0) {
+    return { ok: false, state: current, error: "对应时间点的钱包余额不足，无法记录这笔支出。" };
+  }
+  transaction.balanceAfter = normalizeMoney(insertedBalance);
+  const transactions = replayed
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, 300);
+  const next = saveWalletState({ ...current, balance: currentBalanceAfter, transactions });
+  return { ok: true, state: next, transaction };
+}
+
 export function creditWalletBalance(amount: number, title: string, detail: string, category = "余额"): WalletPaymentResult {
   const current = loadWalletState();
   const creditAmount = normalizeMoney(amount);

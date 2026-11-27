@@ -2255,6 +2255,7 @@ function MediaFileBubble({
     // 同 ImageBubble：弹窗内校验用 imageRetryError，生成失败走一次性弹窗
     const [imageRetryError, setImageRetryError] = useState("");
     const [imageFailureNotice, setImageFailureNotice] = useState("");
+    const [showFilePreview, setShowFilePreview] = useState(false);
 
     useEffect(() => {
         if (!isMediaStoreRef(rawUrl)) {
@@ -2490,6 +2491,7 @@ function MediaFileBubble({
         <div className="chat-media-file-wrap">
             <div className="chat-media-file-card chat-media-file-generic" onClick={(e) => {
                 e.stopPropagation();
+                if (msg.mediaData?.fileText) { setShowFilePreview(true); return; }
                 if (!url) return;
                 // 与右侧保存按钮同路：iOS 走系统分享卡，其余平台常规下载（window.open 在 iOS 上会跳浏览器）
                 void (async () => {
@@ -2501,8 +2503,23 @@ function MediaFileBubble({
                     <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><path d="M14 2v6h6" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" />
                 </svg>
                 <span className="chat-media-file-title">{title}</span>
+                {msg.mediaData?.fileText && <span className="chat-media-file-time">点击预览文字</span>}
             </div>
             {url && <MediaSaveButton url={url} filename={ensureExtension(title, "file")} />}
+            {showFilePreview && msg.mediaData?.fileText && (
+                <div className="modal-overlay" onClick={() => setShowFilePreview(false)}>
+                    <div className="modal-dialog" onClick={event => event.stopPropagation()} style={{ maxWidth: 560, width: "min(92vw, 560px)", maxHeight: "78vh", display: "flex", flexDirection: "column" }}>
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                                <div className="truncate text-sm font-semibold text-[var(--c-text)]">{title}</div>
+                                <div className="text-[11px] text-[var(--c-icon)]">{msg.mediaData.fileSize ? `${(msg.mediaData.fileSize / 1024).toFixed(1)} KB · ` : ""}{msg.mediaData.fileTextTruncated ? "内容已截断" : "文件文字"}</div>
+                            </div>
+                            <button type="button" onClick={() => setShowFilePreview(false)} className="shrink-0 rounded-full bg-[var(--c-input)] px-3 py-1 text-xs text-[var(--c-text)]">关闭</button>
+                        </div>
+                        <pre className="mt-3 min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-[var(--c-input)] p-3 text-xs leading-relaxed text-[var(--c-text)]">{msg.mediaData.fileText}</pre>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
@@ -2637,11 +2654,14 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
     const needsResynthesis = msg.role !== "user" && synthesizedFromText !== speechText;
     const duration = msg.mediaData?.voiceDuration || Math.max(2, Math.ceil(speechText.length / 4));
 
-    const playSrc = (src: string) => {
+    const playSrc = async (src: string) => {
+        // 媒体库 ref 先解析成 object URL；旧的 base64/data URL 直接播。
+        const resolved = isMediaStoreRef(src) ? await loadMediaObjectUrl(src) : src;
+        if (!resolved) return;
         // 必须用 <audio> 元素:iOS 静音拨键会掐掉 Web Audio 的输出(表现为全线
         // 无声),媒体元素不受影响。元素属于宿主页面,锁屏媒体卡片指向站点本身,
         // 点了只会回到 App;播完清 src 让卡片立即撤下。
-        const audio = new Audio(src);
+        const audio = new Audio(resolved);
         audioRef.current = audio;
         setPlaying(true);
         const finalize = () => {

@@ -1,4 +1,5 @@
 import { jsonrepair } from "jsonrepair";
+import { stripDsmlToolCalls } from "../dsml-tool-calls";
 
 export type LifeOutputIssue =
     | "json_parse"
@@ -381,7 +382,8 @@ function parseLooseText(raw: string): ParsedLifeOutput {
 }
 
 export function parseLifeOutput(raw: string): ParsedLifeOutput {
-    const text = String(raw ?? "");
+    // 任何一路漏出的工具调用标记都不能进对白；正常路径会先执行工具再到这里。
+    const text = stripDsmlToolCalls(String(raw ?? ""));
     const fromJson = parseJsonObject(text);
     if (fromJson) return fromJson;
     const fromXml = parseXml(text);

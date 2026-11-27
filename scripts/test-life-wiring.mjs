@@ -47,13 +47,16 @@ assert.doesNotMatch(app, /const continuingScene = next\.scenes\.find\(scene => s
 assert.match(app, /const existingRoom = findLifeSceneForLocation\(next\.scenes, location\.id, location\.name\)/, "go-find-character must reuse or create the destination location room");
 assert.match(app, /performEnterLocationSolo\(targetLocationId\);/, "the single travel entry must reuse the canonical arrival flow");
 assert.match(app, /transferSceneWithCompanions\(location\.id\)/, "location cards must use the merged travel-and-enter entry");
+assert.doesNotMatch(app, /setSelectedCharacterIds\(destinationParticipants/, "arrival must not auto-mark everyone present as next-trip companions");
 assert.doesNotMatch(app, /进入互动|performCreateScene/, "travel and interaction must stay a single entry, without a second scene-start button");
 assert.match(app, /const playerLocation = normalized\.locations\.find\(location => location\.id === restoredPlayer\?\.actualLocationId\)/, "startup must restore from the player actual location before considering a prior room");
 assert.match(app, /const roomNeedsUpdate = !playerRoom/, "a new actual location must get its own room instead of borrowing another location room");
 assert.doesNotMatch(runtime, /eventId: event\.id,\s*participants/, "scheduled invitations must not create event-owned chat rooms");
 assert.doesNotMatch(runtime, /locationId: nextLocationId, locationName: nextLocationName/, "schedule settlement must not rewrite the active room location");
 
-assert.match(app, /setSelectedCharacterIds\(destinationParticipants\.filter\(participant => participant\.ownerType === "character"\)/, "the UI responder selection must include the merged destination occupants");
+// 进入地点只决定在场者；同行名单必须由用户显式勾选，不能把在场者自动带成下一程同伴。
+assert.match(app, /const companions = characters\.filter\(char => selectedCharacterIds\.includes\(char\.id\)\)/, "travel companions must come from the explicit selection");
+assert.doesNotMatch(app, /setSelectedCharacterIds\(destinationParticipants/, "arrival must not auto-mark everyone present as next-trip companions");
 
 assert.match(app, /if \(settings\.autoGenerateWeeklyPlans\)\s*\{\s*next = generateWeeklyLifePlan/);
 assert.match(app, /if \(liveSettings\.autoGenerateWeeklyPlans\)/);
@@ -140,6 +143,7 @@ assert.match(scenePrompt, /repliesByTurn/, "scene prompt history must restore ea
 assert.match(scenePrompt, /for \(const reply of prefix\)/, "queued scene context must exclude replies generated after the queued player turn");
 assert.match(shortTermAssembler, /options\?\.includeDirectChatEntries === false/, "life prompts must honor explicit exclusion of direct chat history");
 assert.match(shortTermAssembler, /const offlineDirectChatEntries = skipDirectChatEntries\s*\?\s*\[\]/, "direct-chat exclusion must cover offline direct-message timeline entries too");
+assert.match(shortTermAssembler, /participant\.activity !== "离开"/, "scene-level timeline memories must be limited to characters still present in that scene");
 assert.match(app, /savePendingLifeSceneTurns\(pendingSceneTurnsRef\.current\)/, "new queued scene turns must be persisted");
 assert.match(sceneTurnQueue, /life-scene-turn-queue-v1/, "scene turn queue must use a durable versioned storage key");
 assert.match(app, /focusScene\(pending\.sceneId\)/, "pending notification replies must reopen their exact scene");
@@ -242,6 +246,8 @@ assert.match(scheduler, /scene\.status === "active" && participant\.activity !==
 assert.doesNotMatch(scheduler, /cancelBailoutPrefix\(prefix\)/);
 assert.match(bailout, /input\.source \?\? "foreground"/);
 assert.match(bailout, /characterId \+ ":foreground"/);
+assert.match(bailout, /resolveChatSessionCharacterId\(session\) !== input\.characterId/, "life-scene arm must resolve the session's character through the canonical session resolver (legacy sessions store Character.id in contactId)");
+assert.doesNotMatch(bailout, /resolveLifeCharacterIdForContact/, "life-scene arm must not rely on contact-only ID mapping");
 assert.match(reply, /action: isAction \? text : ""/);
 assert.match(reply, /dialogue: isAction \? "" : text/);
 assert.match(reply, /通知回复已写入并排队/);
@@ -290,7 +296,7 @@ assert.match(shortTermAssembler, /CUSTOM_APP_TIMELINE_SOURCES = new Set<string>/
 for (const source of ["photo_wall", "watch", "phone_widget", "life"]) {
   assert.ok(shortTermAssembler.includes(`"${source}"`), `short-term timeline source ${source} must be included`);
 }
-assert.equal((shortTermAssembler.match(/timeline\.filter\(e => CUSTOM_APP_TIMELINE_SOURCES\.has\(e\.sourceApp\)\)/g) ?? []).length, 2,
+assert.equal((shortTermAssembler.match(/timeline\.filter\(e => CUSTOM_APP_TIMELINE_SOURCES\.has\(e\.sourceApp\)[^)]*\)/g) ?? []).length, 2,
   "both direct-chat and group-chat assemblers must inject special app timeline entries");
 assert.match(shortTermAssembler, /CUSTOM_APP_TIMELINE_SOURCES\.has\(entry\.sourceApp\) \? "recent_custom_app"/);
 
@@ -303,15 +309,17 @@ const [chatEngine, toolStorage, lifeTools, lifeRuntime, lifeMemoryBridge, guided
   read("../lib/life/life-guided-schedule.ts"),
 ]);
 assert.match(chatEngine, /if \(tool\.source === "life"\) return true;/);
-for (const name of ["life_view_schedule", "life_create_schedule", "life_change_schedule", "life_cancel_schedule", "life_move_location"]) {
-  assert.ok(lifeTools.includes('name: "' + name + '"'), name + " must be registered");
+for (const id of ["life_view_schedule", "life_create_schedule", "life_change_schedule", "life_cancel_schedule", "life_move_location"]) {
+  assert.ok(lifeTools.includes('id: "' + id + '"'), id + " must keep its stable internal id");
 }
+assert.doesNotMatch(lifeTools, /name: "life_[a-z_]+"/, "life tools exposed to users and the model must use Chinese display names");
+assert.match(lifeTools, /name: "调整角色日程"/, "schedule-change tool must expose a Chinese name");
 assert.match(lifeTools, /reserveCharacterLocationStay\(state, \{/, "move-location tool must reuse the schedule-preserving stay helper");
-assert.match(toolStorage, /isScheduleRead = tool\.name === "life_view_schedule"/);
-assert.match(toolStorage, /isScheduleWrite = tool\.name === "life_create_schedule"/);
+assert.match(toolStorage, /isScheduleRead = toolId === "life_view_schedule"/);
+assert.match(toolStorage, /isScheduleWrite = toolId === "life_create_schedule"/);
 assert.match(toolStorage, /if \(lifeSettings\.enabled\) \{/, "schedule read tools remain registered when character autonomy is disabled");
 assert.match(toolStorage, /isScheduleRead \|\| lifeSettings\.enableCharacterAutonomy/);
-assert.match(lifeTools, /name !== "life_view_schedule" && !state\.settings\.enableCharacterAutonomy/);
+assert.match(lifeTools, /toolId !== "life_view_schedule" && !state\.settings\.enableCharacterAutonomy/);
 assert.match(lifeTools, /Math\.random\(\)\.toString\(36\)\.slice\(2, 9\)/, "cancelled-slot tombstone IDs need a collision-resistant suffix");
 assert.match(lifeMemoryBridge, /new Date\(item\.endAt\)\.getTime\(\) > now\.getTime\(\)/, "today context must retain already-started but not-yet-ended slots");
 assert.match(lifeTools, /slot\.source === "character-tool"/);

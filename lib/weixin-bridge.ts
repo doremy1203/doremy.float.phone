@@ -3,6 +3,7 @@
 // 所有 iLink 请求通过 /api/weixin 代理转发（解决 CORS）。
 
 import { type WeixinBotConfig } from "./weixin-storage";
+import { WEIXIN_ILINK_BASE_INFO } from "./weixin-protocol";
 import { createOrGetSession, loadChatMessages, loadChatSessions, pushChatMessage, getLatestCharacterStateValues } from "./chat-storage";
 import { generateChatCompletion, flattenCompletionResult } from "./chat-engine";
 import type { MediaAttachment } from "./tool-executor";
@@ -32,7 +33,7 @@ type ILinkPollResponse = {
     get_updates_buf?: string;
 };
 
-const BASE_INFO = { channel_version: "1.0.2" };
+const BASE_INFO = WEIXIN_ILINK_BASE_INFO;
 
 type WeixinOutgoing =
     | { kind: "text"; text: string }

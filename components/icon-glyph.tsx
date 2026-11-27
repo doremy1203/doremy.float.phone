@@ -42,6 +42,8 @@ import {
   mdiStorefrontOutline,
   mdiPhone,
   mdiTimerOutline,
+  mdiWallet,
+  mdiCommentQuestionOutline,
 } from "@mdi/js";
 
 type IconGlyphProps = {
@@ -59,6 +61,8 @@ const MDI_PATHS: Record<IconId, string> = {
   callstats: mdiPhone,
   heartcraft: mdiHeart,
   focuscompanion: mdiTimerOutline,
+  wallet: mdiWallet,
+  anonymous_qa: mdiCommentQuestionOutline,
   chat: mdiMessageProcessing,
   diary: mdiBookOpenPageVariant,
   music: mdiMusic,

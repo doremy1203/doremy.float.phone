@@ -43,6 +43,18 @@ export async function synthesizeSpeech(
         return synthesizeOpenAI(text, voiceConfig);
     }
 
+    if (provider === "ElevenLabs") {
+        return synthesizeElevenLabs(text, voiceConfig);
+    }
+
+    if (provider === "FishAudio") {
+        return synthesizeFishAudio(text, voiceConfig);
+    }
+
+    if (provider === "MiMo") {
+        return synthesizeMiMo(text, voiceConfig);
+    }
+
     return null;
 }
 
@@ -175,6 +187,91 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
 
     const blob = await response.blob();
     return new Blob([await blob.arrayBuffer()], { type: "audio/mpeg" });
+}
+
+// ── ElevenLabs TTS ──────────────────────────────────
+async function synthesizeElevenLabs(text: string, config: VoiceApiConfig): Promise<Blob | null> {
+    if (!config.apiKey) throw new Error("ElevenLabs API Key 未配置");
+    const baseUrl = (config.baseUrl || "https://api.elevenlabs.io").replace(/\/$/, "");
+    const voiceId = (config.defaultVoice || "21m00Tcm4TlvDq8ikWAM").trim();
+    const modelId = config.model || "eleven_multilingual_v2";
+    const body: Record<string, unknown> = {
+        text,
+        model_id: modelId,
+        voice_settings: {
+            stability: typeof config.stability === "number" ? config.stability : 0.5,
+            similarity_boost: typeof config.similarityBoost === "number" ? config.similarityBoost : 0.75,
+            style: typeof config.style === "number" ? config.style : 0,
+            use_speaker_boost: config.speakerBoost !== false,
+        },
+    };
+    if (typeof config.speechSpeed === "number" && Number.isFinite(config.speechSpeed)) body.speed = config.speechSpeed;
+    const response = await fetchWithTimeout(`${baseUrl}/v1/text-to-speech/${encodeURIComponent(voiceId)}`, {
+        method: "POST",
+        headers: { "xi-api-key": config.apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        throw new Error(`ElevenLabs TTS 请求失败 (${response.status}): ${errText.slice(0, 200)}`);
+    }
+    return new Blob([await response.arrayBuffer()], { type: "audio/mpeg" });
+}
+
+// ── Fish Audio TTS ──────────────────────────────────
+async function synthesizeFishAudio(text: string, config: VoiceApiConfig): Promise<Blob | null> {
+    if (!config.apiKey) throw new Error("Fish Audio API Key 未配置");
+    // 浏览器直连 Fish 会撞 CORS；走本站同源代理，目标域名固定在 route 内。
+    const response = await fetchWithTimeout("/api/voice/fish-audio-tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            apiKey: config.apiKey,
+            text,
+            format: config.outputFormat || "mp3",
+            voiceId: config.defaultVoice || "",
+            ...(typeof config.speechSpeed === "number" ? { speed: config.speechSpeed } : {}),
+        }),
+    });
+    if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(`Fish Audio TTS 请求失败 (${response.status}): ${String(err.message || err.error || "").slice(0, 200)}`);
+    }
+    return new Blob([await response.arrayBuffer()], { type: "audio/mpeg" });
+}
+
+// ── Xiaomi MiMo TTS (Chat Completions compatible) ─────
+async function synthesizeMiMo(text: string, config: VoiceApiConfig): Promise<Blob | null> {
+    if (!config.apiKey) throw new Error("MiMo API Key 未配置");
+    const baseUrl = (config.baseUrl || "https://api.xiaomimimo.com/v1").replace(/\/$/, "");
+    const format = config.outputFormat || "wav";
+    const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "api-key": config.apiKey, Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+            model: config.model || "mimo-v2.5-tts",
+            messages: [
+                { role: "user", content: config.instructions || "自然、贴合角色，语速适中" },
+                { role: "assistant", content: text },
+            ],
+            audio: { voice: config.defaultVoice || "冰糖", format },
+        }),
+    });
+    if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        throw new Error(`MiMo TTS 请求失败 (${response.status}): ${errText.slice(0, 200)}`);
+    }
+    const data = await response.json().catch(() => ({}));
+    const raw = data.choices?.[0]?.message?.audio?.data;
+    if (typeof raw !== "string" || !raw) throw new Error("MiMo 没有返回音频数据");
+    return base64ToBlob(raw, format === "mp3" ? "audio/mpeg" : "audio/wav");
+}
+
+function base64ToBlob(raw: string, contentType: string): Blob {
+    const binary = atob(raw);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: contentType });
 }
 
 // ── iOS audio playback that coexists with speech recognition ──────────

@@ -1,0 +1,46 @@
+name: Validate wallet economy and role bookkeeping
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "components/wallet-app.tsx"
+      - "components/chat/wallet-panel.tsx"
+      - "components/anonymous-qa-app.tsx"
+      - "lib/anonymous-qa.ts"
+      - "lib/chat-engine.ts"
+      - "scripts/test-anonymous-qa.mjs"
+      - "lib/wallet-storage.ts"
+      - "lib/economy/**"
+      - "lib/internal-capability-storage.ts"
+      - "lib/tool-executor.ts"
+      - "scripts/test-wallet-bookkeeping.mjs"
+      - "scripts/test-joint-fund.mjs"
+      - "package.json"
+      - ".github/workflows/wallet-validation.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wallet-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate-wallet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Wallet and economy regression tests
+        run: npm run test:economy
+      - name: Anonymous Q&A timeline and management regression tests
+        run: npm run test:anonymous
+      - name: TypeScript type check
+        run: npx tsc --noEmit

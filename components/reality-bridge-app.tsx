@@ -435,6 +435,27 @@ const RULE_SCENE_TEMPLATES: RuleSceneTemplate[] = [
     }),
   },
   {
+    id: "scene_app_lock_threshold",
+    title: "角色小手段：某个应用用太久就锁上",
+    desc: "按当天累计使用时长触发。打开后把「关键词」填成要锁的应用名（如抖音），角色会用小手段锁住它；密码/好感度在专注 APP 的「角色小手段」里设置。",
+    tag: "本机信号",
+    needsAndroid: true,
+    build: ({ characterId }) => ({
+      ...newRule(),
+      name: "用太久就把这个应用锁上",
+      matchType: "应用用太久",
+      payloadFilter: "",
+      actions: {
+        tool: {
+          name: "startAppLock",
+          args: { app: "{payload}", threshold: 60 },
+          characterId,
+        },
+      },
+      cooldownMinutes: 120,
+    }),
+  },
+  {
     id: "scene_battery_change",
     title: "电量明显变化时告诉我",
     desc: "电量变化达到感知设置的步进阈值时触发。",

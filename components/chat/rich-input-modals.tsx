@@ -3,6 +3,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { CallSttWarningDialog, hideCallSttWarningPermanently, isCallSttWarningHidden } from "./call-stt-warning-dialog";
 import { isAndroidBrowser } from "./voice-input-platform";
+import { extractReadableFileText, isSupportedReadableFile, SUPPORTED_FILE_ACCEPT } from "@/lib/file-text";
+import { resolveCloudSttConfig, startCallRecording, transcribeAudioBlob, isCallRecordingSupported, type ActiveCallRecording, type CloudSttConfig } from "@/lib/stt-cloud";
+import { isNativeSpeechAvailable, startNativeSpeech, stopNativeSpeech, cancelNativeSpeech } from "@/lib/native-speech";
 
 // ── Photo Input Modal ─────────────────────────────
 
@@ -71,6 +74,81 @@ export function PhotoInputModal({ onSend, onClose }: PhotoInputModalProps) {
                 <div className="mt-3 flex gap-3 w-full">
                     <button onClick={onClose} className="ui-btn ui-btn-ghost ui-btn-bordered-ghost flex-1">取消</button>
                     <button onClick={() => { if (canSend) onSend(desc.trim(), imageDataUrls, mergeForDisplay); }} disabled={!canSend} className="ui-btn ui-btn-success flex-1 disabled:opacity-50">{reading ? "读取中…" : `发送 ${imageDataUrls.length ? `(${imageDataUrls.length})` : ""}`}</button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ── Generic File Modal ────────────────────────────
+
+interface FileInputModalProps {
+    onSend: (fileName: string, mime: string, dataUrl: string, extra: { text: string; truncated: boolean; size: number }) => void;
+    onClose: () => void;
+}
+
+export function FileInputModal({ onSend, onClose }: FileInputModalProps) {
+    const [file, setFile] = useState<File | null>(null);
+    const [dataUrl, setDataUrl] = useState("");
+    const [fileText, setFileText] = useState("");
+    const [textTruncated, setTextTruncated] = useState(false);
+    const [error, setError] = useState("");
+    const [reading, setReading] = useState(false);
+    const inputRef = useRef<HTMLInputElement>(null);
+    const maxBytes = 25 * 1024 * 1024;
+    const forbidden = /\.(apk|exe|bat|cmd|sh|msi|dll|so|bin)$/i;
+
+    const pick = async (next: File | null) => {
+        setError("");
+        setDataUrl("");
+        setFileText("");
+        setTextTruncated(false);
+        setFile(null);
+        if (!next) return;
+        if (next.size > maxBytes) { setError("文件不能超过 25MB"); return; }
+        if (forbidden.test(next.name)) { setError("暂不支持发送可执行文件"); return; }
+        if (!isSupportedReadableFile(next.name, next.type)) {
+            setError("只支持 txt / md / csv / json / xml / yaml / html / docx / pdf；压缩包、音视频请用对应入口发送");
+            return;
+        }
+        setReading(true);
+        const value = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("读取文件失败"));
+            reader.onerror = () => reject(new Error("读取文件失败"));
+            reader.readAsDataURL(next);
+        }).catch(err => { setError(err instanceof Error ? err.message : "读取文件失败"); return ""; });
+        if (!value) { setReading(false); return; }
+        try {
+            const extracted = await extractReadableFileText(next.name, next.type, value);
+            if (!extracted) throw new Error("这个格式暂时无法读取文字");
+            setFile(next);
+            setDataUrl(value);
+            setFileText(extracted.text);
+            setTextTruncated(extracted.truncated);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "文档解析失败");
+        } finally {
+            setReading(false);
+        }
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div onClick={e => e.stopPropagation()} className="modal-dialog" style={{ maxWidth: 420, width: "min(92vw, 420px)" }}>
+                <div className="ts-16 font-semibold text-center text-[var(--c-text)]">发送文档</div>
+                <div className="mt-1 text-center ts-12 text-[var(--c-icon)]">支持 txt / md / csv / json / xml / yaml / html / docx / pdf，最大 25MB；会抽取文字给角色读，也能在对话里预览。扫描版 PDF 没有文字层，暂时读不出内容</div>
+                <button type="button" disabled={reading} onClick={() => inputRef.current?.click()} className="mt-4 flex min-h-[116px] w-full flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--c-icon)]/45 bg-[var(--c-input)]/35 px-4 py-5 text-[var(--c-icon)] transition-colors hover:bg-[var(--c-input)]/60 disabled:opacity-50">
+                    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    <span className="text-sm font-medium">{reading ? "正在读取文档…" : file ? file.name : "选择文档"}</span>
+                    <span className="text-xs opacity-70">{file ? `${(file.size / 1024).toFixed(1)} KB · ${file.type || "文档"}${textTruncated ? " · 内容已截断" : ""}` : "只显示支持的格式"}</span>
+                </button>
+                <input ref={inputRef} type="file" accept={SUPPORTED_FILE_ACCEPT} className="hidden" onChange={e => { void pick(e.target.files?.[0] ?? null); e.target.value = ""; }} />
+                {error && <div role="alert" className="mt-2 rounded-lg bg-rose-50 px-3 py-2 text-xs leading-relaxed text-rose-700">{error}</div>}
+                {fileText && <div className="mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap rounded-lg bg-[var(--c-input)] px-3 py-2 text-[11px] leading-relaxed text-[var(--c-icon)]">{fileText.slice(0, 1200)}{fileText.length > 1200 ? "\n…" : ""}</div>}
+                <div className="mt-4 flex gap-3 w-full">
+                    <button onClick={onClose} className="ui-btn ui-btn-ghost ui-btn-bordered-ghost flex-1">取消</button>
+                    <button onClick={() => { if (file && dataUrl) onSend(file.name, file.type || "application/octet-stream", dataUrl, { text: fileText, truncated: textTruncated, size: file.size }); }} disabled={!file || !dataUrl || reading} className="ui-btn ui-btn-success flex-1 disabled:opacity-50">发送</button>
                 </div>
             </div>
         </div>
@@ -327,7 +405,13 @@ interface VoiceRecordModalProps {
 }
 
 export function VoiceRecordModal({ characterId, onSend, onClose }: VoiceRecordModalProps) {
-    const androidTextInputOnlyRef = useRef(isAndroidBrowser());
+    const nativeSpeechRef = useRef(isAndroidBrowser() && isNativeSpeechAvailable());
+    const nativeSpeech = nativeSpeechRef.current;
+    const androidCloudSttRef = useRef<CloudSttConfig | null>(
+        typeof window !== "undefined" && isAndroidBrowser() ? resolveCloudSttConfig(characterId) : null,
+    );
+    const androidCloudStt = androidCloudSttRef.current;
+    const androidTextInputOnlyRef = useRef(isAndroidBrowser() && !nativeSpeech && !androidCloudStt);
     const androidTextInputOnly = androidTextInputOnlyRef.current;
     const [state, setState] = useState<"idle" | "recording" | "processing" | "done">("idle");
     const [inputMode, setInputMode] = useState<"voice" | "text">(() => androidTextInputOnly ? "text" : "voice");
@@ -340,6 +424,9 @@ export function VoiceRecordModal({ characterId, onSend, onClose }: VoiceRecordMo
     const recorderRef = useRef<MediaRecorder | null>(null);
     const chunksRef = useRef<Blob[]>([]);
     const streamRef = useRef<MediaStream | null>(null);
+    const androidRecordingRef = useRef<ActiveCallRecording | null>(null);
+    const nativeSpeechActiveRef = useRef(false);
+    const nativeSpeechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const gotFinalRef = useRef(false);
 
     const showSttCompatibilityWarning = useCallback(() => {
@@ -360,6 +447,13 @@ export function VoiceRecordModal({ characterId, onSend, onClose }: VoiceRecordMo
         setInputMode("text");
     }, []);
 
+    const clearNativeSpeechTimer = useCallback(() => {
+        if (nativeSpeechTimerRef.current) {
+            clearTimeout(nativeSpeechTimerRef.current);
+            nativeSpeechTimerRef.current = null;
+        }
+    }, []);
+
     const startRecording = useCallback(async () => {
         if (androidTextInputOnly) {
             setInputMode("text");
@@ -371,6 +465,83 @@ export function VoiceRecordModal({ characterId, onSend, onClose }: VoiceRecordMo
         setAudioDataUrl(null);
         chunksRef.current = [];
         gotFinalRef.current = false;
+
+        if (androidTextInputOnly) {
+            setInputMode("text");
+            return;
+        }
+
+        // Android 优先用系统原生 SpeechRecognizer：不经过用户的语音模型/API，
+        // 说完直接拿系统转写文字，发成语音条。
+        if (isAndroidBrowser() && nativeSpeech) {
+            setState("recording");
+            setInterim("🎙️ 正在听…");
+            nativeSpeechActiveRef.current = true;
+            clearNativeSpeechTimer();
+            nativeSpeechTimerRef.current = setTimeout(() => {
+                if (!nativeSpeechActiveRef.current) return;
+                nativeSpeechActiveRef.current = false;
+                cancelNativeSpeech();
+                setState("idle");
+                setInterim("没有识别到内容，再试一次");
+            }, 60_000);
+            const started = startNativeSpeech("zh-CN", event => {
+                if (!nativeSpeechActiveRef.current) return;
+                if (event.type === "partial" && event.text) {
+                    setInterim(event.text);
+                    return;
+                }
+                if (event.type === "final") {
+                    clearNativeSpeechTimer();
+                    nativeSpeechActiveRef.current = false;
+                    const text = String(event.text || "").trim();
+                    if (!text) {
+                        setState("idle");
+                        setInterim(event.message || "没有识别到内容");
+                        return;
+                    }
+                    setFinalText(text);
+                    setInterim("");
+                    setState("done");
+                    return;
+                }
+                if (event.type === "error") {
+                    clearNativeSpeechTimer();
+                    nativeSpeechActiveRef.current = false;
+                    setState("idle");
+                    setInterim(event.code === "language"
+                        ? "系统语音服务没有中文语言包；可以先用键盘上的麦克风说话，或在「设置 → 语音」配置云端 STT。"
+                        : (event.message || "系统语音识别失败"));
+                }
+            });
+            if (!started.ok) {
+                clearNativeSpeechTimer();
+                nativeSpeechActiveRef.current = false;
+                setState("idle");
+                setInterim(started.reason || "系统语音识别启动失败");
+            }
+            return;
+        }
+
+        // Android WebView 没有 Web Speech API：改用壳里已有的录音 + 云端 STT，
+        // 这样发出去的是用户真实声音，同时角色也能读到转写文字。
+        if (isAndroidBrowser() && androidCloudStt) {
+            if (!isCallRecordingSupported()) {
+                setInterim("当前环境不支持录音");
+                showSttCompatibilityWarning();
+                return;
+            }
+            try {
+                const recording = await startCallRecording();
+                androidRecordingRef.current = recording;
+                setState("recording");
+                setInterim("🎙️ 正在录音…");
+            } catch (error) {
+                setInterim(error instanceof Error ? error.message : "录音失败");
+                showSttCompatibilityWarning();
+            }
+            return;
+        }
 
         // Start STT (browser Web Speech API) before opening the mic. Unsupported
         // Android browsers should show the fallback prompt without flashing recording UI.
@@ -425,14 +596,65 @@ export function VoiceRecordModal({ characterId, onSend, onClose }: VoiceRecordMo
         stt.start();
     }, [androidTextInputOnly, characterId, showSttCompatibilityWarning]);
 
-    const stopRecording = () => {
+    const stopRecording = async () => {
+        if (nativeSpeechActiveRef.current) {
+            clearNativeSpeechTimer();
+            stopNativeSpeech();
+            setState("processing");
+            setInterim("识别中...");
+            nativeSpeechTimerRef.current = setTimeout(() => {
+                if (!nativeSpeechActiveRef.current) return;
+                nativeSpeechActiveRef.current = false;
+                cancelNativeSpeech();
+                setState("idle");
+                setInterim("没有识别到内容，再试一次");
+            }, 8_000);
+            return;
+        }
+        const androidRecording = androidRecordingRef.current;
+        if (androidRecording) {
+            androidRecordingRef.current = null;
+            setState("processing");
+            setInterim("识别中...");
+            try {
+                const blob = await androidRecording.stop();
+                if (!blob) throw new Error("没有录到声音");
+                if (!androidCloudStt) throw new Error("没有可用的语音识别配置");
+                const text = await transcribeAudioBlob(blob, androidCloudStt);
+                if (!text.trim()) throw new Error("没有识别到内容");
+                const dataUrl = await new Promise<string>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("录音读取失败"));
+                    reader.onerror = () => reject(new Error("录音读取失败"));
+                    reader.readAsDataURL(blob);
+                });
+                setAudioDataUrl(dataUrl);
+                setFinalText(text.trim());
+                setInterim("");
+                setState("done");
+            } catch (error) {
+                setState("idle");
+                setInterim(error instanceof Error ? error.message : "语音识别失败");
+                showSttCompatibilityWarning();
+            }
+            return;
+        }
         sttRef.current?.stop();
         recorderRef.current?.stop();
         setState("processing");
         setInterim("识别中...");
     };
 
-    useEffect(() => () => { sttRef.current?.abort(); recorderRef.current?.stop(); streamRef.current?.getTracks().forEach(t => t.stop()); }, []);
+    useEffect(() => () => {
+        sttRef.current?.abort();
+        recorderRef.current?.stop();
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        androidRecordingRef.current?.cancel();
+        androidRecordingRef.current = null;
+        nativeSpeechActiveRef.current = false;
+        clearNativeSpeechTimer();
+        cancelNativeSpeech();
+    }, [clearNativeSpeechTimer]);
 
     const switchInputMode = () => {
         if (androidTextInputOnly) {
@@ -441,6 +663,11 @@ export function VoiceRecordModal({ characterId, onSend, onClose }: VoiceRecordMo
         }
         if (inputMode === "voice") {
             sttRef.current?.abort();
+            androidRecordingRef.current?.cancel();
+            androidRecordingRef.current = null;
+            nativeSpeechActiveRef.current = false;
+            clearNativeSpeechTimer();
+            cancelNativeSpeech();
             if (recorderRef.current && recorderRef.current.state !== "inactive") {
                 recorderRef.current.stop();
             }
@@ -478,13 +705,20 @@ export function VoiceRecordModal({ characterId, onSend, onClose }: VoiceRecordMo
                 <div className="ts-16 font-semibold text-center text-[var(--c-text)]">语音消息</div>
                 <div className="w-full min-h-[80px] flex flex-col items-center justify-center gap-3 py-4">
                     {inputMode === "text" ? (
-                        <textarea
-                            value={manualText}
-                            onChange={e => setManualText(e.target.value)}
-                            className="voice-text-mode-input"
-                            placeholder="输入语音条内容..."
-                            rows={3}
-                        />
+                        <>
+                            <textarea
+                                value={manualText}
+                                onChange={e => setManualText(e.target.value)}
+                                className="voice-text-mode-input"
+                                placeholder="输入语音条内容..."
+                                rows={3}
+                            />
+                            {androidTextInputOnly && (
+                                <div className="px-3 text-center text-[11px] leading-relaxed text-[var(--c-icon)]">
+                                    这台设备没有可用的系统语音识别，也没配置云端 STT。可以先在「设置 → 语音」配置 OpenAI 兼容的 STT，或直接输入文字语音条。
+                                </div>
+                            )}
+                        </>
                     ) : state === "idle" && (
                         <button onClick={startRecording} className="w-[64px] h-[64px] rounded-full bg-[var(--c-success)] flex items-center justify-center">
                             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -505,8 +739,17 @@ export function VoiceRecordModal({ characterId, onSend, onClose }: VoiceRecordMo
                     {state === "done" && (
                         <div className="ts-14 text-[var(--c-text)] text-center px-4 leading-relaxed">{finalText}</div>
                     )}
+                    {state === "idle" && interim && (
+                        <span className="ts-13 text-rose-600 text-center px-4 leading-relaxed">{interim}</span>
+                    )}
                     {(state === "recording" || state === "processing") && (
                         <span className="ts-13 text-[var(--c-icon)]">{interim || "点击停止录音"}</span>
+                    )}
+                    {inputMode === "voice" && nativeSpeech && state === "idle" && (
+                        <span className="px-3 text-center text-[11px] leading-relaxed text-[var(--c-icon)]">点麦克风开始说话，停止后由系统语音识别转成文字，再发成语音条；不经过你自己的语音模型/API。</span>
+                    )}
+                    {inputMode === "voice" && !nativeSpeech && androidCloudStt && state === "idle" && (
+                        <span className="px-3 text-center text-[11px] leading-relaxed text-[var(--c-icon)]">点麦克风开始录音；停止后会先转写成文字给角色读，同时把真实录音一起发出去。</span>
                     )}
                 </div>
                 <div className="flex gap-3 w-full">

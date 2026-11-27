@@ -52,6 +52,11 @@ class CallControlService : AccessibilityService() {
 
     private val dwellTicker = object : Runnable {
         override fun run() {
+            if (currentPackage.isNotBlank()) {
+                getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .putLong("current_package_updated_at", System.currentTimeMillis())
+                    .apply()
+            }
             checkDwellThreshold()
             checkUsageThresholds()
             deliverPendingEvents()

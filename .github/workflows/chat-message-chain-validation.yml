@@ -7,6 +7,12 @@ on:
     paths:
       - "lib/chat-engine.ts"
       - "lib/tool-executor.ts"
+      - "lib/anonymous-qa.ts"
+      - "lib/anonymous-qa-proactive.ts"
+      - "components/anonymous-qa-app.tsx"
+      - "components/wallet-planning-tabs.tsx"
+      - "lib/wallet-planning.ts"
+      - "components/wallet-app.tsx"
       - "lib/native-tool-name.ts"
       - "scripts/test-native-tool-name-resolution.mjs"
       - "lib/turn-coordinator.ts"
@@ -62,6 +68,10 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: Anonymous Q&A shared visibility and answer authorization tests
+        run: npm run test:anonymous
+      - name: Wallet planning and recurring bill tests
+        run: npm run test:wallet-planning
       - name: TypeScript type check
         run: npx tsc --noEmit
       - name: Memo archive contract tests

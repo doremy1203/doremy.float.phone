@@ -14,6 +14,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
+import android.provider.Telephony
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -151,7 +153,26 @@ class FocusLockService : Service() {
             val arr = JSONArray(whitelistJson)
             (0 until arr.length()).map { arr.getString(it) }.toSet()
         }.getOrDefault(emptySet())
-        val exempt = setOf(context.packageName, "com.android.systemui")
+        /* 锁机不能把桌面/输入法/电话/短信也锁掉：否则用户连回家、打字、
+           打紧急电话都做不到。这些是系统安全底线，不属于“白名单外的娱乐应用”。 */
+        val exempt = mutableSetOf(context.packageName, "com.android.systemui")
+        runCatching {
+            val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            val home = context.packageManager.resolveActivity(homeIntent, 0)
+            home?.activityInfo?.packageName?.let { exempt.add(it) }
+        }
+        runCatching {
+            val ime = Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+            if (!ime.isNullOrBlank()) exempt.add(ime.substringBefore('/'))
+        }
+        runCatching {
+            val dialIntent = Intent(Intent.ACTION_DIAL)
+            val dial = context.packageManager.resolveActivity(dialIntent, 0)
+            dial?.activityInfo?.packageName?.let { exempt.add(it) }
+        }
+        runCatching {
+            Telephony.Sms.getDefaultSmsPackage(context)?.let { exempt.add(it) }
+        }
         val launchable = runCatching {
             val pm = context.packageManager
             val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)

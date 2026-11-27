@@ -17,8 +17,14 @@ import { requestCheckIn } from "./screenshot/checkin";
 import { storeMediaBase64 } from "./media-cache-storage";
 import { requestBackgroundChatReply } from "./follow-up-service";
 import { setAlarm as shellSetAlarm, setBrightness as shellSetBrightness, setDnd as shellSetDnd,
-  listInstalledApps, focusLockStart as shellFocusLockStart, focusLockUpdate as shellFocusLockUpdate, focusLockStop as shellFocusLockStop, focusLockStatus as shellFocusLockStatus,
+  listInstalledApps, foregroundApp as shellForegroundApp, foregroundPackagesSince as shellForegroundPackagesSince,
+  focusLockStart as shellFocusLockStart, focusLockUpdate as shellFocusLockUpdate, focusLockStop as shellFocusLockStop, focusLockStatus as shellFocusLockStatus,
+  focusLockSchedule as shellFocusLockSchedule, focusLockScheduleCancel as shellFocusLockScheduleCancel,
   focusWidgetUpdate as shellFocusWidgetUpdate, focusWidgetPin as shellFocusWidgetPin,
+  focusOverlayUpdate as shellFocusOverlayUpdate, focusOverlayStop as shellFocusOverlayStop,
+  focusOverlayConsumeEvents as shellFocusOverlayConsumeEvents,
+  consumeScheduledFocus as shellConsumeScheduledFocus,
+  appLockStart as shellAppLockStart, appLockStop as shellAppLockStop, appLockStatus as shellAppLockStatus,
   focusLockTaLine as shellFocusLockTaLine, isDeviceAdminActive as shellIsDeviceAdminActive,
   requestDeviceAdmin as shellRequestDeviceAdmin,
   focusLockPendingApply as shellFocusLockPendingApply,
@@ -211,11 +217,22 @@ const HOST_ACTION_PERMISSIONS: Record<string, CustomAppPermission[]> = {
   "device.dnd.set": ["device.assist"],
   "device.brightness.set": ["device.assist"],
   "device.apps.list": ["device.assist"],
+  "device.foreground.get": ["device.assist"],
+  "device.foreground.trace": ["device.assist"],
   "device.lock.start": ["device.assist"],
   "device.lock.update": ["device.assist"],
   "device.lock.stop": ["device.assist"],
   "device.lock.status": ["device.assist"],
+  "device.lock.schedule": ["device.assist"],
+  "device.lock.scheduleCancel": ["device.assist"],
+  "device.scheduledFocus.consume": ["device.assist"],
+  "device.appLock.start": ["device.assist"],
+  "device.appLock.stop": ["device.assist"],
+  "device.appLock.status": ["device.assist"],
   "device.focusWidget.update": ["device.assist"],
+  "device.focusOverlay.update": ["device.assist"],
+  "device.focusOverlay.stop": ["device.assist"],
+  "device.focusOverlay.events": ["device.assist"],
   "device.focusWidget.pin": ["device.assist"],
   "device.lock.taLine": ["device.assist"],
   "device.admin.status": ["device.assist"],
@@ -379,6 +396,14 @@ function serializeVoiceConfig(config: VoiceApiConfig): Record<string, unknown> {
     sttModel: config.sttModel,
     defaultVoice: config.defaultVoice,
     languageBoost: config.languageBoost,
+    speechSpeed: config.speechSpeed,
+    speechPitch: config.speechPitch,
+    stability: config.stability,
+    similarityBoost: config.similarityBoost,
+    style: config.style,
+    speakerBoost: config.speakerBoost,
+    outputFormat: config.outputFormat,
+    instructions: config.instructions,
     enableTTS: config.enableTTS,
     enableSTT: config.enableSTT,
     customVoices: (config.customVoices ?? []).map(voice => ({
@@ -518,6 +543,10 @@ function serializeChatMessage(message: ChatMessage): Record<string, unknown> {
     createdAt: message.createdAt,
     status: message.status,
     senderName: message.senderName,
+    senderCharacterId: message.senderCharacterId,
+    stateValues: Array.isArray(message.stateValues)
+      ? message.stateValues.map(item => ({ name: String(item.name), value: Number(item.value) }))
+      : undefined,
     mediaType: message.mediaType,
     mediaData: asRecord(message.mediaData),
     origin: message.origin,
@@ -2292,6 +2321,13 @@ export async function addCustomAppMemory(app: InstalledCustomApp, record: Record
   const characterId = cleanText(record.characterId, 160);
   const content = cleanText(record.content, 3000);
   if (!characterId || !content) throw new Error("memory.add 需要 characterId 和 content。");
+  // 心意手作把点评/制作流水写成长期记忆会污染角色关系记忆；它在自己的
+  // mem() 里已经写了短期时间线，这里直接忽略旧版市场包/缓存 HTML 的写入。
+  if (app.id === "heartcraft.doris"
+    || app.id.startsWith("app_heartcraft.doris_")
+    || app.name === "心意手作工坊") {
+    return true;
+  }
   const now = new Date().toISOString();
   const importance = Math.max(0, Math.min(1, Number(record.importance ?? 0.6) || 0.6));
   await saveMemoryEntry({
@@ -2475,7 +2511,7 @@ export function runCustomAppShellNotify(record: Record<string, unknown>): Record
 
 /** L1 提醒锁：切勿扰（壳 ACTION setDnd）。网页/无壳返回 ok:false 由调用方降级。 */
 export function runCustomAppDeviceDnd(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
-  const result = shellSetDnd(record.on !== false);
+  const result = shellSetDnd(record.on !== false, Number(record.until) || 0);
   return result.ok ? { ok: true } : { ok: false, reason: result.reason || "当前环境不支持勿扰切换", needPermission: result.needPermission };
 }
 
@@ -2491,6 +2527,77 @@ export function runCustomAppDeviceAppsList(_app: InstalledCustomApp, record: Rec
   void record;
   const result = listInstalledApps();
   return result.ok ? { ok: true, apps: result.apps } : { ok: false, apps: [], reason: result.reason || "当前环境不支持应用列表" };
+}
+
+/** 当前前台应用（专注白名单离开豁免）。 */
+export function runCustomAppDeviceForegroundApp(_app: InstalledCustomApp, record: Record<string, unknown> = {}): Record<string, unknown> {
+  void record;
+  const result = shellForegroundApp();
+  return result.ok
+    ? { ok: true, package: result.package, label: result.label }
+    : { ok: false, reason: result.reason || "当前环境不支持读取前台应用", needPermission: result.needPermission };
+}
+
+/** 长时段定时锁机：原生闹钟到点自行启动，Float 没开也能锁。 */
+export function runCustomAppDeviceLockSchedule(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const result = shellFocusLockSchedule({
+    id: cleanText(record.id, 120),
+    startAt: Number(record.startAt) || 0,
+    endAt: Number(record.endAt) || 0,
+    packages: typeof record.packages === "string" ? record.packages : JSON.stringify(record.packages || []),
+    taLine: cleanText(record.taLine, 400),
+    charName: cleanText(record.charName, 80),
+    dnd: record.dnd === true,
+    task: cleanText(record.task, 80),
+    charIds: typeof record.charIds === "string" ? record.charIds : JSON.stringify(record.charIds || []),
+    minutes: Math.max(1, Math.min(600, Number(record.minutes) || 25)),
+  });
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "定时锁机排程失败" };
+}
+
+export function runCustomAppDeviceLockScheduleCancel(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const result = shellFocusLockScheduleCancel(cleanText(record.id, 120));
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "取消定时锁机失败" };
+}
+
+export function runCustomAppAppLockStart(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const result = shellAppLockStart({
+    target: cleanText(record.target, 160),
+    label: cleanText(record.label, 80),
+    charId: cleanText(record.charId, 120),
+    charName: cleanText(record.charName, 80),
+    avatar: typeof record.avatar === "string" ? record.avatar : "",
+    style: record.style && typeof record.style === "object" ? record.style as Record<string, unknown> : {},
+    durationMinutes: Math.max(1, Math.min(360, Number(record.durationMinutes) || 30)),
+    sessionId: cleanText(record.sessionId, 120),
+  });
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "小手段启动失败" };
+}
+
+export function runCustomAppAppLockStop(_app: InstalledCustomApp, record: Record<string, unknown> = {}): Record<string, unknown> {
+  void record;
+  const result = shellAppLockStop();
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "小手段停止失败" };
+}
+
+export function runCustomAppAppLockStatus(_app: InstalledCustomApp, record: Record<string, unknown> = {}): Record<string, unknown> {
+  void record;
+  return shellAppLockStatus() as unknown as Record<string, unknown>;
+}
+
+export function runCustomAppScheduledFocusConsume(_app: InstalledCustomApp, record: Record<string, unknown> = {}): Record<string, unknown> {
+  void record;
+  const result = shellConsumeScheduledFocus();
+  return result.ok ? { ok: true, record: result.record } : { ok: false, reason: result.reason || "定时专注补录读取失败" };
+}
+
+/** 离开专注页面期间的应用轨迹（白名单豁免）。 */
+export function runCustomAppDeviceForegroundTrace(_app: InstalledCustomApp, record: Record<string, unknown> = {}): Record<string, unknown> {
+  const startMs = Number(record.startMs) || (Date.now() - 15 * 60_000);
+  const result = shellForegroundPackagesSince(startMs);
+  return result.ok
+    ? { ok: true, packages: result.packages }
+    : { ok: false, packages: [], reason: result.reason || "当前环境不支持读取应用轨迹", needPermission: result.needPermission };
 }
 
 /** L2 看守锁：启动壳侧轮询封锁。 */
@@ -2547,6 +2654,24 @@ export function runCustomAppDeviceLockStatus(_app: InstalledCustomApp, record: R
 }
 
 /** 专注倒计时桌面组件：推会话状态。 */
+/** 专注悬浮胶囊：网页快照 → 原生悬浮层。 */
+export function runCustomAppFocusOverlayUpdate(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
+  const payload = record.state && typeof record.state === "object" ? record.state as Record<string, unknown> : record;
+  const result = shellFocusOverlayUpdate(payload);
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "专注悬浮层更新失败" };
+}
+
+export function runCustomAppFocusOverlayStop(_app: InstalledCustomApp, record: Record<string, unknown> = {}): Record<string, unknown> {
+  void record;
+  const result = shellFocusOverlayStop();
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason || "专注悬浮层关闭失败" };
+}
+
+export function runCustomAppFocusOverlayEvents(_app: InstalledCustomApp, record: Record<string, unknown> = {}): Record<string, unknown> {
+  void record;
+  return { ok: true, events: shellFocusOverlayConsumeEvents() };
+}
+
 export function runCustomAppFocusWidgetUpdate(_app: InstalledCustomApp, record: Record<string, unknown>): Record<string, unknown> {
   const result = shellFocusWidgetUpdate(cleanText(record.json, 4000) || "{}");
   return result.ok ? { ok: true } : { ok: false, reason: result.reason || "当前环境不支持专注组件" };
@@ -2717,6 +2842,10 @@ export async function executeCustomAppHostAction(
       return runCustomAppDeviceBrightness(app, payload);
     case "device.apps.list":
       return runCustomAppDeviceAppsList(app, payload);
+    case "device.foreground.get":
+      return runCustomAppDeviceForegroundApp(app, payload);
+    case "device.foreground.trace":
+      return runCustomAppDeviceForegroundTrace(app, payload);
     case "device.screenshot":
       return runCustomAppDeviceScreenshot();
     case "device.lock.start":
@@ -2727,8 +2856,26 @@ export async function executeCustomAppHostAction(
       return runCustomAppDeviceLockStop(app, payload);
     case "device.lock.status":
       return runCustomAppDeviceLockStatus(app, payload);
+    case "device.lock.schedule":
+      return runCustomAppDeviceLockSchedule(app, payload);
+    case "device.lock.scheduleCancel":
+      return runCustomAppDeviceLockScheduleCancel(app, payload);
+    case "device.scheduledFocus.consume":
+      return runCustomAppScheduledFocusConsume(app, payload);
+    case "device.appLock.start":
+      return runCustomAppAppLockStart(app, payload);
+    case "device.appLock.stop":
+      return runCustomAppAppLockStop(app, payload);
+    case "device.appLock.status":
+      return runCustomAppAppLockStatus(app, payload);
     case "device.focusWidget.update":
       return runCustomAppFocusWidgetUpdate(app, payload);
+    case "device.focusOverlay.update":
+      return runCustomAppFocusOverlayUpdate(app, payload);
+    case "device.focusOverlay.stop":
+      return runCustomAppFocusOverlayStop(app, payload);
+    case "device.focusOverlay.events":
+      return runCustomAppFocusOverlayEvents(app, payload);
     case "device.focusWidget.pin":
       return runCustomAppFocusWidgetPin(app, payload);
     case "device.lock.taLine":

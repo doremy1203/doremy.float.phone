@@ -203,7 +203,7 @@ export async function isMediaRefRetained(ref: string | undefined): Promise<boole
     return Boolean(entry?.retainedBy?.length);
 }
 
-export async function deleteMediaRef(ref: string | undefined): Promise<void> {
+export async function deleteMediaRef(ref: string | undefined, options: { force?: boolean } = {}): Promise<void> {
     if (!ref || !ref.startsWith(MEDIA_STORE_PROTOCOL)) return;
     const table = getDb().entries;
     const id = ref.slice(MEDIA_STORE_PROTOCOL.length);
@@ -215,7 +215,7 @@ export async function deleteMediaRef(ref: string | undefined): Promise<void> {
         const state = loadPhotoWallState();
         referencedByPhotoWall = state.wallBackgroundRef === ref || state.photos.some(photo => photo.mediaRef === ref);
     } catch { /* If a damaged storage record cannot be read, still honor explicit retention metadata. */ }
-    if (entry?.retainedBy?.length || referencedByPhotoWall) return;
+    if (!options.force && (entry?.retainedBy?.length || referencedByPhotoWall)) return;
     await table.delete(id);
 }
 

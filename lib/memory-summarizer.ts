@@ -19,12 +19,26 @@ import {
 } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { loadNativeTimeline, formatTimelineForSummarization, filterTimelineByAllowedSources } from "./short-term-assembler";
+import type { NativeTimelineEntry } from "./short-term-assembler";
 import { generateEmbedding, resolveEmbeddingModel } from "./memory-embedding";
 import { simpleLLMCall } from "./api-helpers";
 import { maybeRunCoreMemoryPipeline, runCoreMemoryPipeline } from "./core-memory-builder";
 
 /** Per-character lock to prevent concurrent summarization. */
 const summarizingSet = new Set<string>();
+
+/**
+ * 心意手作工坊的点评/制作流水只属于短期时间线。
+ * 这些是功能操作记录，不是角色关系事实；即使 custom_app 来源开关打开，
+ * 也不应该被卷进长期记忆总结。已有历史条目不会被自动删除。
+ */
+function isShortTermOnlyCustomAppEntry(entry: NativeTimelineEntry): boolean {
+    if (entry.sourceApp !== "custom_app") return false;
+    const appId = String(entry.customAppId || "");
+    return appId === "heartcraft.doris"
+        || appId.startsWith("app_heartcraft.doris_")
+        || entry.customAppName === "心意手作工坊";
+}
 
 /**
  * Check if summarization should run based on event counter, then execute.
@@ -92,10 +106,11 @@ export async function runSummarizationPipeline(
                 : getLastSummarizedTimestamp(characterId)
         ) ?? undefined;
     // 长期总结来源独立于短期提示词来源开关；关闭短期注入不应阻止重要经历进入长期记忆。
+    // 心意手作等纯操作流水例外：它们只走短期时间线，不参与长期总结。
     const allEntries = filterTimelineByAllowedSources(
         loadNativeTimeline(characterId, { ...(afterTimestamp ? { afterTimestamp } : {}), memoryTarget: options?.writeLongTermMemory === false ? "core" : "long_term" }),
         config.longTermAllowedSources ?? config.shortTermAllowedSources,
-    );
+    ).filter(entry => !isShortTermOnlyCustomAppEntry(entry) && entry.sourceDetail !== "life_shared_event");
 
     if (allEntries.length < 4) {
         if (!options?.force) resetEventCounter(characterId);

@@ -252,8 +252,9 @@ class CheckInService : Service() {
         /** 专注 App 的通行证查岗：原生闹钟到点直接弹，不要求网页活着。 */
         const val SOURCE_FOCUS_PASS = "focusPass"
 
-        /** 浮层晾着多久没处理就算「不给」。 */
-        private const val AUTO_DISMISS_MS = 90_000L
+        /** 浮层晾着多久没处理就算「不给」。网页侧通行证查岗时限是 10 分钟，
+         *  原生不能再 90 秒就替用户判 timeout（否则截屏还没来得及交就作废）。 */
+        private const val AUTO_DISMISS_MS = 10 * 60_000L
 
         @Volatile
         private var running = false

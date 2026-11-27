@@ -12,14 +12,14 @@ import type { InstalledCustomApp } from "../custom-app-types";
 
 export const FOCUS_COMPANION_APP_ID = "doris.focus.companion";
 export const FOCUS_COMPANION_APP_NAME = "角色陪伴专注";
-export const FOCUS_COMPANION_APP_VERSION = "1.10.1";
+export const FOCUS_COMPANION_APP_VERSION = "1.10.2";
 export const FOCUS_COMPANION_APP_DESCRIPTION = "带虚拟角色陪伴监督的专注工具：番茄专注 + 角色陪伴对话与壁纸 + AI 出题校验与错题本 + 可自定义惩罚锁定 + 睡眠计时与报告 + 心愿与连坐 + 奖励、账本与收藏夹。v1.9.3 把同类功能收成六个入口（计划与邀请 / 学习档案 / 激励中心 / 报告与趋势 / 奖励与账本 / 内容库），页顶标签切换，首页以「现在能做的那件事」开头。聊天室 + 号面板可发「专注邀约」（可预订时间段，到点前角色来催）与「睡眠陪伴」；角色也能主动调用工具或直接发卡约你。";
 
 export const FOCUS_COMPANION_MANIFEST: InstalledCustomApp["manifest"] =
   {
   "id": "doris.focus.companion",
   "name": "角色陪伴专注",
-  "version": "1.10.1",
+  "version": "1.10.2",
   "sdkVersion": "1.0",
   "author": "doris",
   "description": "带虚拟角色陪伴监督的专注工具：番茄专注 + 角色陪伴对话与壁纸 + AI 出题校验与错题本 + 可自定义惩罚锁定 + 睡眠计时与报告 + 心愿与连坐 + 奖励、账本与收藏夹。v1.9.3 把同类功能收成六个入口（计划与邀请 / 学习档案 / 激励中心 / 报告与趋势 / 奖励与账本 / 内容库），页顶标签切换，首页以「现在能做的那件事」开头。聊天室 + 号面板可发「专注邀约」（可预订时间段，到点前角色来催）与「睡眠陪伴」；角色也能主动调用工具或直接发卡约你。",
@@ -230,7 +230,7 @@ export const FOCUS_COMPANION_MANIFEST: InstalledCustomApp["manifest"] =
         {
           "id": "make-appt",
           "name": "跟我约一段专注",
-          "description": "和用户约定一个具体的专注时间（日期+时间+事项+时长）。到点前会提前提醒他准备开始，每 5 分钟催一次、共 3 次，连着催三次他还没开始就按规矩处罚。用户说「你盯我学习」「几点陪我学」时调用。",
+          "description": "先向用户发出一个具体专注时间（日期+时间+事项+时长）的邀请，写进「TA 的邀请」。只有用户明确答应后，才成为正式预约并开始到点前提醒、每 5 分钟催一次共 3 次、连续三次没开始按规矩处罚；用户没答应就不要催，也不能按失约处罚。用户说「你盯我学习」「几点陪我学」时调用。",
           "parameterSchema": {
             "type": "object",
             "properties": {
@@ -329,6 +329,48 @@ export const FOCUS_COMPANION_MANIFEST: InstalledCustomApp["manifest"] =
           },
           "visibility": "shared",
           "handler": "passVerdict"
+        },
+        {
+          "id": "reveal-app-lock-password",
+          "name": "问应用锁密码",
+          "description": "当角色自己用「锁住一个应用」锁了用户的某个应用，而用户来求密码时调用。只有当前好感度达到设定阈值才会返回密码；没到阈值会返回「还不肯告诉你」，角色应继续逗他而不是编造密码。锁页、设置页和通知里都不会显示这个密码。",
+          "parameterSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "visibility": "shared",
+          "handler": "revealAppLockPassword"
+        },
+        {
+          "id": "start-app-lock",
+          "name": "锁住一个应用",
+          "description": "角色主动锁住用户手机上的单个应用。app 传应用显示名或包名；可选 durationMinutes（分钟，默认 30，最多 360）。锁页展示角色留言，并提供返回对应私聊的入口；用户可申请 1-5 分钟临时通行，或输入角色通过工具告知的密码解锁。密码由系统生成且不会直接显示，角色可在好感度达到阈值后用「问应用锁密码」决定是否告知。系统关键应用会被代码层拒绝。",
+          "parameterSchema": {
+            "type": "object",
+            "properties": {
+              "app": {
+                "type": "string",
+                "description": "要锁的应用显示名或包名，例如 抖音 / com.ss.android.ugc.aweme"
+              },
+              "threshold": {
+                "type": "number",
+                "description": "告诉密码所需的好感度阈值 0-100，不填用用户当前设置"
+              },
+              "durationMinutes": {
+                "type": "number",
+                "description": "锁定时长（分钟），默认 30，最多 360，到期自动解除"
+              },
+              "style": {
+                "type": "object",
+                "description": "可选角色锁页主题与留言：title/subtitle/message/showAvatar/showTitle/showSubtitle/background/avatar。留言应贴合角色个性与当下情境，避免统一台词和「表现好就奖励」等生硬奖惩话术"
+              }
+            },
+            "required": [
+              "app"
+            ]
+          },
+          "visibility": "shared",
+          "handler": "startAppLock"
         }
       ]
     },
@@ -395,7 +437,7 @@ export const FOCUS_COMPANION_MANIFEST: InstalledCustomApp["manifest"] =
       {
         "id": "make-appt",
         "name": "跟我约一段专注",
-        "description": "和用户约定一个具体的专注时间（日期+时间+事项+时长）。到点前会提前提醒他准备开始，每 5 分钟催一次、共 3 次，连着催三次他还没开始就按规矩处罚。用户说「你盯我学习」「几点陪我学」时调用。",
+        "description": "先向用户发出一个具体专注时间（日期+时间+事项+时长）的邀请，写进「TA 的邀请」。只有用户明确答应后，才成为正式预约并开始到点前提醒、每 5 分钟催一次共 3 次、连续三次没开始按规矩处罚；用户没答应就不要催，也不能按失约处罚。用户说「你盯我学习」「几点陪我学」时调用。",
         "parameterSchema": {
           "type": "object",
           "properties": {
@@ -494,6 +536,40 @@ export const FOCUS_COMPANION_MANIFEST: InstalledCustomApp["manifest"] =
         },
         "visibility": "shared",
         "handler": "passVerdict"
+      },
+      {
+        "id": "reveal-app-lock-password",
+        "name": "问应用锁密码",
+        "description": "当角色自己用「锁住一个应用」锁了用户的某个应用，而用户来求密码时调用。只有当前好感度达到设定阈值才会返回密码；没到阈值会返回「还不肯告诉你」，角色应继续逗他而不是编造密码。锁页、设置页和通知里都不会显示这个密码。",
+        "parameterSchema": {
+          "type": "object",
+          "properties": {}
+        },
+        "visibility": "shared",
+        "handler": "revealAppLockPassword"
+      },
+      {
+        "id": "start-app-lock",
+        "name": "锁住一个应用",
+        "description": "角色主动锁住用户手机上的单个应用。app 传应用显示名或包名；锁页只有密码框，没有聊天。密码由系统生成且不展示，用户来 Float 找角色求情；角色可在好感度达到阈值后用「问应用锁密码」决定是否告诉。不要锁桌面、设置、电话、短信或输入法。",
+        "parameterSchema": {
+          "type": "object",
+          "properties": {
+            "app": {
+              "type": "string",
+              "description": "要锁的应用显示名或包名，例如 抖音 / com.ss.android.ugc.aweme"
+            },
+            "threshold": {
+              "type": "number",
+              "description": "告诉密码所需的好感度阈值 0-100，不填用用户当前设置"
+            }
+          },
+          "required": [
+            "app"
+          ]
+        },
+        "visibility": "shared",
+        "handler": "startAppLock"
       }
     ],
     "events": [
@@ -761,7 +837,7 @@ export const FOCUS_COMPANION_MANIFEST: InstalledCustomApp["manifest"] =
       {
         "id": "make-appt",
         "name": "跟我约一段专注",
-        "description": "和用户约定一个具体的专注时间（日期+时间+事项+时长）。到点前会提前提醒他准备开始，每 5 分钟催一次、共 3 次，连着催三次他还没开始就按规矩处罚。用户说「你盯我学习」「几点陪我学」时调用。",
+        "description": "先向用户发出一个具体专注时间（日期+时间+事项+时长）的邀请，写进「TA 的邀请」。只有用户明确答应后，才成为正式预约并开始到点前提醒、每 5 分钟催一次共 3 次、连续三次没开始按规矩处罚；用户没答应就不要催，也不能按失约处罚。用户说「你盯我学习」「几点陪我学」时调用。",
         "parameterSchema": {
           "type": "object",
           "properties": {

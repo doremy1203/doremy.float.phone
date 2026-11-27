@@ -129,7 +129,9 @@ assert.equal(identity.resolveSessionCharacterIdentity(
   { contactId: "contact_deleted" }, contacts, characters,
 ), null, "an orphaned contact ID must fail closed rather than guess by display name");
 
-const now = new Date("2026-11-05T08:00:00.000Z");
+// 用本地午夜而不是固定 UTC 时刻：同一份测试在 UTC、东八区和美东都得到
+// “15:00 还没到”的相同语义，避免 Windows/CI 时区差异导致假失败。
+const now = new Date(2026, 10, 5, 0, 0, 0, 0);
 // Match the production caller: day boundaries are local calendar midnights,
 // not UTC midnights. This keeps the same virtual day in DST and non-DST zones.
 const dayStart = new Date(now);

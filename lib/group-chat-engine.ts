@@ -74,7 +74,7 @@ import { getCustomStickerExample, loadCustomStickers } from "./custom-sticker-st
 import { formatCustomAppChatDirectivesForPrompt } from "./custom-app-chat-directives";
 import { findEnabledToolForSchema, getEnabledTools } from "./tool-storage";
 import { formatToolsForPrompt, formatGroupToolsForPrompt, formatToolSchema } from "./tool-prompt";
-import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults, type ToolCall } from "./tool-executor";
+import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults, resolveToolCallDisplayName, type ToolCall } from "./tool-executor";
 import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { buildGroupRosterMacro } from "./group-admin";
 import { parseOfflineResponse, extractThinkingTag, type ParsedOfflineResponse } from "./chat-offline-storage";
@@ -660,7 +660,7 @@ async function runNativeGroupToolLoop(params: {
         ].map(name => name?.trim()).filter(Boolean))].join("、") || "未标注角色";
         const displayedActionNames = [
             ...loaderCalls.map(item => `展开「${item.loader.label}」动作说明`),
-            ...realNativeCalls.map(call => nativeBundle.displayNameMap.get(call.name) || nativeBundle.nameMap.get(call.name) || call.name),
+            ...realNativeCalls.map(call => nativeBundle.displayNameMap.get(call.name) || nativeBundle.nameMap.get(call.name) || resolveToolCallDisplayName(call.name, { appId: "group_chat", sourceEngine: "group_chat" })),
         ];
         if (displayedActionNames.length > 0) callbacks?.onToolNotice?.(`${actorNames}正在${displayedActionNames.join("、")}...`);
 
@@ -965,7 +965,7 @@ export async function generateGroupChatCompletion(
         // Handle [执行动作:xxx({...})]
         if (toolCalls.length > 0) {
             const actorNames = [...new Set(toolCalls.map(t => t.actor?.trim()).filter(Boolean))].join("、") || "未标注角色";
-            callbacks?.onToolNotice?.(`${actorNames}正在${toolCalls.map(t => t.name).join("、")}...`);
+            callbacks?.onToolNotice?.(`${actorNames}正在${toolCalls.map(t => resolveToolCallDisplayName(t.name, { appId: "group_chat", sourceEngine: "group_chat" })).join("、")}...`);
 
             let results: Awaited<ReturnType<typeof executeToolCalls>>;
             try {

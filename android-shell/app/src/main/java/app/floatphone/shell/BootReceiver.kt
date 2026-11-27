@@ -18,6 +18,12 @@ class BootReceiver : BroadcastReceiver() {
             runCatching { PushService.start(context) }
             // 锁机会话恢复（elapsed 基准重锚；改系统时间无法绕过剩余计算）
             runCatching { FocusLockService.restore(context) }
+            // 长时段定时锁机：重启后补排/补启动
+            runCatching { FocusLockScheduler.restore(context) }
+            // 勿扰自动恢复：重启后若已过截止时间，立即恢复
+            runCatching { DndAutoRestore.restore(context) }
+            // 专注悬浮胶囊：重启后按最后快照恢复
+            runCatching { FocusOverlayService.restore(context) }
             // 专注倒计时桌面组件：重设 Chronometer 基准（重启后 elapsed 清零）
             runCatching { FocusWidgetProvider.pushAll(context) }
         }

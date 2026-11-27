@@ -62,7 +62,7 @@ const LIFE_BEHAVIOR_PROMPT = [
 
 const LIFE_TOOL_PROMPT = [
     "你可以按需使用以下生活工具。它们只修改生活场景状态，不是手机系统工具。",
-    "如果本轮同时提供了 life_move_location、life_change_schedule 等生活工具，想去找{{user}}、临时换地点或改行程时优先直接调用工具；工具不可用时才用下面的 JSON 字段。不要只在台词里说“我来了”却不移动。",
+    "如果本轮同时提供了「角色前往地点」「调整角色日程」等生活工具，想去找{{user}}、临时换地点或改行程时优先直接调用工具；工具不可用时才用下面的 JSON 字段。不要只在台词里说“我来了”却不移动。",
     "只填对应 JSON 字段；不需要就填 null；每轮最多 1 个非空工具字段。",
     "plan_change：{ \"startAt\": \"ISO-8601\", \"endAt\": \"ISO-8601\", \"title\": \"新的安排\", \"locationId\": \"home\" }。只调整当前虚拟日未来时段，保留前后日程，不覆盖已确认约会。",
     "invitation：{ \"time\": \"ISO-8601\", \"locationId\": \"cafe\", \"activity\": \"活动\", \"reason\": \"简短原因\", \"durationMinutes\": 60 }。这是待确认邀约，{{user}}确认后才同步日程。",

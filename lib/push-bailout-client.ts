@@ -7,10 +7,9 @@ import { bgSetInterval, bgSetTimeout } from "./bg-timer";
 import { BAILOUT_DIRTY_EVENT } from "./bailout-dirty";
 import { BAILOUT_CANCEL_EVENT, type BailoutCancelDetail } from "./bailout-cancel";
 import { buildChatPromptMessages } from "./chat-engine";
-import { resolveLifeCharacterIdForContact } from "./life/life-autonomy";
 import { isCallActiveForSession } from "./call-session-store";
 import { buildProviderRequest, toLlmRequestMessages, type LlmRequestPayload } from "./llm-provider-adapter";
-import { loadChatContacts, loadChatMessages, loadChatSessions, loadFollowUpSchedule, resolveSessionCharacterId as resolveChatSessionCharacterId, type ChatMessage, type ChatSession } from "./chat-storage";
+import { loadChatMessages, loadChatSessions, loadFollowUpSchedule, resolveSessionCharacterId as resolveChatSessionCharacterId, type ChatMessage, type ChatSession } from "./chat-storage";
 import { hasAccountPushSubscription, isShellEnvironment, isWithinPushQuietHours, loadPushQuietHours, peekAccountPushSubscribed } from "./push-client";
 import { isPersonalPushCloudActive, pushJobsFetch } from "./personal-push-cloud";
 import {
@@ -503,7 +502,9 @@ export async function armLifeSceneProactiveBailout(input: {
         if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
         if (isWithinPushQuietHours(input.executeAtMs)) return { ok: false, reason: "触发时间落在推送安静时段内" };
         const session = loadChatSessions().find(item => item.id === input.sessionId);
-        if (!session || session.isGroup || resolveLifeCharacterIdForContact(session.contactId, loadChatContacts()) !== input.characterId) return { ok: false, reason: "找不到对应的单聊会话" };
+        // 会话的 contactId 既可能是 ChatContact.id，也可能是历史数据里的 Character.id。
+        // 这里必须走统一的会话→角色解析，否则生活现场用旧格式会话时会一直报“找不到单聊会话”。
+        if (!session || session.isGroup || resolveChatSessionCharacterId(session) !== input.characterId) return { ok: false, reason: "找不到对应的单聊会话" };
         if (isCallActiveForSession(session.id)) return { ok: false, reason: "会话正在通话中" };
         const promptMessage: ChatMessage = {
             id: "life-autonomy-snapshot-" + Date.now().toString(36),

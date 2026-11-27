@@ -108,6 +108,17 @@ import {
   runCustomAppDeviceFocusPassCheckInSchedule,
   runCustomAppDeviceFocusPassCheckInCancel,
   runCustomAppDeviceLockPendingApply,
+  runCustomAppDeviceForegroundApp,
+  runCustomAppDeviceForegroundTrace,
+  runCustomAppDeviceLockSchedule,
+  runCustomAppDeviceLockScheduleCancel,
+  runCustomAppScheduledFocusConsume,
+  runCustomAppAppLockStart,
+  runCustomAppAppLockStop,
+  runCustomAppAppLockStatus,
+  runCustomAppFocusOverlayUpdate,
+  runCustomAppFocusOverlayStop,
+  runCustomAppFocusOverlayEvents,
   runCustomAppDeviceOverlayStatus,
   runCustomAppDeviceOverlayRequest,
   runCustomAppDeviceScreenshot,
@@ -570,11 +581,22 @@ html, body { min-height: 100%; }
       notify: function(payload){ return request('shell.notify', payload || {}); },
       /* L2 看守锁：应用清单 + 壳侧封锁启停/状态。 */
       appsList: function(){ return request('device.apps.list', {}); },
+      foregroundApp: function(){ return request('device.foreground.get', {}); },
+      foregroundTrace: function(startMs){ return request('device.foreground.trace', { startMs: Number(startMs) || 0 }); },
       lockStart: function(payload){ return request('device.lock.start', payload || {}); },
       lockUpdate: function(payload){ return request('device.lock.update', payload || {}); },
       lockStop: function(){ return request('device.lock.stop', {}); },
       lockStatus: function(){ return request('device.lock.status', {}); },
+      lockSchedule: function(payload){ return request('device.lock.schedule', payload || {}); },
+      lockScheduleCancel: function(id){ return request('device.lock.scheduleCancel', { id: id || '' }); },
+      scheduledFocusConsume: function(){ return request('device.scheduledFocus.consume', {}); },
+      appLockStart: function(payload){ return request('device.appLock.start', payload || {}); },
+      appLockStop: function(){ return request('device.appLock.stop', {}); },
+      appLockStatus: function(){ return request('device.appLock.status', {}); },
       focusWidgetUpdate: function(json){ return request('device.focusWidget.update', { json: json || '{}' }); },
+      focusOverlayUpdate: function(payload){ return request('device.focusOverlay.update', payload || {}); },
+      focusOverlayStop: function(){ return request('device.focusOverlay.stop', {}); },
+      focusOverlayEvents: function(){ return request('device.focusOverlay.events', {}); },
       focusWidgetPin: function(){ return request('device.focusWidget.pin', {}); },
       focusLockTaLine: function(taLine, charName){ return request('device.lock.taLine', { taLine: taLine || '', charName: charName || '' }); },
       adminStatus: function(){ return request('device.admin.status', {}); },
@@ -1982,6 +2004,50 @@ export function CustomAppRunner({
     if (action === "device.apps.list") {
       requirePermission("device.assist");
       return runCustomAppDeviceAppsList(app, record);
+    }
+    if (action === "device.foreground.get") {
+      requirePermission("device.assist");
+      return runCustomAppDeviceForegroundApp(app, record);
+    }
+    if (action === "device.foreground.trace") {
+      requirePermission("device.assist");
+      return runCustomAppDeviceForegroundTrace(app, record);
+    }
+    if (action === "device.lock.schedule") {
+      requirePermission("device.assist");
+      return runCustomAppDeviceLockSchedule(app, record);
+    }
+    if (action === "device.lock.scheduleCancel") {
+      requirePermission("device.assist");
+      return runCustomAppDeviceLockScheduleCancel(app, record);
+    }
+    if (action === "device.scheduledFocus.consume") {
+      requirePermission("device.assist");
+      return runCustomAppScheduledFocusConsume(app, record);
+    }
+    if (action === "device.appLock.start") {
+      requirePermission("device.assist");
+      return runCustomAppAppLockStart(app, record);
+    }
+    if (action === "device.appLock.stop") {
+      requirePermission("device.assist");
+      return runCustomAppAppLockStop(app, record);
+    }
+    if (action === "device.appLock.status") {
+      requirePermission("device.assist");
+      return runCustomAppAppLockStatus(app, record);
+    }
+    if (action === "device.focusOverlay.update") {
+      requirePermission("device.assist");
+      return runCustomAppFocusOverlayUpdate(app, record);
+    }
+    if (action === "device.focusOverlay.stop") {
+      requirePermission("device.assist");
+      return runCustomAppFocusOverlayStop(app, record);
+    }
+    if (action === "device.focusOverlay.events") {
+      requirePermission("device.assist");
+      return runCustomAppFocusOverlayEvents(app, record);
     }
     if (action === "device.lock.start") {
       requirePermission("device.assist");

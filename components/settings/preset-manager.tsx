@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useContext, useCallback, useMemo } from "react";
-import { Plus, Upload, Download, Trash2, RotateCcw, ChevronLeft, ChevronDown, GripVertical, MessageSquare, AlertCircle, Maximize2, Copy, Replace, CheckSquare, Check, Filter, MoreHorizontal } from "lucide-react";
+import { Plus, Upload, Download, Trash2, RotateCcw, ChevronLeft, ChevronDown, GripVertical, MessageSquare, AlertCircle, Maximize2, Copy, Replace, CheckSquare, Check, Filter, MoreHorizontal, ArrowUp, ArrowDown, MoveVertical, Undo2, CopyPlus, FolderInput } from "lucide-react";
 import {
     loadPresets,
     savePresets,
@@ -12,6 +12,14 @@ import {
 } from "@/lib/settings-storage";
 import type { GenerationParameterKey, PresetConfig, Prompt, PromptOrderEntry } from "@/lib/settings-types";
 import { dismissPresetSyncHint, presetSyncStatus, syncBuiltinEntriesIntoAllPresets, syncBuiltinEntriesIntoPreset, type PresetSyncStatus } from "@/lib/preset-sync";
+import {
+    countPromptTransferConflicts,
+    getPromptTransferEntries,
+    movePromptEntriesWithinPreset,
+    transferPromptsBetweenPresets,
+    type PromptTransferConflictStrategy,
+    type PromptTransferMode,
+} from "@/lib/preset-entry-import";
 import {
     GENERATION_PARAMETER_KEYS,
     resolveEnabledGenerationParameters,
@@ -303,11 +311,24 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
     const [expandTarget, setExpandTarget] = useState<{ identifier: string; field: string } | null>(null);
     const [importError, setImportError] = useState<string | null>(null);
     const [customApps, setCustomApps] = useState<InstalledCustomApp[]>([]);
-    // ── 多选模式（右滑选中 / 批量操作 / 多选拖拽） ──
+    // ── 多选模式（点选/范围选/全选筛选结果/批量操作/多选拖拽） ──
     const [selectMode, setSelectMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [selectionPresetId, setSelectionPresetId] = useState<string | null>(null);
     const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false);
+    const [rangeSelectMode, setRangeSelectMode] = useState(false);
+    const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null);
+    // 跨预设复制/移动
+    const [bulkTransferMode, setBulkTransferMode] = useState<PromptTransferMode | null>(null);
+    const [bulkTransferTargetId, setBulkTransferTargetId] = useState<string | null>(null);
+    const [bulkTransferStrategy, setBulkTransferStrategy] = useState<PromptTransferConflictStrategy>("rename");
+    // 批量操作撤销（只保留最近一次）
+    const [undoState, setUndoState] = useState<{ label: string; presets: PresetConfig[] } | null>(null);
+    useEffect(() => {
+        if (!undoState) return;
+        const timer = window.setTimeout(() => setUndoState(null), 12000);
+        return () => window.clearTimeout(timer);
+    }, [undoState]);
 
     // ── 按 App 筛选（高亮/仅显示/仅折叠/同类折叠） ──
     const [appFilterOpen, setAppFilterOpen] = useState(false);
@@ -367,18 +388,20 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
             : [],
         [activePreset, appFilterMode, appFilterTags, expandedCollapseGroups, tagGroups],
     );
-    const visiblePromptIds = useMemo(
-        () => new Set(
-            promptRenderItems
-                .filter((item): item is Extract<PromptRenderItem, { type: "item" }> => item.type === "item")
-                .map(item => item.prompt.identifier),
-        ),
-        [promptRenderItems],
+    // 当前筛选结果（含折叠组里的条目）——「全选」与批量操作以此为准。
+    const selectablePromptIds = useMemo(
+        () => activePreset
+            ? buildDisplayedPrompts(activePreset)
+                .filter(prompt => appFilterTags.size === 0 || matchesSelectedAppTags(prompt, appFilterTags))
+                .map(prompt => prompt.identifier)
+            : [],
+        [activePreset, appFilterTags],
     );
+    const filteredPromptIds = useMemo(() => new Set(selectablePromptIds), [selectablePromptIds]);
     const actionableSelectedIds = useMemo(() => {
         if (!editingId || selectionPresetId !== editingId) return new Set<string>();
-        return new Set([...selectedIds].filter(identifier => visiblePromptIds.has(identifier)));
-    }, [editingId, selectedIds, selectionPresetId, visiblePromptIds]);
+        return new Set([...selectedIds].filter(identifier => filteredPromptIds.has(identifier)));
+    }, [editingId, filteredPromptIds, selectedIds, selectionPresetId]);
 
     useEffect(() => {
         setSelectMode(false);
@@ -386,15 +409,19 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
         setSelectionPresetId(null);
         setConfirmDeleteSelected(false);
         setParameterPickerOpen(false);
+        setRangeSelectMode(false);
+        setSelectionAnchor(null);
+        setBulkTransferMode(null);
+        setBulkTransferTargetId(null);
     }, [editingId, viewMode]);
 
     useEffect(() => {
         setSelectedIds(previous => {
-            const next = new Set([...previous].filter(identifier => visiblePromptIds.has(identifier)));
+            const next = new Set([...previous].filter(identifier => filteredPromptIds.has(identifier)));
             if (next.size === previous.size && [...next].every(identifier => previous.has(identifier))) return previous;
             return next;
         });
-    }, [visiblePromptIds]);
+    }, [filteredPromptIds]);
 
     const containerRef = useRef<HTMLDivElement>(null);
     useEffect(() => {
@@ -788,12 +815,28 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
     // ── 条目左滑操作（微信式：左滑露出「新增/删除」） ──
     const swipe = useSwipeActions();
 
-    // ── 多选模式：右滑选中 / 批量操作 / 多选拖拽 ──
+    // ── 批量操作撤销（快照整份预设，撤销即整体回滚） ──
+    const commitWithUndo = useCallback((label: string, next: PresetConfig[]) => {
+        const snapshot = presets.map(p => JSON.parse(JSON.stringify(p)) as PresetConfig);
+        setUndoState({ label, presets: snapshot });
+        persist(next);
+    }, [persist, presets]);
+
+    const undoLastBulk = useCallback(() => {
+        if (!undoState) return;
+        persist(undoState.presets);
+        setUndoState(null);
+        setSyncNote("已撤销上一步批量操作");
+    }, [persist, undoState]);
+
+    // ── 多选模式：点选 / 范围选 / 批量操作 / 多选拖拽 ──
     const enterSelectMode = useCallback(() => {
         if (!editingId) return;
         setSelectMode(true);
         setSelectionPresetId(editingId);
         setSelectedIds(new Set());
+        setRangeSelectMode(false);
+        setSelectionAnchor(null);
         setEditingPromptId(null); // 收起展开的编辑，避免手势冲突
         swipe.close();
     }, [editingId, swipe]);
@@ -802,6 +845,8 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
         setSelectMode(false);
         setSelectedIds(new Set());
         setSelectionPresetId(null);
+        setRangeSelectMode(false);
+        setSelectionAnchor(null);
         swipe.close();
     }, [swipe]);
 
@@ -814,6 +859,35 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
         });
     }, []);
 
+    // 范围选：把锚点到当前条目之间（含两端）在当前筛选结果里的所有条目加入选中集。
+    const selectRangeTo = useCallback((from: string, to: string) => {
+        const start = selectablePromptIds.indexOf(from);
+        const end = selectablePromptIds.indexOf(to);
+        if (start < 0 || end < 0) return;
+        const [lo, hi] = start <= end ? [start, end] : [end, start];
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            for (let i = lo; i <= hi; i++) next.add(selectablePromptIds[i]);
+            return next;
+        });
+        if (editingId) setSelectionPresetId(editingId);
+    }, [editingId, selectablePromptIds]);
+
+    // 点选：普通点击切换单条；Shift（桌面端）或「范围」模式下按区间加选。
+    const handleSelectTap = useCallback((identifier: string, shiftKey: boolean) => {
+        if (shiftKey && selectionAnchor) {
+            selectRangeTo(selectionAnchor, identifier);
+            return;
+        }
+        if (rangeSelectMode && selectionAnchor && selectionAnchor !== identifier) {
+            selectRangeTo(selectionAnchor, identifier);
+            setSelectionAnchor(identifier);
+            return;
+        }
+        toggleSelect(identifier);
+        setSelectionAnchor(identifier);
+    }, [rangeSelectMode, selectRangeTo, selectionAnchor, toggleSelect]);
+
     // 右滑条目 → 选中并进入多选模式；已处于多选模式时追加选中
     const handleSwipeRightSelect = useCallback((identifier: string) => {
         if (!editingId) return;
@@ -825,14 +899,22 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
             return next;
         });
         setSelectionPresetId(editingId);
+        setSelectionAnchor(identifier);
         swipe.close();
     }, [editingId, selectionPresetId, swipe]);
 
-    const selectAllPrompts = useCallback(() => {
+    // 全选当前筛选结果（折叠组里的条目也会被选中；已全选时再点则清空）
+    const toggleSelectAllFiltered = useCallback(() => {
         if (!editingId) return;
         setSelectionPresetId(editingId);
-        setSelectedIds(new Set(visiblePromptIds));
-    }, [editingId, visiblePromptIds]);
+        const allSelected = selectablePromptIds.length > 0
+            && selectablePromptIds.every(identifier => actionableSelectedIds.has(identifier));
+        setSelectedIds(allSelected ? new Set() : new Set(selectablePromptIds));
+        setSelectionAnchor(null);
+    }, [actionableSelectedIds, editingId, selectablePromptIds]);
+
+    const allFilteredSelected = selectablePromptIds.length > 0
+        && selectablePromptIds.every(identifier => actionableSelectedIds.has(identifier));
 
     const bulkSetEnabled = useCallback((enabled: boolean) => {
         const preset = presets.find(p => p.id === editingId);
@@ -849,24 +931,110 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
     const bulkExportSelected = useCallback(async () => {
         const preset = presets.find(p => p.id === editingId);
         if (!preset || actionableSelectedIds.size === 0) return;
-        const selected = preset.prompts.filter(p => actionableSelectedIds.has(p.identifier));
+        // 按显示顺序导出，保证导出文件里的顺序与用户在列表里看到的一致
+        const selected = getPromptTransferEntries(preset, actionableSelectedIds).map(entry => entry.prompt);
         const { downloadFile } = await import("@/lib/download-utils");
         const blob = new Blob([JSON.stringify(selected, null, 2)], { type: "application/json" });
         await downloadFile(blob, `${preset.name || "preset"}-entries.json`);
     }, [actionableSelectedIds, presets, editingId]);
 
+    // 整组上移/下移一格；选中集内部相对顺序不变。
+    const moveSelectedPrompts = useCallback((direction: -1 | 1) => {
+        const preset = presets.find(p => p.id === editingId);
+        if (!preset) return;
+        const newOrder = movePromptEntriesWithinPreset(preset, actionableSelectedIds, direction);
+        if (!newOrder) return;
+        commitWithUndo(
+            direction < 0 ? "已上移选中条目" : "已下移选中条目",
+            presets.map(p => p.id === preset.id ? { ...p, prompt_order: newOrder, updatedAt: Date.now() } : p),
+        );
+    }, [actionableSelectedIds, commitWithUndo, presets, editingId]);
+
+    // ── 跨预设复制 / 移动 ──
+    const openBulkTransfer = useCallback((mode: PromptTransferMode) => {
+        if (!editingId || actionableSelectedIds.size === 0) return;
+        const targets = presets.filter(p => p.id !== editingId);
+        setBulkTransferMode(mode);
+        setBulkTransferTargetId(targets[0]?.id ?? null);
+        setBulkTransferStrategy("rename");
+        swipe.close();
+    }, [actionableSelectedIds, editingId, presets, swipe]);
+
+    const closeBulkTransfer = useCallback(() => {
+        setBulkTransferMode(null);
+        setBulkTransferTargetId(null);
+    }, []);
+
+    const bulkTransferEntries = useMemo(
+        () => (activePreset && bulkTransferMode)
+            ? getPromptTransferEntries(activePreset, actionableSelectedIds)
+            : [],
+        [actionableSelectedIds, activePreset, bulkTransferMode],
+    );
+    const bulkTransferTarget = useMemo(
+        () => presets.find(p => p.id === bulkTransferTargetId) ?? null,
+        [bulkTransferTargetId, presets],
+    );
+    const bulkTransferConflicts = useMemo(
+        () => bulkTransferTarget
+            ? countPromptTransferConflicts(bulkTransferTarget, bulkTransferEntries)
+            : { total: 0, markers: 0 },
+        [bulkTransferEntries, bulkTransferTarget],
+    );
+
+    const applyBulkTransfer = useCallback(() => {
+        if (!bulkTransferMode || !editingId) return;
+        const source = presets.find(p => p.id === editingId);
+        const target = presets.find(p => p.id === bulkTransferTargetId);
+        if (!source || !target) return;
+        const result = transferPromptsBetweenPresets(
+            source,
+            target,
+            actionableSelectedIds,
+            bulkTransferMode,
+            bulkTransferStrategy,
+        );
+        if (result.transferred === 0) {
+            setSyncNote(result.skipped > 0 ? "同名条目已跳过，没有条目被转移" : "没有可转移的条目");
+            return;
+        }
+        const verb = bulkTransferMode === "copy" ? "复制" : "移动";
+        const skippedNote = result.skipped > 0 ? `，跳过 ${result.skipped} 个同名条目` : "";
+        const renamedNote = result.renamed > 0 ? `（${result.renamed} 条使用新 id）` : "";
+        const label = `已${verb} ${result.transferred} 个条目到「${target.name || "未命名预设"}」`;
+        commitWithUndo(label + skippedNote, presets.map(p => (
+            p.id === source.id ? result.source : p.id === target.id ? result.target : p
+        )));
+        setSyncNote(label + skippedNote + renamedNote);
+        closeBulkTransfer();
+        exitSelectMode();
+    }, [actionableSelectedIds, bulkTransferMode, bulkTransferStrategy, bulkTransferTargetId, closeBulkTransfer, commitWithUndo, exitSelectMode, presets, editingId]);
+
     const deleteSelectedPrompts = useCallback(() => {
         const preset = presets.find(p => p.id === editingId);
         if (!preset || actionableSelectedIds.size === 0) return;
+        const removedCount = actionableSelectedIds.size;
         const newPrompts = preset.prompts.filter(p => !actionableSelectedIds.has(p.identifier));
-        const newOrder = (preset.prompt_order || []).filter(o => !actionableSelectedIds.has(o.identifier));
-        updatePreset(preset.id, { prompts: newPrompts, prompt_order: newOrder });
+        const newOrder = preset.prompt_order
+            ? preset.prompt_order.filter(o => !actionableSelectedIds.has(o.identifier))
+            : undefined;
+        commitWithUndo(
+            `已删除 ${removedCount} 个条目`,
+            presets.map(p => p.id === preset.id
+                ? {
+                    ...p,
+                    prompts: newPrompts,
+                    ...(newOrder ? { prompt_order: newOrder } : {}),
+                    updatedAt: Date.now(),
+                }
+                : p),
+        );
         if (editingPromptId && actionableSelectedIds.has(editingPromptId)) setEditingPromptId(null);
         setSelectedIds(new Set());
         setSelectionPresetId(null);
         setConfirmDeleteSelected(false);
         setSelectMode(false);
-    }, [actionableSelectedIds, presets, editingId, editingPromptId]);
+    }, [actionableSelectedIds, commitWithUndo, presets, editingId, editingPromptId]);
 
     const insertPromptAfter = (preset: PresetConfig, afterIdentifier: string) => {
         const newPrompt = {
@@ -1530,13 +1698,61 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
                                     </div>
 
                                     {selectMode && (
-                                        <div className="multi-select-float-bar">
-                                            <div className="msfb-main">
+                                        <div className="multi-select-float-bar msfb-stacked">
+                                            <div className="msfb-row">
                                                 <span className="msfb-count">已选 {actionableSelectedIds.size} 项</span>
-                                                <button type="button" className="msfb-btn" onClick={selectAllPrompts}>
+                                                <span className="menu-desc ts-11">长按拖动可整组换位</span>
+                                                <button
+                                                    type="button"
+                                                    className="msfb-btn"
+                                                    onClick={toggleSelectAllFiltered}
+                                                    title="全选当前筛选结果（折叠组里的条目也会选中）"
+                                                >
                                                     <CheckSquare size={15} strokeWidth={1.8} />
-                                                    <span>全选可见</span>
+                                                    <span>{allFilteredSelected ? "取消全选" : "全选"}</span>
                                                 </button>
+                                                <button
+                                                    type="button"
+                                                    className="msfb-btn"
+                                                    data-active={rangeSelectMode ? "" : undefined}
+                                                    aria-pressed={rangeSelectMode}
+                                                    onClick={() => {
+                                                        setRangeSelectMode(value => !value);
+                                                        setSelectionAnchor(null);
+                                                    }}
+                                                    title="范围选：先点起点，再点终点，选中区间内所有条目（桌面端也可 Shift+点击）"
+                                                >
+                                                    <MoveVertical size={15} strokeWidth={1.8} />
+                                                    <span>范围</span>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="msfb-btn"
+                                                    onClick={() => moveSelectedPrompts(-1)}
+                                                    disabled={actionableSelectedIds.size === 0}
+                                                    title="选中条目整组上移一格；也可以长按条目拖到指定位置"
+                                                >
+                                                    <ArrowUp size={15} strokeWidth={1.8} />
+                                                    <span>上移</span>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="msfb-btn"
+                                                    onClick={() => moveSelectedPrompts(1)}
+                                                    disabled={actionableSelectedIds.size === 0}
+                                                    title="选中条目整组下移一格；也可以长按条目拖到指定位置"
+                                                >
+                                                    <ArrowDown size={15} strokeWidth={1.8} />
+                                                    <span>下移</span>
+                                                </button>
+                                                <div className="msfb-actions">
+                                                    <button type="button" className="msfb-btn msfb-done" onClick={exitSelectMode}>
+                                                        <Check size={15} strokeWidth={2} />
+                                                        <span>完成</span>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="msfb-row msfb-row-secondary">
                                                 <button type="button" className="msfb-btn" onClick={() => bulkSetEnabled(true)} disabled={actionableSelectedIds.size === 0}>
                                                     <Check size={15} strokeWidth={2} />
                                                     <span>启用</span>
@@ -1545,6 +1761,26 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
                                                     <RotateCcw size={15} strokeWidth={1.8} />
                                                     <span>禁用</span>
                                                 </button>
+                                                <button
+                                                    type="button"
+                                                    className="msfb-btn"
+                                                    onClick={() => openBulkTransfer("copy")}
+                                                    disabled={actionableSelectedIds.size === 0 || presets.length < 2}
+                                                    title="复制选中条目到其他预设（保留顺序/分组/启用状态）"
+                                                >
+                                                    <CopyPlus size={15} strokeWidth={1.8} />
+                                                    <span>复制到</span>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="msfb-btn"
+                                                    onClick={() => openBulkTransfer("move")}
+                                                    disabled={actionableSelectedIds.size === 0 || presets.length < 2}
+                                                    title="移动选中条目到其他预设（从当前预设移除）"
+                                                >
+                                                    <FolderInput size={15} strokeWidth={1.8} />
+                                                    <span>移动到</span>
+                                                </button>
                                                 <button type="button" className="msfb-btn" onClick={() => bulkExportSelected()} disabled={actionableSelectedIds.size === 0}>
                                                     <Download size={15} strokeWidth={1.8} />
                                                     <span>导出</span>
@@ -1552,12 +1788,6 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
                                                 <button type="button" className="msfb-btn msfb-danger" onClick={() => setConfirmDeleteSelected(true)} disabled={actionableSelectedIds.size === 0}>
                                                     <Trash2 size={15} strokeWidth={1.8} />
                                                     <span>删除</span>
-                                                </button>
-                                            </div>
-                                            <div className="msfb-actions">
-                                                <button type="button" className="msfb-btn msfb-done" onClick={exitSelectMode}>
-                                                    <Check size={15} strokeWidth={2} />
-                                                    <span>完成</span>
                                                 </button>
                                             </div>
                                         </div>
@@ -1699,14 +1929,14 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
                                                 >
                                                     {/* Summary Row */}
                                                     <div
-                                                        onClick={() => {
+                                                        onClick={(event) => {
                                                             if (swipe.consumeClickSuppression()) return;
                                                             if (swipe.openId || swipe.swipingId) {
                                                                 swipe.close();
                                                                 return;
                                                             }
                                                             if (selectMode) {
-                                                                toggleSelect(prompt.identifier);
+                                                                handleSelectTap(prompt.identifier, event.shiftKey);
                                                                 return;
                                                             }
                                                             setEditingPromptId(isEditing ? null : prompt.identifier);
@@ -2086,7 +2316,7 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
             {confirmDeleteSelected && editingId && (
                 <ConfirmDialog
                     title="确认批量删除？"
-                    message={`将删除当前可见并已选中的 ${actionableSelectedIds.size} 个条目，删除后无法恢复。是否继续？`}
+                    message={`将删除当前筛选结果里已选中的 ${actionableSelectedIds.size} 个条目，删除后可在提示条上撤销。是否继续？`}
                     icon={AlertCircle}
                     variant="danger"
                     confirmLabel="确认删除"
@@ -2169,6 +2399,118 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
                         </p>
                     </div>
                 </BottomSheet>
+            )}
+
+            {bulkTransferMode && editingId && (() => {
+                const otherPresets = presets.filter(p => p.id !== editingId);
+                const transferCount = bulkTransferEntries.length;
+                const strategies = [
+                    { id: "rename", label: "自动改名", desc: "保留两者；非 Marker 条目生成新 id" },
+                    { id: "overwrite", label: "覆盖同名", desc: "用选中条目替换目标预设里的同名条目" },
+                    { id: "skip", label: "跳过同名", desc: "目标预设里已有的同名条目保持不动" },
+                ] as const;
+                return (
+                    <BottomSheet
+                        title={bulkTransferMode === "copy" ? "复制条目到其他预设" : "移动条目到其他预设"}
+                        onClose={closeBulkTransfer}
+                    >
+                        <div className="flex flex-col gap-4">
+                            <p className="menu-desc ts-12">
+                                已选 {transferCount} 个条目，将按当前顺序插到目标预设末尾，并保留分组标签与启用状态。
+                                {bulkTransferMode === "move" ? " 移动后当前预设里的这些条目会被删除。" : ""}
+                            </p>
+
+                            <div>
+                                <div className="menu-label ts-12 mb-2">目标预设</div>
+                                {otherPresets.length === 0 ? (
+                                    <div className="menu-desc ts-12">没有其他预设，请先新建一个预设再试。</div>
+                                ) : (
+                                    <div className="flex flex-col gap-2">
+                                        {otherPresets.map(targetOption => {
+                                            const conflicts = countPromptTransferConflicts(targetOption, bulkTransferEntries);
+                                            const active = bulkTransferTargetId === targetOption.id;
+                                            return (
+                                                <button
+                                                    key={targetOption.id}
+                                                    type="button"
+                                                    onClick={() => setBulkTransferTargetId(targetOption.id)}
+                                                    className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-left transition-all active:scale-[0.98] ${active ? "border-[var(--c-icon-active)] bg-[var(--c-icon-active)]/5" : "border-black/10 bg-white hover:bg-gray-50"}`}
+                                                >
+                                                    <div className="flex min-w-0 flex-col gap-0.5">
+                                                        <span className="truncate text-xs font-bold text-gray-800">
+                                                            {targetOption.name || "未命名预设"}
+                                                            {targetOption.builtIn ? " · 内置" : ""}
+                                                        </span>
+                                                        <span className="menu-desc ts-11">
+                                                            {targetOption.prompts?.length || 0} 个条目
+                                                            {conflicts.total > 0 ? ` · 同名 ${conflicts.total} 个` : " · 无同名"}
+                                                        </span>
+                                                    </div>
+                                                    <div className={`h-4 w-4 shrink-0 rounded-full border-2 ${active ? "border-[var(--c-icon-active)] bg-[var(--c-icon-active)]" : "border-gray-300"}`} />
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+
+                            {bulkTransferTarget && bulkTransferConflicts.total > 0 && (
+                                <div className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3">
+                                    <div className="text-[11px] leading-5 text-amber-900">
+                                        目标预设已有 {bulkTransferConflicts.total} 个同名条目
+                                        {bulkTransferConflicts.markers > 0 ? `（其中 ${bulkTransferConflicts.markers} 个 Marker）` : ""}
+                                        ，请选择处理方式。
+                                    </div>
+                                    <div className="flex flex-col gap-2">
+                                        {strategies.map(option => {
+                                            const active = bulkTransferStrategy === option.id;
+                                            return (
+                                                <button
+                                                    key={option.id}
+                                                    type="button"
+                                                    onClick={() => setBulkTransferStrategy(option.id)}
+                                                    className={`flex items-center justify-between gap-3 rounded-xl border px-3 py-2 text-left transition-all active:scale-[0.98] ${active ? "border-[var(--c-icon-active)] bg-white" : "border-black/10 bg-white/70 hover:bg-white"}`}
+                                                >
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <span className="text-xs font-bold text-gray-800">{option.label}</span>
+                                                        <span className="menu-desc ts-11">{option.desc}</span>
+                                                    </div>
+                                                    <div className={`h-4 w-4 shrink-0 rounded-full border-2 ${active ? "border-[var(--c-icon-active)] bg-[var(--c-icon-active)]" : "border-gray-300"}`} />
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                    <div className="menu-desc ts-11">
+                                        Marker 条目改名会失去标记作用：选「自动改名」时，同名的 Marker 会按跳过处理。
+                                    </div>
+                                </div>
+                            )}
+
+                            <button
+                                type="button"
+                                className="ui-btn ui-btn-primary w-full"
+                                disabled={!bulkTransferTarget || transferCount === 0}
+                                onClick={applyBulkTransfer}
+                            >
+                                {bulkTransferMode === "copy" ? `复制 ${transferCount} 条` : `移动 ${transferCount} 条`}
+                            </button>
+                        </div>
+                    </BottomSheet>
+                );
+            })()}
+
+            {undoState && (
+                <div className="fixed bottom-24 left-1/2 z-[9999] flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center gap-3 rounded-full bg-black/80 px-4 py-2 text-xs text-white shadow-lg">
+                    <span className="truncate">{undoState.label}</span>
+                    <button
+                        type="button"
+                        onClick={undoLastBulk}
+                        className="inline-flex shrink-0 items-center gap-1 rounded-full bg-white/15 px-2.5 py-1 font-bold text-white active:scale-95"
+                    >
+                        <Undo2 size={13} strokeWidth={2} />
+                        撤销
+                    </button>
+                </div>
             )}
 
             {expandTarget && editingId && (() => {

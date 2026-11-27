@@ -17,7 +17,7 @@ import { isKnownStickerLabel } from "@/lib/sticker-data";
 import { translateReasoningText } from "@/lib/reasoning-translate";
 import { MessageBubble, MediaDetailModal, prewarmStickerCache, BilingualTextBlock, isStandaloneHtmlPreviewContent, normalizeTextBubbleContent } from "./message-bubble";
 import { GeneratedImageErrorDialog } from "./generated-image-error-dialog";
-import { PhotoInputModal, TextPhotoModal, VoiceRecordModal, RedPacketModal, LocationInputModal, SystemInstructionModal } from "./rich-input-modals";
+import { PhotoInputModal, TextPhotoModal, VoiceRecordModal, RedPacketModal, LocationInputModal, SystemInstructionModal, FileInputModal } from "./rich-input-modals";
 import { EmojiPanel, StickerPanel } from "./emoji-panel";
 import { StickerSearchSuggest } from "./sticker-search-suggest";
 import { StateValuesPanel } from "./state-values-panel";
@@ -566,7 +566,7 @@ type PendingMessageJump = {
 };
 
 const TRANSIENT_MESSAGE_PREFIX = "ui-transient-";
-type RichModalKind = "photo" | "text_photo" | "red_packet" | "transfer" | "location" | "transfer_target" | "voice_msg" | "gift" | "system_instruction";
+type RichModalKind = "photo" | "text_photo" | "red_packet" | "transfer" | "location" | "transfer_target" | "voice_msg" | "gift" | "system_instruction" | "file";
 type ChatTextInputHandle = {
     appendText: (text: string, options?: { focus?: boolean }) => void;
     clear: () => void;
@@ -816,6 +816,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     const plusMenuItems = [
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>, label: "照片墙", onClick: () => onOpenRichModal("photo") },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><line x1="7" y1="8" x2="17" y2="8" /><line x1="7" y1="12" x2="14" y2="12" /><line x1="7" y1="16" x2="11" y2="16" /></svg>, label: "文字图片", onClick: () => onOpenRichModal("text_photo") },
+        { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>, label: "文件", onClick: () => onOpenRichModal("file") },
         { icon: <AlertCircle size={22} strokeWidth={1.5} color="var(--c-text)" />, label: "系统指令", onClick: () => onOpenRichModal("system_instruction") },
         { icon: <Clapperboard size={22} strokeWidth={1.5} color={theaterMode ? "var(--c-icon-active)" : "var(--c-text)"} />, label: "番外指令模式", active: theaterMode, onClick: onToggleTheaterMode },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 7l-7 5 7 5V7z" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" /></svg>, label: "视频通话", onClick: onStartVideoCall },
@@ -824,7 +825,6 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><text x="12" y="16" textAnchor="middle" fontSize="12" fill="var(--c-text)" stroke="none">¥</text></svg>, label: "转账", onClick: () => onOpenRichModal(isGroup ? "transfer_target" : "transfer") },
         { icon: <Gift size={22} strokeWidth={1.5} color="var(--c-text)" />, label: "礼物", onClick: () => onOpenRichModal("gift") },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>, label: "位置", onClick: () => onOpenRichModal("location") },
-        { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="22" /><line x1="8" y1="22" x2="16" y2="22" /></svg>, label: "语音条", onClick: () => onOpenRichModal("voice_msg") },
         ...customPlusActions.map(action => ({
             icon: action.appIconDataUrl
                 ? <span className="chat-plus-custom-app-icon" style={{ backgroundImage: `url(${action.appIconDataUrl})` }} aria-hidden="true" />
@@ -991,6 +991,20 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                         <path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0Z" />
                         <circle cx="12" cy="10" r="3" />
+                    </svg>
+                </button>
+                <button
+                    onClick={() => onOpenRichModal("voice_msg")}
+                    disabled={inputLocked}
+                    className="ui-bare-btn text-[var(--c-text)]"
+                    style={inputLocked ? { opacity: 0.35 } : undefined}
+                    aria-label="语音条"
+                    title="语音条"
+                >
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                        <line x1="12" y1="19" x2="12" y2="22" />
                     </svg>
                 </button>
                 <button onClick={onToggleEmojiPanel} disabled={inputLocked} className="ui-bare-btn text-[var(--c-text)]" style={inputLocked ? { opacity: 0.35 } : undefined}>
@@ -7232,9 +7246,17 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
             {richModal === "voice_msg" && (
                 <VoiceRecordModal
                     characterId={resolveSessionCharacterId(session) || ""}
-                    onSend={(text, audioDataUrl) => {
+                    onSend={async (text, audioDataUrl) => {
                         setRichModal(null);
-                        sendRichMessage("audio", { label: text }, "", audioDataUrl);
+                        if (!audioDataUrl) { sendRichMessage("audio", { label: text }); return; }
+                        try {
+                            const comma = audioDataUrl.indexOf(",");
+                            const mime = audioDataUrl.slice(5, audioDataUrl.indexOf(";")) || "audio/webm";
+                            const stored = await storeMediaBase64(audioDataUrl.slice(comma + 1), mime);
+                            sendRichMessage("audio", { label: text }, "", stored.ref);
+                        } catch {
+                            sendRichMessage("audio", { label: text }, "", audioDataUrl);
+                        }
                     }}
                     onClose={() => setRichModal(null)}
                 />
@@ -7277,6 +7299,31 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
                         }
                     }}
                     onClose={() => setRichModal(null)}
+                />
+            )}
+            {richModal === "file" && (
+                <FileInputModal
+                    onClose={() => setRichModal(null)}
+                    onSend={async (fileName, mime, dataUrl, extra) => {
+                        setRichModal(null);
+                        try {
+                            const comma = dataUrl.indexOf(",");
+                            const base64 = dataUrl.slice(comma + 1);
+                            const stored = await storeMediaBase64(base64, mime);
+                            const kind = (mime.startsWith("image/") ? "image" : mime.startsWith("audio/") ? "audio" : mime.startsWith("video/") ? "video" : "file") as "image" | "audio" | "video" | "file";
+                            const sent = sendRichMessage("media_file", {
+                                fileName,
+                                fileType: kind,
+                                label: fileName,
+                                fileText: extra.text,
+                                fileTextTruncated: extra.truncated,
+                                fileSize: extra.size,
+                            }, `[文件] ${fileName}`, stored.ref);
+                            if (sent) showChatToast(`已发送文件：${fileName}`);
+                        } catch (error) {
+                            showChatToast("文件保存失败：" + (error instanceof Error ? error.message : "请重试"));
+                        }
+                    }}
                 />
             )}
             {richModal === "gift" && (

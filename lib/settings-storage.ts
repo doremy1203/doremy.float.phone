@@ -3,6 +3,7 @@ import type {
     PresetConfig,
     WorldBookConfig,
     WorldBookEntry,
+    WorldBookFolder,
     RegexConfig,
     RegexRule,
     ApiConfig,
@@ -37,6 +38,7 @@ import {
     readPresetsCache, writePresetsCache,
     writePresetsCacheAsync,
     readWorldBooksCache, writeWorldBooksCache,
+    readWorldBookFoldersCache, writeWorldBookFoldersCache,
     readRegexesCache, writeRegexesCache,
     hydrateSettingsDb,
 } from "./settings-db";
@@ -507,7 +509,27 @@ export function saveWorldBooks(books: WorldBookConfig[]): void {
     writeWorldBooksCache(books);
 }
 
-export function createWorldBook(name: string): WorldBookConfig {
+export function loadWorldBookFolders(): WorldBookFolder[] {
+    if (typeof window === "undefined") return [];
+    return [...readWorldBookFoldersCache()];
+}
+
+export function saveWorldBookFolders(folders: WorldBookFolder[]): void {
+    if (typeof window === "undefined") return;
+    writeWorldBookFoldersCache(folders);
+}
+
+export function createWorldBookFolder(name: string): WorldBookFolder {
+    const now = getNow();
+    return {
+        id: generateId("wb-folder"),
+        name,
+        createdAt: now,
+        updatedAt: now,
+    };
+}
+
+export function createWorldBook(name: string, folderId?: string): WorldBookConfig {
     const now = getNow();
     return {
         id: generateId("wb"),
@@ -515,6 +537,7 @@ export function createWorldBook(name: string): WorldBookConfig {
         description: "",
         createdAt: now,
         updatedAt: now,
+        ...(folderId ? { folderId } : {}),
         entries: []
     };
 }
@@ -555,6 +578,10 @@ export function parseWorldBookFromJson(text: string): WorldBookConfig | null {
         if (isUnsupportedWorldBookFormat(obj)) throw new Error(UNSUPPORTED_IMPORT_FORMAT);
 
         const wb = createWorldBook(obj.name || "导入的世界书");
+        // 导出时 folderId 随整个对象写出；旧 JSON 没有该字段 => 根目录。
+        if (typeof obj.folderId === "string" && obj.folderId.trim()) {
+            wb.folderId = obj.folderId.trim();
+        }
         if (Array.isArray(obj.entries)) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const parsedEntries = obj.entries.map((e: any) => parseWorldBookEntry(e));

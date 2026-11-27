@@ -313,7 +313,7 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
         return <InlineMomentsSettings onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowMomentsSettings(false); }} />;
     }
     if (showWalletPanel) {
-        return <WalletPanel onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowWalletPanel(false); }} />;
+        return <WalletPanel onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowWalletPanel(false); }} onNavigateTab={(tab) => { setShowWalletPanel(false); window.dispatchEvent(new CustomEvent("mascot-navigate", { detail: { app: "wallet", initialTab: tab } })); }} />;
     }
 
     return (

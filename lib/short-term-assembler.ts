@@ -21,6 +21,7 @@ import { loadVirtualLifeState } from "./life/life-storage";
 import { loadPhotoWallState } from "./photo-wall-storage";
 import { loadMemoTimelineProjectionEntries } from "./memo-archive-storage";
 import { asPlayerRecordSubject } from "./life/life-timeline-subject";
+import { canSeeLifeSceneMessage } from "./life/life-scene-visibility";
 import type { DiaryEntry, DiaryEntryBlock } from "./diary-entry-types";
 import { loadNoteWallProjectionEntries } from "./notewall-memory";
 import { loadXiaohongshuProjectionEntries } from "./xiaohongshu-memory";
@@ -56,7 +57,7 @@ function formatPhotoDirectiveForPrompt(msg: ChatMessage): string {
 export type NativeTimelineEntry = {
     id: string;
     sourceApp: "chat" | "moments" | "story" | "vn" | "map" | "game" | "diary" | "xiaohongshu" | "interview_magazine" | "cocreate" | "checkphone" | "custom_app" | "photo_wall" | "memo" | "life" | "phone_widget" | "watch" | "global_watch";
-    sourceDetail?: "direct" | "group" | "system" | "story" | "chat_offline" | "game" | "diary_entry" | "notewall" | "xiaohongshu" | "black_market_theater" | "interview_issue" | "interview_shared_issue" | "cocreate_project" | "checkphone" | "custom_app_event" | "life_shared_event" | "photo_wall_creation"; // chat sub-type: 1:1 vs group chat vs system note
+    sourceDetail?: "direct" | "group" | "system" | "story" | "chat_offline" | "game" | "diary_entry" | "notewall" | "xiaohongshu" | "black_market_theater" | "interview_issue" | "interview_shared_issue" | "cocreate_project" | "checkphone" | "custom_app_event" | "life_shared_event" | "life_scene_message" | "photo_wall_creation" | "anonymous_qa"; // chat sub-type: 1:1 vs group chat vs system note
     authorType?: "user" | "character" | "npc"; // who authored this entry
     postAuthorType?: "user" | "character"; // for moments: who owns the parent post
     sessionId?: string;
@@ -68,6 +69,8 @@ export type NativeTimelineEntry = {
     customAppId?: string;
     customAppName?: string;
     customAppLabel?: string;
+    /** 生活现场房间 ID；用于调试和重复消除，不参与聊天室归属。 */
+    lifeSceneId?: string;
     memoNoteId?: string;
 };
 
@@ -300,9 +303,9 @@ export function loadNativeTimeline(
                         sourceApp: "chat",
                         // 内部备注/头像等事件明确进入私聊短期记忆；普通手动系统指令
                         // 仍保留 system 分类，避免改变已有记忆行为。
-                        sourceDetail: msg.mediaData?.shortTermMemoryEvent ? "direct" : "system",
+                        sourceDetail: msg.mediaData?.shortTermMemorySource === "anonymous_qa" ? "anonymous_qa" : msg.mediaData?.shortTermMemoryEvent ? "direct" : "system",
                         timestamp: msg.createdAt,
-                        content: `${msgLabel} ${msg.mediaData?.shortTermMemoryEvent ? "[私聊事件]" : "[系统指令]"} ${instructionContent}`,
+                        content: `${msgLabel} ${msg.mediaData?.shortTermMemorySource === "anonymous_qa" ? "[匿名提问箱]" : msg.mediaData?.shortTermMemoryEvent ? "[私聊事件]" : "[系统指令]"} ${instructionContent}`,
                     });
                     continue;
                 }
@@ -832,6 +835,40 @@ export function loadNativeTimeline(
     // Native chat, moments and diary content already has dedicated projections above.
     // Only add Life-specific events here to avoid duplicate memory injection.
     const lifeState = loadVirtualLifeState();
+    const lifeSceneById = new Map(lifeState.scenes.map(scene => [scene.id, scene]));
+    const sceneMessageIds = new Set(lifeState.sceneMessages.map(message => message.id));
+    // 生活现场是限时群聊：每条现场消息按发送时的 visibleTo 快照投影。
+    // 同场景在场角色都拿到同一条消息；不在场/加入之前的角色不会看到。
+    for (const message of lifeState.sceneMessages) {
+        const scene = lifeSceneById.get(message.sceneId);
+        if (!scene || !canSeeLifeSceneMessage(message, scene, characterId)) continue;
+        if (options?.afterTimestamp && message.createdAt <= options.afterTimestamp) continue;
+        const action = message.action?.trim() ?? "";
+        const dialogue = message.dialogue?.trim() ?? "";
+        if (!action && !dialogue && !message.imageId) continue;
+        const speaker = message.role === "player"
+            ? "{{user}}"
+            : (message.speakerName || (message.role === "system" ? "场景旁白" : "角色"));
+        const speech = action && dialogue
+            ? `（动作：${action}）说：“${dialogue}”`
+            : action
+                ? `（动作：${action}）`
+                : dialogue
+                    ? `说：“${dialogue}”`
+                    : "分享了场景图片";
+        entries.push({
+            id: "life_scene_message:" + message.id,
+            sourceApp: "life",
+            sourceDetail: "life_scene_message",
+            authorType: message.role === "player" ? "user" : message.role === "character" ? "character" : undefined,
+            timestamp: message.createdAt,
+            lifeSceneId: message.sceneId,
+            content: formatStoredPromptEventContent(
+                renderUserNameMacro(`[生活现场·${scene.locationName}] ${speaker}${speech}`, userName),
+                { label: "生活现场", timestamp: message.createdAt, timeAware, timestampOptions },
+            ),
+        });
+    }
     // Historical shared experiences remain visible even if the user temporarily disables
     // the Life engine; disabling the engine pauses new simulation, not stored memories.
     for (const fact of lifeState.memories ?? []) {
@@ -856,6 +893,9 @@ export function loadNativeTimeline(
             lifeState.scenes
                 .filter(scene => scene.participants.some(participant =>
                     participant.ownerType === "character" && participant.ownerId === characterId
+                    // 只有“此刻仍在这个房间”的角色才能读场景级时间线；
+                    // 曾经参与过的旧场景不能变成持续监听玩家行踪的通道。
+                    && participant.activity !== "离开"
                 ))
                 .map(scene => scene.id)
         );
@@ -867,6 +907,8 @@ export function loadNativeTimeline(
         for (const lifeEntry of lifeState.timeline ?? []) {
             if (options?.afterTimestamp && (lifeEntry.recordedAt ?? lifeEntry.occurredAt) <= options.afterTimestamp) continue;
             if (!["location", "scene", "action", "dialogue", "schedule", "tool", "system"].includes(lifeEntry.category)) continue;
+            // sceneMessages 已是消息原文来源；timeline 中对应的对话/行动/旁白镜像跳过。
+            if (lifeEntry.sourceId && sceneMessageIds.has(lifeEntry.sourceId)) continue;
             const belongsToCharacter = lifeEntry.actorId === characterId
                 || (!!lifeEntry.sceneId && characterSceneIds.has(lifeEntry.sceneId))
                 || (!!lifeEntry.sourceId && characterInvitationIds.has(lifeEntry.sourceId));
@@ -916,7 +958,7 @@ export function loadNativeTimeline(
 }
 
 // Fixed order — lower = further from LLM output (appears higher in prompt)
-const FEATURE_ORDER: Record<string, number> = { map: 0, game: 0.5, moments: 1, xiaohongshu: 1.5, checkphone: 1.7, story: 2, vn: 2, theater: 2.2, interview: 2.35, cocreate: 2.4, diary_entry: 2.45, notewall: 2.5, custom_app: 2.6, group_chat: 3, chat: 4 };
+const FEATURE_ORDER: Record<string, number> = { map: 0, game: 0.5, moments: 1, xiaohongshu: 1.5, checkphone: 1.7, story: 2, vn: 2, theater: 2.2, interview: 2.35, cocreate: 2.4, diary_entry: 2.45, notewall: 2.5, life_scene: 2.55, custom_app: 2.6, group_chat: 3, anonymous_qa: 3.8, chat: 4 };
 // First-class app timelines share the custom-app prompt block and ordering.
 const CUSTOM_APP_TIMELINE_SOURCES = new Set<string>([
     "custom_app", "photo_wall", "watch", "phone_widget", "life",
@@ -1026,6 +1068,8 @@ export function filterTimelineByAllowedSources(
     return entries.filter(entry => {
         const source = entry.sourceApp;
         if (source === "chat") {
+            // 匿名提问箱是独立的短期事件来源，不跟随普通聊天记录开关一起隐藏。
+            if (entry.sourceDetail === "anonymous_qa") return true;
             if (entry.sourceDetail === "group") return rules.group_chat !== false;
             return rules.chat !== false;
         }
@@ -1063,6 +1107,8 @@ export function prepareShortTermContext(
         excludeOfflineSessionId?: string;
         includeNativeToolHistory?: boolean;
         includeDirectChatEntries?: boolean;
+        /** false 时不读取任何 APP 时间线，仅保留本次显式传入的会话消息。 */
+        includeTimeline?: boolean;
         /** 只读取该时间之后的跨应用最近事件；剧情分线用它隔离创建前的短期记忆。 */
         afterTimestamp?: string;
         /** false 时仅保留剧情 APP 时间线，不读取其他 APP 的相关事件。 */
@@ -1080,7 +1126,7 @@ export function prepareShortTermContext(
     unifiedRecentItems: UnifiedRecentItem[];
 } {
     const timeAware = resolvePromptTimeAware(options?.timeAware);
-    let timeline = loadNativeTimeline(characterId, {
+    let timeline: NativeTimelineEntry[] = options?.includeTimeline === false ? [] : loadNativeTimeline(characterId, {
         userName: options?.userName,
         appId: appId as import("./settings-types").ContentAppId,
         excludeOfflineSessionId: options?.excludeOfflineSessionId,
@@ -1098,6 +1144,9 @@ export function prepareShortTermContext(
     }
     const memConfig = loadMemoryConfig();
     timeline = filterTimelineByAllowedSources(timeline, memConfig.shortTermAllowedSources);
+    // 生活共同经历摘要不再作为独立 prompt 块；现场消息已经按 visibleTo 进入时间线。
+    // 记忆库 UI 仍然通过 loadNativeTimeline 读取这部分数据。
+    timeline = timeline.filter(entry => entry.sourceDetail !== "life_shared_event");
     timeline = limitTimelineForApp(timeline, appId, memConfig.shortTermAppLimits as Record<string, unknown> | undefined);
 
     // Activation context: full timeline for keyword matching (not truncated)
@@ -1189,7 +1238,12 @@ export function prepareShortTermContext(
         raw.push({ tag: "recent_cocreate", order: FEATURE_ORDER.cocreate, entries: cocreateEntries });
     }
 
-    const customAppEntries = timeline.filter(e => CUSTOM_APP_TIMELINE_SOURCES.has(e.sourceApp));
+    const lifeSceneEntries = timeline.filter(e => e.sourceDetail === "life_scene_message");
+    if (lifeSceneEntries.length > 0) {
+        raw.push({ tag: "recent_life_scene", order: FEATURE_ORDER.life_scene, entries: lifeSceneEntries });
+    }
+
+    const customAppEntries = timeline.filter(e => CUSTOM_APP_TIMELINE_SOURCES.has(e.sourceApp) && e.sourceDetail !== "life_scene_message");
     if (customAppEntries.length > 0) {
         raw.push({ tag: "recent_custom_app", order: FEATURE_ORDER.custom_app, entries: customAppEntries });
     }
@@ -1201,6 +1255,12 @@ export function prepareShortTermContext(
     );
     if (groupChatEntries.length > 0) {
         raw.push({ tag: "recent_group_chat", order: FEATURE_ORDER.group_chat, entries: groupChatEntries });
+    }
+
+    // Anonymous Q&A events remain individual timeline records, but use their own source tag.
+    const anonymousQaEntries = timeline.filter(e => e.sourceApp === "chat" && e.sourceDetail === "anonymous_qa");
+    if (anonymousQaEntries.length > 0) {
+        raw.push({ tag: "recent_anonymous_qa", order: FEATURE_ORDER.anonymous_qa, entries: anonymousQaEntries });
     }
 
     // Direct chat from timeline — skipped only when the current history already comes from chat/group_chat.
@@ -1371,6 +1431,7 @@ export function prepareGroupShortTermContext(
             promptTimestampOptions: options?.promptTimestampOptions,
         });
         timeline = filterTimelineByAllowedSources(timeline, allowed);
+        timeline = timeline.filter(entry => entry.sourceDetail !== "life_shared_event");
         timeline = limitTimelineForApp(timeline, "group_chat", memConfig.shortTermAppLimits as Record<string, unknown> | undefined);
         for (const entry of timeline) {
             if (entry.sourceApp === "chat" && entry.sourceDetail === "group" && entry.groupSessionId === options?.excludeGroupSessionId) {
@@ -1455,7 +1516,12 @@ export function prepareGroupShortTermContext(
         raw.push({ tag: "recent_cocreate", order: FEATURE_ORDER.cocreate, entries: cocreateEntries });
     }
 
-    const customAppEntries = timeline.filter(e => CUSTOM_APP_TIMELINE_SOURCES.has(e.sourceApp));
+    const lifeSceneEntries = timeline.filter(e => e.sourceDetail === "life_scene_message");
+    if (lifeSceneEntries.length > 0) {
+        raw.push({ tag: "recent_life_scene", order: FEATURE_ORDER.life_scene, entries: lifeSceneEntries });
+    }
+
+    const customAppEntries = timeline.filter(e => CUSTOM_APP_TIMELINE_SOURCES.has(e.sourceApp) && e.sourceDetail !== "life_scene_message");
     if (customAppEntries.length > 0) {
         raw.push({ tag: "recent_custom_app", order: FEATURE_ORDER.custom_app, entries: customAppEntries });
     }
@@ -1463,6 +1529,11 @@ export function prepareGroupShortTermContext(
     const groupChatEntries = timeline.filter(e => e.sourceApp === "chat" && e.sourceDetail === "group");
     if (groupChatEntries.length > 0) {
         raw.push({ tag: "recent_group_chat", order: FEATURE_ORDER.group_chat, entries: groupChatEntries });
+    }
+
+    const anonymousQaEntries = timeline.filter(e => e.sourceApp === "chat" && e.sourceDetail === "anonymous_qa");
+    if (anonymousQaEntries.length > 0) {
+        raw.push({ tag: "recent_anonymous_qa", order: FEATURE_ORDER.anonymous_qa, entries: anonymousQaEntries });
     }
 
     const directChatEntries = timeline.filter(e => e.sourceApp === "chat" && e.sourceDetail === "direct");
@@ -1557,6 +1628,7 @@ export function prepareGroupShortTermContext(
                                                         entry.sourceApp === "story" && entry.sourceDetail === "black_market_theater" ? "recent_theater" :
                                                             entry.sourceApp === "diary" && entry.sourceDetail === "diary_entry" ? "recent_diary" :
                                                                 entry.sourceApp === "diary" && entry.sourceDetail === "notewall" ? "recent_notewall" :
+                                                                    entry.sourceApp === "chat" && entry.sourceDetail === "anonymous_qa" ? "recent_anonymous_qa" :
                                                                     entry.sourceApp === "chat" ? "recent_chat" : "recent_events"
                 ),
                 text: entry.content,

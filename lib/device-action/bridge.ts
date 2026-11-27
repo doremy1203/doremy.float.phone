@@ -17,7 +17,7 @@ type DeviceActionBridgeLike = {
   isTorchOn?: () => boolean;
   setVolume?: (stream: string, action: string, level: number) => string;
   setBrightness?: (level: number) => string;
-  setDnd?: (on: boolean) => string;
+  setDnd?: (on: boolean, untilEpochMs?: number) => string;
   openApp?: (packageName: string) => string;
   findPackageByLabel?: (label: string) => string;
   setAlarm?: (hour: number, minute: number, message: string) => string;
@@ -26,14 +26,27 @@ type DeviceActionBridgeLike = {
   openWebUrl?: (url: string) => string;
   hasUsageStatsAccess?: () => boolean;
   listInstalledApps?: () => string;
+  foregroundApp?: () => string;
+  foregroundPackagesSince?: (startMs: number) => string;
   focusLockStart?: (packagesJson: string, untilEpochMs: number) => string;
   focusLockUpdate?: (packagesJson: string, untilEpochMs: number) => string;
   focusLockStop?: () => string;
   focusLockStatus?: () => string;
+  focusLockSchedule?: (json: string) => string;
+  focusLockScheduleCancel?: (id: string) => boolean;
+  consumeScheduledFocus?: () => string;
+  appLockStart?: (json: string) => string;
+  appLockStop?: () => string;
+  appLockTemporaryPass?: (minutes: number) => string;
+  appLockStatus?: () => string;
+  appLockReveal?: () => string;
   scheduleFocusPassCheckIn?: (json: string) => string;
   cancelFocusPassCheckIn?: (passId: string) => boolean;
   consumePendingFocusPassCheckIn?: () => string;
   focusWidgetUpdate?: (json: string) => string;
+  focusOverlayUpdate?: (json: string) => string;
+  focusOverlayStop?: () => string;
+  focusOverlayConsumeEvents?: () => string;
   focusWidgetPin?: () => string;
   focusWidgetRemove?: () => string;
   focusLockTaLine?: (taLine: string, charName: string) => string;
@@ -125,9 +138,9 @@ export function setBrightness(level: number): DeviceActionResult {
 }
 
 /** 开关勿扰模式（需要勿扰访问权限）。 */
-export function setDnd(on: boolean): DeviceActionResult {
+export function setDnd(on: boolean, untilEpochMs = 0): DeviceActionResult {
   try {
-    const raw = bridge()?.setDnd?.(on);
+    const raw = bridge()?.setDnd?.(on, untilEpochMs);
     if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持勿扰模式" };
     return parseResult(raw, "勿扰模式未能切换");
   } catch {
@@ -145,6 +158,84 @@ export function listInstalledApps(): { ok: boolean; apps: Array<{ package: strin
     return { ok: false, apps: [], reason: (parsed && parsed.reason) || "无法列出应用" };
   } catch {
     return { ok: false, apps: [], reason: "应用列表调用失败" };
+  }
+}
+
+/** 当前前台应用；用于判断专注中离开的是不是白名单应用。 */
+export function foregroundApp(): { ok: boolean; package?: string; label?: string; reason?: string; needPermission?: string } {
+  try {
+    const raw = bridge()?.foregroundApp?.();
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持读取前台应用" };
+    const parsed = JSON.parse(raw) as { ok?: boolean; package?: string; label?: string; reason?: string; needPermission?: string };
+    if (parsed && parsed.ok === true) return { ok: true, package: parsed.package, label: parsed.label };
+    return { ok: false, reason: parsed?.reason || "读取前台应用失败", needPermission: parsed?.needPermission };
+  } catch {
+    return { ok: false, reason: "读取前台应用失败" };
+  }
+}
+
+/** 离开专注期间依次打开过的前台应用（白名单豁免用）。 */
+export function foregroundPackagesSince(startMs: number): { ok: boolean; packages: Array<{ package: string; label?: string; at?: number }>; reason?: string; needPermission?: string } {
+  try {
+    const raw = bridge()?.foregroundPackagesSince?.(startMs);
+    if (raw === undefined) return { ok: false, packages: [], reason: "当前 App 版本不支持读取应用轨迹" };
+    const parsed = JSON.parse(raw) as { ok?: boolean; packages?: Array<{ package: string; label?: string; at?: number }>; reason?: string; needPermission?: string };
+    if (parsed && parsed.ok === true) return { ok: true, packages: parsed.packages || [] };
+    return { ok: false, packages: [], reason: parsed?.reason || "读取应用轨迹失败", needPermission: parsed?.needPermission };
+  } catch {
+    return { ok: false, packages: [], reason: "读取应用轨迹失败" };
+  }
+}
+
+/** 角色小手段：启动单应用密码锁。 */
+export function appLockStart(payload: Record<string, unknown>): DeviceActionResult {
+  try {
+    const raw = bridge()?.appLockStart?.(JSON.stringify(payload));
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持角色小手段" };
+    return parseResult(raw, "小手段启动失败");
+  } catch {
+    return { ok: false, reason: "小手段启动失败" };
+  }
+}
+
+export function appLockStop(): DeviceActionResult {
+  try {
+    const raw = bridge()?.appLockStop?.();
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持角色小手段" };
+    return parseResult(raw, "小手段停止失败");
+  } catch {
+    return { ok: false, reason: "小手段停止失败" };
+  }
+}
+
+export function appLockTemporaryPass(minutes: number): DeviceActionResult {
+  try {
+    const raw = bridge()?.appLockTemporaryPass?.(Math.max(1, Math.min(5, Math.round(minutes))));
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持临时通行证" };
+    return parseResult(raw, "临时通行证发放失败");
+  } catch {
+    return { ok: false, reason: "临时通行证发放失败" };
+  }
+}
+
+export function appLockStatus(): { ok: boolean; running: boolean; target?: string; label?: string; charId?: string; expiresAt?: number; usageStatsAccess?: boolean; accessibilityFallbackAvailable?: boolean; monitoringAvailable?: boolean } {
+  try {
+    const raw = bridge()?.appLockStatus?.();
+    if (!raw) return { ok: false, running: false };
+    return JSON.parse(raw) as { ok: boolean; running: boolean; target?: string; label?: string; charId?: string; expiresAt?: number; usageStatsAccess?: boolean; accessibilityFallbackAvailable?: boolean; monitoringAvailable?: boolean };
+  } catch {
+    return { ok: false, running: false };
+  }
+}
+
+/** 只在网页侧好感度阈值已通过后调用；锁页永远不显示这个值。 */
+export function appLockReveal(): { ok: boolean; password?: string; reason?: string } {
+  try {
+    const raw = bridge()?.appLockReveal?.();
+    if (!raw) return { ok: false, reason: "当前 App 版本不支持角色小手段" };
+    return JSON.parse(raw) as { ok: boolean; password?: string; reason?: string };
+  } catch {
+    return { ok: false, reason: "密码读取失败" };
   }
 }
 
@@ -190,6 +281,82 @@ export function focusLockStatus(): { ok: boolean; running: boolean; until: numbe
     return { ok: parsed?.ok === true, running: parsed?.running === true, until: parsed?.until || 0, packages: parsed?.packages || "[]" };
   } catch {
     return { ok: false, running: false, until: 0, packages: "[]", reason: "看守锁状态调用失败" };
+  }
+}
+
+/**
+ * 长时段定时锁机：原生 AlarmManager 到点启动 FocusLockService。
+ * 与 focusLockStart 的区别：这个不要求网页/进程活着。
+ */
+export function focusLockSchedule(payload: Record<string, unknown>): DeviceActionResult {
+  try {
+    const raw = bridge()?.focusLockSchedule?.(JSON.stringify(payload));
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持定时锁机" };
+    return parseResult(raw, "定时锁机排程失败");
+  } catch {
+    return { ok: false, reason: "定时锁机排程失败" };
+  }
+}
+
+export function focusLockScheduleCancel(id: string): DeviceActionResult {
+  try {
+    const raw = bridge()?.focusLockScheduleCancel?.(id);
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持定时锁机" };
+    return raw ? { ok: true } : { ok: false, reason: "没有找到对应的定时锁机" };
+  } catch {
+    return { ok: false, reason: "取消定时锁机失败" };
+  }
+}
+
+/** 专注悬浮胶囊：推一份状态快照（剩余时间、任务、当前项）。 */
+export function focusOverlayUpdate(payload: Record<string, unknown>): DeviceActionResult {
+  try {
+    const raw = bridge()?.focusOverlayUpdate?.(JSON.stringify(payload));
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持专注悬浮层" };
+    return parseResult(raw, "专注悬浮层更新失败");
+  } catch {
+    return { ok: false, reason: "专注悬浮层更新失败" };
+  }
+}
+
+export function focusOverlayConsumeEvents(): Array<{ index: number; done: boolean; at?: number }> {
+  try {
+    const raw = bridge()?.focusOverlayConsumeEvents?.();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap(value => {
+      const row = value as Record<string, unknown>;
+      const index = Number(row.index);
+      if (!Number.isInteger(index) || index < 0) return [];
+      return [{ index, done: row.done === true, at: Number(row.at) || 0 }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function focusOverlayStop(): DeviceActionResult {
+  try {
+    const raw = bridge()?.focusOverlayStop?.();
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持专注悬浮层" };
+    return parseResult(raw, "专注悬浮层关闭失败");
+  } catch {
+    return { ok: false, reason: "专注悬浮层关闭失败" };
+  }
+}
+
+/** 专注通行证查岗：排一个原生闹钟，到点直接拉起查岗浮层。 */
+/** 取走原生定时锁机留下的待同步 session 记录。 */
+export function consumeScheduledFocus(): { ok: boolean; record?: Record<string, unknown>; reason?: string } {
+  try {
+    const raw = bridge()?.consumeScheduledFocus?.();
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持定时专注补录" };
+    if (!raw.trim()) return { ok: true };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return { ok: true, record: parsed };
+  } catch {
+    return { ok: false, reason: "定时专注补录读取失败" };
   }
 }
 

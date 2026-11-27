@@ -1,4 +1,4 @@
-import type { Prompt, PresetConfig } from "./settings-types";
+import type { Prompt, PresetConfig, PromptOrderEntry } from "./settings-types";
 
 /**
  * 预设「单条目」的解析与落位。
@@ -136,4 +136,231 @@ export function replacePromptEntry(preset: PresetConfig, targetIdentifier: strin
     const entry = { ...prompt, identifier: finalId };
     const displayed = displayOrderPrompts(preset).map(p => p.identifier === targetIdentifier ? entry : p);
     return rebuild(preset, displayed);
+}
+
+/** 与界面一致的显示顺序，并按 identifier 去重（重复 entry 只保留首个）。 */
+function displayOrderPromptsUnique(preset: PresetConfig): Prompt[] {
+    const seen = new Set<string>();
+    const out: Prompt[] = [];
+    for (const prompt of displayOrderPrompts(preset)) {
+        if (seen.has(prompt.identifier)) continue;
+        seen.add(prompt.identifier);
+        out.push(prompt);
+    }
+    return out;
+}
+
+/* ── 选中条目的批量上移 / 下移 ───────────────────────────── */
+
+/**
+ * 在显示顺序里把选中的条目朝 direction 方向各挪一格。
+ * 选中集内部相对顺序保持不变；返回 null 表示已经到顶/到底，无需改动。
+ * 只重建 prompt_order，与单条拖拽保持一致（不重排底层的 prompts 数组）。
+ */
+export function movePromptEntriesWithinPreset(
+    preset: PresetConfig,
+    identifiers: ReadonlySet<string>,
+    direction: -1 | 1,
+): PromptOrderEntry[] | null {
+    const displayed = displayOrderPromptsUnique(preset);
+    const selected = displayed.filter(p => identifiers.has(p.identifier));
+    if (selected.length === 0 || selected.length >= displayed.length) return null;
+
+    const ids = displayed.map(p => p.identifier);
+    if (direction < 0) {
+        for (let i = 1; i < ids.length; i++) {
+            if (identifiers.has(ids[i]) && !identifiers.has(ids[i - 1])) {
+                [ids[i - 1], ids[i]] = [ids[i], ids[i - 1]];
+            }
+        }
+    } else {
+        for (let i = ids.length - 2; i >= 0; i--) {
+            if (identifiers.has(ids[i]) && !identifiers.has(ids[i + 1])) {
+                [ids[i + 1], ids[i]] = [ids[i], ids[i + 1]];
+            }
+        }
+    }
+    if (ids.every((id, index) => id === displayed[index].identifier)) return null;
+
+    const byId = new Map(displayed.map(p => [p.identifier, p]));
+    return ids.map(id => {
+        const prompt = byId.get(id)!;
+        return {
+            identifier: id,
+            enabled: preset.prompt_order?.find(o => o.identifier === id)?.enabled ?? prompt.enabled,
+        };
+    });
+}
+
+/* ── 跨预设复制 / 移动 ───────────────────────────────────── */
+
+export type PromptTransferMode = "copy" | "move";
+export type PromptTransferConflictStrategy = "rename" | "overwrite" | "skip";
+
+export type PromptTransferEntry = {
+    prompt: Prompt;
+    /** 实际生效的启用状态（prompt_order 优先于 prompt.enabled）。 */
+    enabled: boolean;
+};
+
+export type PromptTransferResult = {
+    source: PresetConfig;
+    target: PresetConfig;
+    transferred: number;
+    skipped: number;
+    renamed: number;
+};
+
+/** 按显示顺序取出选中的条目，并带上实际生效的启用状态。 */
+export function getPromptTransferEntries(
+    preset: PresetConfig,
+    identifiers: ReadonlySet<string>,
+): PromptTransferEntry[] {
+    return displayOrderPromptsUnique(preset)
+        .filter(prompt => identifiers.has(prompt.identifier))
+        .map(prompt => ({
+            prompt,
+            enabled: preset.prompt_order?.find(o => o.identifier === prompt.identifier)?.enabled ?? prompt.enabled,
+        }));
+}
+
+/** 目标预设里已经存在的同名条目数量（Marker 单列，便于 UI 提前提示）。 */
+export function countPromptTransferConflicts(
+    target: PresetConfig,
+    entries: PromptTransferEntry[],
+): { total: number; markers: number } {
+    const used = new Set((target.prompts || []).map(p => p.identifier));
+    let total = 0;
+    let markers = 0;
+    for (const entry of entries) {
+        if (!used.has(entry.prompt.identifier)) continue;
+        total += 1;
+        if (entry.prompt.marker) markers += 1;
+    }
+    return { total, markers };
+}
+
+function clonePrompt(prompt: Prompt): Prompt {
+    return {
+        ...prompt,
+        ...(prompt.tags ? { tags: [...prompt.tags] } : {}),
+    };
+}
+
+function makeUniqueIdentifier(wanted: string, used: Set<string>): string {
+    const base = wanted || "prompt";
+    if (!used.has(base)) return base;
+    let n = 2;
+    let id = `${base}_${n}`;
+    while (used.has(id)) id = `${base}_${++n}`;
+    return id;
+}
+
+/** 复制总是生成新 id（Marker 除外——它的 identifier 是注入定位标记）。 */
+function makeCopiedIdentifier(wanted: string, used: Set<string>): string {
+    const base = `${wanted || "prompt"}_copy`;
+    if (!used.has(base)) return base;
+    let n = 2;
+    let id = `${base}${n}`;
+    while (used.has(id)) id = `${base}${++n}`;
+    return id;
+}
+
+/**
+ * 把 source 里选中的条目复制/移动到 target。
+ *
+ * - 选中的条目按 source 的显示顺序成组追加到 target 末尾，保持相邻与相对顺序；
+ * - tags / marker / role / depth 等字段原样保留（分组、启用状态不丢）；
+ * - 复制出的普通条目换新 identifier；移动尽量沿用原 identifier；
+ * - 同名冲突按 strategy 处理：skip 原样跳过、overwrite 原位替换、rename 生成新 id
+ *   （Marker 改名会失去标记作用，因此 rename 策略下 Marker 同名一律跳过）；
+ * - 移动会从 source 的 prompts 与 prompt_order 中移除这些条目。
+ *
+ * 纯函数：不落盘，由调用方决定是否保存。
+ */
+export function transferPromptsBetweenPresets(
+    source: PresetConfig,
+    target: PresetConfig,
+    identifiers: ReadonlySet<string>,
+    mode: PromptTransferMode,
+    strategy: PromptTransferConflictStrategy,
+): PromptTransferResult {
+    const entries = getPromptTransferEntries(source, identifiers);
+    const targetDisplayed = displayOrderPromptsUnique(target);
+    const used = new Set(targetDisplayed.map(p => p.identifier));
+    const transferredEnabled = new Map<string, boolean>();
+    let transferred = 0;
+    let skipped = 0;
+    let renamed = 0;
+
+    for (const entry of entries) {
+        const prompt = entry.prompt;
+        const conflictIndex = targetDisplayed.findIndex(p => p.identifier === prompt.identifier);
+        let identifier = prompt.identifier;
+        let overwriteIndex = -1;
+
+        if (conflictIndex >= 0) {
+            if (strategy === "skip") {
+                skipped++;
+                continue;
+            }
+            if (strategy === "overwrite") {
+                overwriteIndex = conflictIndex;
+            } else if (prompt.marker) {
+                skipped++;
+                continue;
+            } else {
+                identifier = makeUniqueIdentifier(prompt.identifier, used);
+                renamed++;
+            }
+        } else if (mode === "copy" && !prompt.marker) {
+            identifier = makeCopiedIdentifier(prompt.identifier, used);
+            renamed++;
+        }
+
+        const nextPrompt: Prompt = {
+            ...clonePrompt(prompt),
+            identifier,
+            enabled: entry.enabled,
+        };
+        used.add(identifier);
+        transferredEnabled.set(identifier, entry.enabled);
+
+        if (overwriteIndex >= 0) targetDisplayed[overwriteIndex] = nextPrompt;
+        else targetDisplayed.push(nextPrompt);
+        transferred++;
+    }
+
+    const hadOrder = (target.prompt_order?.length ?? 0) > 0;
+    const existingEnabled = new Map((target.prompt_order ?? []).map(o => [o.identifier, o.enabled]));
+    const targetOrder: PromptOrderEntry[] | undefined = hadOrder
+        ? targetDisplayed.map(p => ({
+            identifier: p.identifier,
+            enabled: transferredEnabled.get(p.identifier)
+                ?? existingEnabled.get(p.identifier)
+                ?? p.enabled,
+        }))
+        : target.prompt_order;
+
+    const now = Date.now();
+    const nextTarget: PresetConfig = {
+        ...target,
+        prompts: targetDisplayed,
+        updatedAt: now,
+        ...(targetOrder !== undefined ? { prompt_order: targetOrder } : {}),
+    };
+
+    let nextSource = source;
+    if (mode === "move") {
+        nextSource = {
+            ...source,
+            prompts: (source.prompts || []).filter(p => !identifiers.has(p.identifier)),
+            updatedAt: now,
+            ...(source.prompt_order
+                ? { prompt_order: source.prompt_order.filter(o => !identifiers.has(o.identifier)) }
+                : {}),
+        };
+    }
+
+    return { source: nextSource, target: nextTarget, transferred, skipped, renamed };
 }

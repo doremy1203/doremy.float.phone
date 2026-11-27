@@ -4308,6 +4308,37 @@
 .multi-select-float-bar .msfb-done { background: var(--c-icon-active, #111); color: #fff; border-color: transparent; }
 .multi-select-float-bar .msfb-done:hover { background: color-mix(in srgb, var(--c-icon-active, #111) 88%, white); }
 
+/* 两行布局：第一行选择/排序，第二行批量处理 */
+.multi-select-float-bar.msfb-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.multi-select-float-bar .msfb-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.multi-select-float-bar .msfb-row .msfb-actions { margin-left: auto; }
+.multi-select-float-bar .msfb-row-secondary {
+  border-top: 1px dashed rgba(0, 0, 0, 0.08);
+  padding-top: 6px;
+}
+.multi-select-float-bar .msfb-btn[data-active] {
+  border-color: var(--c-icon-active, #111);
+  color: var(--c-icon-active, #111);
+  background: color-mix(in srgb, var(--c-icon-active, #111) 10%, #fff);
+}
+
+/* 多选选中态：保留原有卡片底色，加一圈细环便于扫视 */
+.ui-entry-card[data-selected="true"] {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-icon-active) 55%, transparent),
+              0 8px 24px rgba(0, 0, 0, 0.025),
+              inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
 /* ── Entry card 左滑操作（新增/删除） ── */
 .ui-swipe-wrap {
   position: relative;

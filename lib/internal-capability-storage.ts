@@ -22,6 +22,9 @@ export const DEVICE_ACTION_CAPABILITY_ID = "device_action";
 export const SYSTEM_CALENDAR_CAPABILITY_ID = "system_calendar";
 export const PHONE_WIDGET_CAPABILITY_ID = "phone_widget";
 export const CHECK_IN_REQUEST_CAPABILITY_ID = "check_in_request";
+export const CHARACTER_ECONOMY_CAPABILITY_ID = "character_economy";
+export const ANONYMOUS_QA_CAPABILITY_ID = "anonymous_qa";
+export const CHARACTER_APP_LOCK_CAPABILITY_ID = "character_app_lock";
 export const LIFE_INVITATION_CAPABILITY_ID = "life_invitation";
 export const LIFE_FOLLOW_CAPABILITY_ID = "life_follow";
 export const LIFE_SCHEDULE_CAPABILITY_ID = "life_schedule";
@@ -45,6 +48,28 @@ export const RESERVED_INTERNAL_TOOL_NAMES: string[] = [
     "写入系统日历",
     "写入记忆",
     "发送文件",
+    "记录角色收入",
+    "记录角色支出",
+    "查看角色账本",
+    "查看亲属卡",
+    "使用亲属卡",
+    "开亲属卡",
+    "查看共同小金库",
+    "存入共同小金库",
+    "设置小金库定期存款",
+    "帮我记账",
+    "匿名提问",
+    "回答匿名提问",
+    "查看匿名提问箱",
+    "查看可锁应用",
+    "锁应用",
+    "给临时通行证",
+    "解锁应用",
+    "查看应用锁",
+    "告诉应用锁密码",
+    "角色收支",
+    "匿名提问箱",
+    "角色锁应用",
     "角色电脑",
     "稍后主动联系",
     "设置定时醒来",
@@ -581,6 +606,192 @@ const MEMO_SUBTOOLS: InternalToolDefinition[] = [
     { name: "翻阅归档", description: "当你想回顾已经归档的旧记录、或需要从过去找线索时，主动翻阅归档。", parameterSchema: JSON.stringify({type:"object",properties:{limit:{type:"number"}}}) },
     { name: "删除备忘录", description: "当某条记录确实过期、重复或不再需要时，主动移入回收站；不要删除仍然有用的记录。", parameterSchema: JSON.stringify({type:"object",properties:{noteId:{type:"string"}},required:["noteId"]}) },
     { name: "完成备忘录维护", description: "当你本轮检查完到期备忘录、并完成必要的新增、修改、合并或归档后，必须调用此动作登记真实结果。只提交你已经完整检查过的本轮 noteId；summary 说明检查结论，changes 只列出实际执行的变更。", parameterSchema: JSON.stringify({type:"object",properties:{reviewedNoteIds:{type:"array",items:{type:"string"},minItems:1},summary:{type:"string",maxLength:500},changes:{type:"array",items:{type:"string",maxLength:240},maxItems:20}},required:["reviewedNoteIds","summary"]}) },
+];
+
+const CHARACTER_ECONOMY_EARN_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        amount: { type: "number", description: "收入金额（正数，元）" },
+        category: { type: "string", description: "工资 / 项目 / 兼职 / 投资 / 捡到钱 / 红包 / 退款 / 其他" },
+        note: { type: "string", description: "收入来源和原因，例如「给杂志画完封面」" },
+        ref: { type: "string", description: "可选关联：项目名、订单号、红包 id" },
+    },
+    required: ["amount", "note"],
+});
+const CHARACTER_ECONOMY_SPEND_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        amount: { type: "number", description: "支出金额（正数，元）" },
+        category: { type: "string", description: "餐饮 / 购物 / 交通 / 送礼 / 生活 / 娱乐 / 投资 / 其他" },
+        note: { type: "string", description: "这笔钱花在哪" },
+        ref: { type: "string", description: "可选关联：订单号、礼物 id" },
+    },
+    required: ["amount", "note"],
+});
+const CHARACTER_ECONOMY_LEDGER_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        limit: { type: "number", description: "最近多少笔，默认 20，最大 100" },
+    },
+});
+const USER_BOOKKEEPING_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        direction: { type: "string", enum: ["income", "expense"], description: "收入或支出；必须根据用户明确表达判断" },
+        amount: { type: "number", description: "金额，正数，单位元" },
+        title: { type: "string", description: "简短用途或收入来源，例如「午餐」「工资到账」" },
+        category: { type: "string", description: "分类，例如餐饮、交通、购物、居住、娱乐、医疗、订阅、学习、工资、退款、其他" },
+        note: { type: "string", description: "补充说明，可选" },
+        occurredAt: { type: "string", description: "交易实际发生时间；可用 ISO 时间或明确日期时间，不确定时省略" },
+        reference: { type: "string", description: "可选的订单号或交易唯一标识，用于防止重复记账" },
+    },
+    required: ["direction", "amount", "title"],
+});
+
+const CHARACTER_FAMILY_CARD_VIEW_SCHEMA = JSON.stringify({ type: "object", properties: {} });
+const CHARACTER_FAMILY_CARD_SPEND_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        cardId: { type: "string", description: "亲属卡 id；不知道就先调用「查看亲属卡」" },
+        amount: { type: "number", description: "消费金额（正数，元）" },
+        title: { type: "string", description: "这笔消费叫什么" },
+        detail: { type: "string", description: "消费说明" },
+    },
+    required: ["cardId", "amount", "title"],
+});
+const CHARACTER_FAMILY_CARD_CREATE_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        label: { type: "string", description: "卡名，例如「随便花卡」「吃饭专用」" },
+        monthlyLimit: { type: "number", description: "每月额度（正数，元）；用户消费从你的角色账本扣" },
+        resetDay: { type: "number", description: "每月额度重置日 1-28，默认 1" },
+    },
+    required: ["label", "monthlyLimit"],
+});
+const CHARACTER_JOINT_FUND_VIEW_SCHEMA = JSON.stringify({ type: "object", properties: {} });
+const CHARACTER_JOINT_FUND_DEPOSIT_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        fundId: { type: "string", description: "小金库 id；不知道就先调用「查看共同小金库」" },
+        amount: { type: "number", description: "存入金额（正数，元）" },
+        note: { type: "string", description: "存入备注" },
+    },
+    required: ["fundId", "amount"],
+});
+const CHARACTER_JOINT_FUND_PLAN_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        fundId: { type: "string", description: "目标小金库 id；先查看共同小金库，必须选择属于你自己的、仍在进行中的小金库" },
+        cadence: { type: "string", enum: ["daily", "weekly", "monthly"], description: "定期频率：daily 每天、weekly 每周、monthly 每月" },
+        amount: { type: "number", description: "每次从你自己的角色账本存入的金额（正数，元）" },
+    },
+    required: ["fundId", "cadence", "amount"],
+});
+
+const ANONYMOUS_QA_ASK_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        targetType: { type: "string", enum: ["user", "character"], description: "问用户还是问另一个角色" },
+        targetId: { type: "string", description: "必填。问角色时必须填写目标角色的真实角色 ID；问用户时固定填写 user。不要填角色昵称、称谓或留空。" },
+        question: { type: "string", description: "要匿名问的问题" },
+        audience: { type: "string", enum: ["public"], description: "所有角色都能看到问题与回答；target 仍表示指定回答对象" },
+    },
+    required: ["targetType", "targetId", "question"],
+});
+const ANONYMOUS_QA_ANSWER_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        questionId: { type: "string", description: "提问 id；先查看提问箱" },
+        answer: { type: "string", description: "你的回答" },
+    },
+    required: ["questionId", "answer"],
+});
+const ANONYMOUS_QA_VIEW_SCHEMA = JSON.stringify({ type: "object", properties: {} });
+
+const CHARACTER_APP_LOCK_VIEW_SCHEMA = JSON.stringify({ type: "object", properties: {} });
+const CHARACTER_APP_LOCK_START_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        app: { type: "string", description: "应用显示名或包名，例如「抖音」" },
+        style: { type: "object", description: "可选锁页样式与角色留言：title/subtitle/message/showAvatar/showTitle/showSubtitle/background/avatar。留言请结合角色个性和当下情境自然表达，不要使用统一台词，不要写成训话，也不要承诺「表现好就奖励」之类的奖惩话术。" },
+        durationMinutes: { type: "number", description: "锁定时长（分钟），默认 30，最多 360；到期自动解除" },
+    },
+    required: ["app"],
+});
+const CHARACTER_APP_LOCK_STOP_SCHEMA = JSON.stringify({ type: "object", properties: {} });
+const CHARACTER_APP_LOCK_PASS_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        minutes: { type: "number", description: "临时通行时长，1-5 分钟，默认 1 分钟" },
+    },
+});
+
+const CHARACTER_APP_LOCK_SUBTOOLS: InternalToolDefinition[] = [
+    { name: "查看可锁应用", description: "当你想知道用户手机里有哪些应用可以锁时调用。", parameterSchema: CHARACTER_APP_LOCK_VIEW_SCHEMA },
+    { name: "锁应用", description: "当你想单独锁住某个应用时调用；先确认应用名。锁页会展示你的留言，并提供返回私聊的入口；用户可申请 1-5 分钟临时通行，或输入你通过工具告知的密码解锁。默认 30 分钟，最多 360 分钟自动结束。", parameterSchema: CHARACTER_APP_LOCK_START_SCHEMA },
+    { name: "给临时通行证", description: "当你愿意暂时放用户去使用被锁应用时调用；只给 1-5 分钟，到期会自动恢复拦截。只能给自己发起的当前应用锁发放。", parameterSchema: CHARACTER_APP_LOCK_PASS_SCHEMA },
+    { name: "解锁应用", description: "当你决定放过用户、解除当前应用锁时调用。", parameterSchema: CHARACTER_APP_LOCK_STOP_SCHEMA },
+    { name: "查看应用锁", description: "当你想知道当前是否锁着应用、锁的是哪个时调用。", parameterSchema: CHARACTER_APP_LOCK_VIEW_SCHEMA },
+    { name: "告诉应用锁密码", description: "当用户来求你给应用锁密码时调用；只有好感度达到用户设定阈值才会返回密码，不到阈值不要编造。", parameterSchema: CHARACTER_APP_LOCK_VIEW_SCHEMA },
+];
+
+const ANONYMOUS_QA_SUBTOOLS: InternalToolDefinition[] = [
+    { name: "匿名提问", description: "当你想匿名问用户或另一个角色一个问题时调用；对方只看到随机 alias。targetId 必填：问角色填对方真实角色 ID，问用户填 user；不要用角色昵称代替 ID。", parameterSchema: ANONYMOUS_QA_ASK_SCHEMA },
+    { name: "回答匿名提问", description: "当有人匿名向你提问、你想回答时调用；只能回答 target 是你的问题。", parameterSchema: ANONYMOUS_QA_ANSWER_SCHEMA },
+    { name: "查看匿名提问箱", description: "查看所有角色都能看到的匿名问题与回答；提问者真实身份始终隐藏。只能回答明确指定给自己的问题。", parameterSchema: ANONYMOUS_QA_VIEW_SCHEMA },
+];
+
+const CHARACTER_ECONOMY_SUBTOOLS: InternalToolDefinition[] = [
+    {
+        name: "帮我记账",
+        description: "当用户明确告诉你一笔已经发生的收入或支出，并且金额与方向清楚时，替用户记录到用户自己的钱包流水；不要把你自己的收入/支出记到用户钱包，也不要猜测金额或交易方向。若用户只是讨论计划、询问价格或表达想买但尚未发生，不要记账。若同一笔已经记过，不要重复调用。",
+        parameterSchema: USER_BOOKKEEPING_SCHEMA,
+    },
+    {
+        name: "记录角色收入",
+        description: "当你的收入到账、项目结款、兼职发钱、投资回款、捡到钱或收到红包时，主动记入自己的账本；金额和来源必须真实合理，不要凭空印钱。",
+        parameterSchema: CHARACTER_ECONOMY_EARN_SCHEMA,
+    },
+    {
+        name: "记录角色支出",
+        description: "当你请客、购物、打车、送礼、生活消费或投资时，主动记一笔支出；余额不足会被拒绝。",
+        parameterSchema: CHARACTER_ECONOMY_SPEND_SCHEMA,
+    },
+    {
+        name: "查看角色账本",
+        description: "当你想知道自己还有多少钱、最近收入支出或本周账单时，主动查看自己的账本。",
+        parameterSchema: CHARACTER_ECONOMY_LEDGER_SCHEMA,
+    },
+    {
+        name: "查看亲属卡",
+        description: "当你想知道用户给你开了什么亲属卡、额度还剩多少，或你给用户开的卡用在哪时，主动查看。",
+        parameterSchema: CHARACTER_FAMILY_CARD_VIEW_SCHEMA,
+    },
+    {
+        name: "使用亲属卡",
+        description: "当你作为持卡人要用用户给你的亲属卡消费时调用；必须先用「查看亲属卡」拿到 cardId。额度不足/卡暂停会被拒绝。",
+        parameterSchema: CHARACTER_FAMILY_CARD_SPEND_SCHEMA,
+    },
+    {
+        name: "开亲属卡",
+        description: "当你想给用户开一张亲属卡、让他用你的钱消费时调用；额度是每月上限，用户刷这张卡会从你的角色账本扣款。",
+        parameterSchema: CHARACTER_FAMILY_CARD_CREATE_SCHEMA,
+    },
+    {
+        name: "查看共同小金库",
+        description: "当你想知道你们共同攒了多少钱、目标进度、最近谁存了多少时，主动查看。",
+        parameterSchema: CHARACTER_JOINT_FUND_VIEW_SCHEMA,
+    },
+    {
+        name: "存入共同小金库",
+        description: "当你想从自己的角色账本往共同小金库存钱时调用；余额不足会被拒绝。",
+        parameterSchema: CHARACTER_JOINT_FUND_DEPOSIT_SCHEMA,
+    },
+    {
+        name: "设置小金库定期存款",
+        description: "当你决定定期从自己的角色账本为某个共同小金库存钱时调用。你只能为自己设置；先查看小金库并选择仍在进行中的目标。目标达成后该计划会自动停止；如果还有其他小金库，系统会回来问你是否想换一个目标，不会擅自替你切换。",
+        parameterSchema: CHARACTER_JOINT_FUND_PLAN_SCHEMA,
+    },
 ];
 
 const NOTE_WALL_SUBTOOLS: InternalToolDefinition[] = [
@@ -1393,6 +1604,33 @@ const BUILTIN_INTERNAL_CAPABILITIES: InternalCapabilityConfig[] = [
         updatedAt: 0,
     },
     {
+        id: CHARACTER_ECONOMY_CAPABILITY_ID,
+        name: "角色收支",
+        description: "你有自己的钱包和收入。结合你的职业、正在做的事和最近收支，自己决定今天是否有工资、项目款、兼职、投资回款或意外之财，也可以决定请客/购物等支出；所有收支必须记账，不能只在聊天里说数字。",
+        enabled: true,
+        mode: "auto",
+        createdAt: 0,
+        updatedAt: 0,
+    },
+    {
+        id: ANONYMOUS_QA_CAPABILITY_ID,
+        name: "匿名提问箱",
+        description: "你可以匿名向用户或其他角色提问，也可以回答别人匿名向你提的问题。提问者身份不会暴露给目标，只显示随机 alias；公开问答会进共同记忆。",
+        enabled: true,
+        mode: "auto",
+        createdAt: 0,
+        updatedAt: 0,
+    },
+    {
+        id: CHARACTER_APP_LOCK_CAPABILITY_ID,
+        name: "角色锁应用",
+        description: "你可以单独锁住用户手机上的某个应用，也可以查看/解锁。锁页只输入密码，聊天/求情在 Float 聊天室；密码由系统生成，不显示在锁页或设置里。",
+        enabled: true,
+        mode: "auto",
+        createdAt: 0,
+        updatedAt: 0,
+    },
+    {
         id: PHOTO_WALL_CAPABILITY_ID,
         name: "照片墙",
         description: "当你想看你们共同留下的照片、想回应某张照片或留下共同创作时，主动查看共享照片、添加照片，并在公共画布或共享照片上涂鸦；只追加，不覆盖用户内容。",
@@ -1694,6 +1932,57 @@ export function getInternalCapabilityToolDefinition(capability: InternalCapabili
             description: capability.description,
             parameterSchema: CHECK_IN_REQUEST_PARAMETER_SCHEMA,
             usageGuide: CHECK_IN_REQUEST_USAGE_GUIDE,
+        };
+    }
+    if (capability.id === CHARACTER_ECONOMY_CAPABILITY_ID) {
+        return {
+            name: capability.name,
+            description: capability.description,
+            parameterSchema: "{}",
+            usageGuide: [
+                "以下是你的角色收支工具组。你有自己的真实账本，收入和支出必须记账；你也可以在用户明确要求或清楚表达真实交易时，帮用户记录用户自己的钱包流水。",
+                "- 帮我记账：用户明确告知一笔已经发生的收入或支出，且金额、方向清楚时，记入用户自己的钱包；不要把角色自己的收支记到用户账本，不要记录计划、报价或尚未发生的交易。若用户提供了交易时间、分类、订单号，也一并填写；同一笔不要重复记。", 
+                "- 记录角色收入：工资、项目款、兼职、投资回款、捡到钱、红包、退款；note 写清来源，不要凭空印钱。",
+                "- 记录角色支出：请客、购物、交通、送礼、生活、娱乐、投资；余额不足会被拒绝。",
+                "- 查看角色账本：余额、最近流水、本周账单。",
+                "- 查看亲属卡 / 使用亲属卡：先查看 cardId；只能使用用户给你开的、且你有持卡权的卡。",
+                "- 开亲属卡：给用户开一张每月额度卡，label 写卡名、monthlyLimit 写额度；用户刷这张卡从你的角色账本扣款，余额不足会失败。",
+                "- 查看共同小金库 / 存入共同小金库：先查看 fundId；存入从你的角色账本扣。",
+                "- 设置小金库定期存款：你可以主动决定从自己的角色账本按天/周/月定期存入指定小金库；只为你自己的小金库设置。目标达成后计划自动停止；若还有其他进行中的小金库，系统会主动回来问你是否想换目标，只有你明确选择后才设置新计划；没有其他小金库就结束计划。",
+                "- 金额要符合你的职业、项目和当前经济状况；不要为了显得大方反复大额转账。",
+                "- 系统会按你的人设自动发放初始存款和每周/每月固定收入；这些已经自动入账，不要再重复记一遍。额外收入（项目款、兼职、红包、退款）仍要用「记录角色收入」记账。",
+            ].join("\n"),
+        };
+    }
+    if (capability.id === ANONYMOUS_QA_CAPABILITY_ID) {
+        return {
+            name: capability.name,
+            description: capability.description,
+            parameterSchema: "{}",
+            usageGuide: [
+                "以下是匿名提问箱工具组。提问者身份不会暴露给目标，只显示随机 alias。",
+                "- 匿名提问：可以问用户，也可以问另一个角色；targetType=character 时必须把上下文提供的目标角色真实 ID 原样填入 targetId，targetType=user 时 targetId 固定填 user，绝不能省略或把角色名字当 ID。question 写具体，audience=public 会进公共提问箱和共同记忆。",
+                "- 回答匿名提问：只能回答 target 是你的问题；先查看提问箱拿到 questionId。",
+                "- 查看匿名提问箱：看你待回答的问题和最近的公共问答。",
+                "- 不要猜测或泄露匿名提问者是谁；除非对方明确 revealIdentity。",
+            ].join("\n"),
+        };
+    }
+    if (capability.id === CHARACTER_APP_LOCK_CAPABILITY_ID) {
+        return {
+            name: capability.name,
+            description: capability.description,
+            parameterSchema: "{}",
+            usageGuide: [
+                "以下是角色锁应用工具组。你只能锁一个应用，锁页只有密码框，聊天/求情在 Float 聊天室。",
+                "- 查看可锁应用：拿应用名/包名。",
+                "- 锁应用：传 app（显示名或包名）；密码由系统生成，不在锁页/设置/通知里显示。",
+                "- 查看应用锁：当前是否锁着、锁的是哪个。",
+                "- 解锁应用：你决定放过用户时调用。",
+                "- 告诉应用锁密码：只有当前好感度达到用户设定的阈值，系统才会返回密码；不到阈值就继续逗，不要编造。",
+                "- 锁页留言由你结合自己的角色性格和当前情境自然写，不要套固定台词；避免训话、幼态化表达，以及「表现好就奖励你」这类生硬的奖惩话术。",
+                "- 不要锁系统桌面、设置、电话、短信、输入法；不要用锁应用替代专注锁或惩罚。",
+            ].join("\n"),
         };
     }
     return null;
@@ -2019,6 +2308,15 @@ export function getInternalCapabilitySubToolDefinition(
     if (capability.id === MEMO_CAPABILITY_ID) {
         return MEMO_SUBTOOLS.find(tool => tool.name === name) ?? null;
     }
+    if (capability.id === CHARACTER_ECONOMY_CAPABILITY_ID) {
+        return CHARACTER_ECONOMY_SUBTOOLS.find(tool => tool.name === name) ?? null;
+    }
+    if (capability.id === ANONYMOUS_QA_CAPABILITY_ID) {
+        return ANONYMOUS_QA_SUBTOOLS.find(tool => tool.name === name) ?? null;
+    }
+    if (capability.id === CHARACTER_APP_LOCK_CAPABILITY_ID) {
+        return CHARACTER_APP_LOCK_SUBTOOLS.find(tool => tool.name === name) ?? null;
+    }
     if (capability.id === NOTE_WALL_CAPABILITY_ID) {
         return NOTE_WALL_SUBTOOLS.find(tool => tool.name === name) ?? null;
     }
@@ -2051,6 +2349,15 @@ export function getInternalCapabilitySubToolDefinitions(
 ): InternalToolDefinition[] {
     if (capability.id === MEMO_CAPABILITY_ID) {
         return MEMO_SUBTOOLS;
+    }
+    if (capability.id === CHARACTER_ECONOMY_CAPABILITY_ID) {
+        return CHARACTER_ECONOMY_SUBTOOLS;
+    }
+    if (capability.id === ANONYMOUS_QA_CAPABILITY_ID) {
+        return ANONYMOUS_QA_SUBTOOLS;
+    }
+    if (capability.id === CHARACTER_APP_LOCK_CAPABILITY_ID) {
+        return CHARACTER_APP_LOCK_SUBTOOLS;
     }
     if (capability.id === NOTE_WALL_CAPABILITY_ID) {
         return NOTE_WALL_SUBTOOLS;

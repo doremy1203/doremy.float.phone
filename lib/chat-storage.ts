@@ -284,6 +284,11 @@ export type ChatMessage = {
         fileType?: "audio" | "image" | "video" | "file";
         fileName?: string;
         fileDuration?: number;
+        /** 可读文档发送时抽取的文本，供角色读取和气泡内预览；二进制/不支持格式为空。 */
+        fileText?: string;
+        /** 抽取文本是否被截断（大文件只取前一段）。 */
+        fileTextTruncated?: boolean;
+        fileSize?: number;
         useReferenceImage?: boolean; // AI photo tag: whether to send the character reference image to the generator
         disableReferenceImage?: boolean; // Explicit per-image opt-out; missing means use identity references automatically
         imageRefs?: string[]; // 微信式合并发送的多图消息；旧数据可能含主图，新数据存主图之外的引用
@@ -325,6 +330,8 @@ export type ChatMessage = {
         compactSystemInstruction?: boolean;
         /** 该内部系统事件需要作为私聊短期事件进入统一记忆时间线。 */
         shortTermMemoryEvent?: boolean;
+        /** 短期时间线事件的来源标识，用于区分匿名提问箱等独立事件。 */
+        shortTermMemorySource?: "anonymous_qa" | string;
     };
     isTyping?: boolean; // temporary flag for UI rendering
     statusPanel?: string; // AI display-only status content from [状态栏] tags

@@ -56,6 +56,7 @@ import {
   WALLET_UPDATED_EVENT,
 } from "@/lib/wallet-storage";
 import type { WalletState } from "@/lib/wallet-types";
+import { FAMILY_CARD_UPDATED_EVENT, loadFamilyCards, spendWithFamilyCard, type FamilyCard } from "@/lib/economy/family-card";
 
 type ShoppingAppProps = {
   onClose: (isBusy?: boolean) => void;
@@ -430,6 +431,7 @@ export function ShoppingApp({ onClose, visible = true, onIdle, onBusyChange }: S
   const [paymentRequestError, setPaymentRequestError] = useState<string | null>(null);
   const [confirmCartDeleteItemId, setConfirmCartDeleteItemId] = useState<string | null>(null);
   const [walletState, setWalletState] = useState<WalletState>(() => loadWalletState());
+  const [familyCards, setFamilyCards] = useState<FamilyCard[]>(() => loadFamilyCards());
   const [selectedPaymentSourceId, setSelectedPaymentSourceId] = useState<string>(WALLET_BALANCE_ACCOUNT_ID);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [blackMarketOpen, setBlackMarketOpen] = useState(false);
@@ -487,14 +489,22 @@ export function ShoppingApp({ onClose, visible = true, onIdle, onBusyChange }: S
   useEffect(() => {
     const syncWallet = () => {
       const next = loadWalletState();
+      const cards = loadFamilyCards();
       setWalletState(next);
-      setSelectedPaymentSourceId(current => current === WALLET_BALANCE_ACCOUNT_ID || next.cards.some(card => card.id === current)
+      setFamilyCards(cards);
+      setSelectedPaymentSourceId(current => current === WALLET_BALANCE_ACCOUNT_ID
+        || next.cards.some(card => card.id === current)
+        || cards.some(card => card.id === current)
         ? current
         : WALLET_BALANCE_ACCOUNT_ID);
     };
     syncWallet();
     window.addEventListener(WALLET_UPDATED_EVENT, syncWallet);
-    return () => window.removeEventListener(WALLET_UPDATED_EVENT, syncWallet);
+    window.addEventListener(FAMILY_CARD_UPDATED_EVENT, syncWallet);
+    return () => {
+      window.removeEventListener(WALLET_UPDATED_EVENT, syncWallet);
+      window.removeEventListener(FAMILY_CARD_UPDATED_EVENT, syncWallet);
+    };
   }, []);
 
   useEffect(() => {
@@ -520,18 +530,42 @@ export function ShoppingApp({ onClose, visible = true, onIdle, onBusyChange }: S
     );
     return { orderAmount, totalPayment: orderAmount };
   }, [state.cartItems]);
+  const usableFamilyCards = useMemo(
+    () => familyCards.filter(card => card.beneficiaryType === "user" && card.status === "active"),
+    [familyCards],
+  );
+  const familyCardIssuerNames = useMemo(
+    () => new Map(loadCharacters().map(character => [character.id, character.name])),
+    [familyCards],
+  );
   const selectedPaymentSource = useMemo(
     () => selectedPaymentSourceId === WALLET_BALANCE_ACCOUNT_ID
       ? {
+          kind: "wallet" as const,
           id: WALLET_BALANCE_ACCOUNT_ID,
           title: "余额支付",
           balance: getWalletBalance(walletState),
           description: "红包、转账也默认使用余额",
         }
       : (() => {
+          const familyCard = usableFamilyCards.find(item => item.id === selectedPaymentSourceId);
+          if (familyCard) {
+            const issuerName = familyCard.issuerType === "character"
+              ? familyCardIssuerNames.get(familyCard.issuerId) || "TA"
+              : "自己";
+            return {
+              kind: "family" as const,
+              card: familyCard,
+              id: familyCard.id,
+              title: familyCard.label,
+              balance: Math.max(0, familyCard.monthlyLimit - familyCard.usedThisPeriod),
+              description: `${issuerName}的亲属卡 · 本月剩余额度`,
+            };
+          }
           const card = walletState.cards.find(item => item.id === selectedPaymentSourceId) ?? walletState.cards[0];
           return card
             ? {
+                kind: "wallet" as const,
                 id: card.id,
                 title: card.title,
                 balance: card.balance,
@@ -539,7 +573,7 @@ export function ShoppingApp({ onClose, visible = true, onIdle, onBusyChange }: S
               }
             : null;
         })(),
-    [selectedPaymentSourceId, walletState],
+    [selectedPaymentSourceId, walletState, usableFamilyCards, familyCardIssuerNames],
   );
   const selectedPaymentSourceCanPay = Boolean(selectedPaymentSource && selectedPaymentSource.balance >= cartTotals.totalPayment);
 
@@ -929,26 +963,53 @@ export function ShoppingApp({ onClose, visible = true, onIdle, onBusyChange }: S
       setPaymentError("请选择付款方式。");
       return;
     }
-    const paymentResult = payWithWalletAccount({
-      accountId: paymentSource.id,
-      amount: cartTotals.totalPayment,
-      title: "购物付款",
-      detail: `购物订单：${order.summary}`,
-      category: "购物",
-      relatedOrderId: order.id,
-    });
-    if (!paymentResult.ok || !paymentResult.transaction) {
+    let paymentCardLabel = "";
+    let paymentTransactionId = "";
+    if (paymentSource.kind === "family") {
+      const familyCard = paymentSource.card;
+      const result = spendWithFamilyCard(
+        familyCard.id,
+        cartTotals.totalPayment,
+        "购物付款",
+        `购物订单：${order.summary}`,
+        "购物",
+      );
+      if (!result.ok) {
+        setWalletState(loadWalletState());
+        setFamilyCards(loadFamilyCards());
+        setPaymentError(result.error ?? "亲属卡扣款失败。");
+        return;
+      }
+      setWalletState(loadWalletState());
+      setFamilyCards(loadFamilyCards());
+      paymentCardLabel = `${familyCard.label}（亲属卡）`;
+      paymentTransactionId = result.transactionId ?? "";
+    } else {
+      const paymentResult = payWithWalletAccount({
+        accountId: paymentSource.id,
+        amount: cartTotals.totalPayment,
+        title: "购物付款",
+        detail: `购物订单：${order.summary}`,
+        category: "购物",
+        relatedOrderId: order.id,
+      });
+      if (!paymentResult.ok || !paymentResult.transaction) {
+        setWalletState(paymentResult.state);
+        setPaymentError(paymentResult.error ?? "付款失败。");
+        return;
+      }
       setWalletState(paymentResult.state);
-      setPaymentError(paymentResult.error ?? "付款失败。");
-      return;
+      paymentCardLabel = paymentSource.id === WALLET_BALANCE_ACCOUNT_ID
+        ? "余额支付"
+        : `${paymentSource.title}（${paymentSource.description.replace(" · 银行卡", "")}）`;
+      paymentTransactionId = paymentResult.transaction.id;
     }
-    setWalletState(paymentResult.state);
     const paidOrder: ShoppingOrder = {
       ...order,
       paymentCardId: paymentSource.id,
-      paymentCardLabel: paymentSource.id === WALLET_BALANCE_ACCOUNT_ID ? "余额支付" : `${paymentSource.title}（${paymentSource.description.replace(" · 银行卡", "")}）`,
-      paymentTransactionId: paymentResult.transaction.id,
-      paidAt: paymentResult.transaction.createdAt,
+      paymentCardLabel,
+      paymentTransactionId,
+      paidAt: new Date().toISOString(),
     };
     persist(current => ({
       ...current,
@@ -1898,6 +1959,13 @@ export function ShoppingApp({ onClose, visible = true, onIdle, onBusyChange }: S
                   description: `${getWalletCardDisplayNumber(card.maskedNumber)} · 银行卡`,
                   balance: card.balance,
                   icon: <WalletCards size={20} />,
+                })),
+                ...usableFamilyCards.map(card => ({
+                  id: card.id,
+                  title: `${card.label} · 亲属卡`,
+                  description: `${card.issuerType === "character" ? familyCardIssuerNames.get(card.issuerId) || "TA" : "自己"}给的亲属卡 · 本月剩余额度`,
+                  balance: Math.max(0, card.monthlyLimit - card.usedThisPeriod),
+                  icon: <HeartHandshake size={20} />,
                 })),
               ].map(source => {
                 const active = selectedPaymentSource?.id === source.id;

@@ -105,6 +105,7 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:screenOrientation="portrait"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -181,6 +182,41 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-enabled focus lock: keeps the user in the focus session by returning to the host app" />
         </service>
+
+        <receiver
+            android:name=".FocusLockScheduleReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".DndAutoRestoreReceiver"
+            android:exported="false" />
+
+        <service
+            android:name=".FocusOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled focus countdown overlay with task checklist" />
+        </service>
+
+        <service
+            android:name=".PlayfulAppLockService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled playful single-app password lock chosen by a character" />
+        </service>
+
+        <activity
+            android:name=".PlayfulLockActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.FloatShell" />
 
         <service
             android:name=".PushService"

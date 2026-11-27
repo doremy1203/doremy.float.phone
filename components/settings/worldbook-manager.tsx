@@ -1,28 +1,56 @@
 "use client";
 
 import { useState, useEffect, useRef, useContext, useCallback } from "react";
-import { Plus, BookOpen, Trash2, Upload, Download, ChevronLeft, AlertCircle, Maximize2, Replace } from "lucide-react";
+import {
+    Plus,
+    BookOpen,
+    Trash2,
+    Upload,
+    Download,
+    ChevronLeft,
+    ChevronDown,
+    AlertCircle,
+    Maximize2,
+    Replace,
+    Folder,
+    FolderOpen,
+    FolderPlus,
+    FolderInput,
+    Pencil,
+    Check,
+} from "lucide-react";
 import {
     loadWorldBooks,
     saveWorldBooks,
     createWorldBook,
+    loadWorldBookFolders,
+    saveWorldBookFolders,
+    createWorldBookFolder,
     parseWorldBookFromJson,
     loadBindingConfig,
     UNSUPPORTED_IMPORT_FORMAT,
 } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
-import type { WorldBookConfig, WorldBookEntry } from "@/lib/settings-types";
+import type { WorldBookConfig, WorldBookEntry, WorldBookFolder } from "@/lib/settings-types";
 import { SettingsContext } from "../phone-settings-app";
-import { BottomSheet, ConfirmDialog, TextExpandModal } from "@/components/ui/modal";
+import { BottomSheet, ConfirmDialog, ContentDialog, TextExpandModal } from "@/components/ui/modal";
 import { SwipeActionRow, useSwipeActions } from "@/components/ui/swipe-actions";
 import { notifyMascotPageContext } from "@/lib/mascot-events";
 
+const ROOT_GROUP_ID = "__worldbook_root__";
+
 export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {}) {
     const [books, setBooks] = useState<WorldBookConfig[]>([]);
+    const [folders, setFolders] = useState<WorldBookFolder[]>([]);
     const [activeBookId, setActiveBookId] = useState<string>("");
     const [viewMode, setViewMode] = useState<"list" | "detail">("list");
     const [editingUid, setEditingUid] = useState<string | null>(null);
     const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<{ type: 'book' | 'entry', id: string } | null>(null);
+    const [folderToDelete, setFolderToDelete] = useState<WorldBookFolder | null>(null);
+    const [folderDialog, setFolderDialog] = useState<{ mode: "create" } | { mode: "rename"; folderId: string } | null>(null);
+    const [folderNameDraft, setFolderNameDraft] = useState("");
+    const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(new Set());
+    const [moveBookId, setMoveBookId] = useState<string | null>(null);
     const [isLoaded, setIsLoaded] = useState(false);
     const [expandUid, setExpandUid] = useState<string | null>(null);
     const [importError, setImportError] = useState<string | null>(null);
@@ -34,16 +62,23 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
     // Initial load
     useEffect(() => {
         const loaded = loadWorldBooks();
+        const loadedFolders = loadWorldBookFolders();
         if (loaded.length > 0) {
             setBooks(loaded);
             setActiveBookId(loaded[0]?.id || "");
         }
+        setFolders(loadedFolders);
         setIsLoaded(true);
     }, []);
 
     const persist = useCallback((newBooks: WorldBookConfig[]) => {
         setBooks(newBooks);
         saveWorldBooks(newBooks);
+    }, []);
+
+    const persistFolders = useCallback((newFolders: WorldBookFolder[]) => {
+        setFolders(newFolders);
+        saveWorldBookFolders(newFolders);
     }, []);
 
     const wbContainerRef = useRef<HTMLDivElement>(null);
@@ -286,6 +321,75 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
         }
     };
 
+    // --- Folder Operations ---
+
+    const toggleGroupCollapsed = (groupId: string) => {
+        setCollapsedGroupIds(prev => {
+            const next = new Set(prev);
+            if (next.has(groupId)) next.delete(groupId);
+            else next.add(groupId);
+            return next;
+        });
+    };
+
+    const openCreateFolder = () => {
+        setFolderNameDraft("");
+        setFolderDialog({ mode: "create" });
+    };
+
+    const openRenameFolder = (folder: WorldBookFolder) => {
+        setFolderNameDraft(folder.name);
+        setFolderDialog({ mode: "rename", folderId: folder.id });
+    };
+
+    const submitFolderDialog = () => {
+        if (!folderDialog) return;
+        const name = folderNameDraft.trim() || "未命名文件夹";
+        if (folderDialog.mode === "create") {
+            const folder = createWorldBookFolder(name);
+            persistFolders([...folders, folder]);
+            setCollapsedGroupIds(prev => {
+                const next = new Set(prev);
+                next.delete(folder.id);
+                return next;
+            });
+        } else {
+            const folderId = folderDialog.folderId;
+            persistFolders(folders.map(folder => (
+                folder.id === folderId
+                    ? { ...folder, name, updatedAt: Date.now() }
+                    : folder
+            )));
+        }
+        setFolderDialog(null);
+    };
+
+    const removeFolder = (folderId: string) => {
+        persistFolders(folders.filter(folder => folder.id !== folderId));
+        // 删除文件夹不删除世界书：夹内书籍回到根目录。
+        persist(books.map(book => (
+            book.folderId === folderId ? { ...book, folderId: undefined } : book
+        )));
+        setCollapsedGroupIds(prev => {
+            const next = new Set(prev);
+            next.delete(folderId);
+            return next;
+        });
+        setFolderToDelete(null);
+    };
+
+    const moveBookToFolder = (bookId: string, folderId?: string) => {
+        updateBook(bookId, { folderId: folderId || undefined });
+        if (folderId) {
+            setCollapsedGroupIds(prev => {
+                const next = new Set(prev);
+                next.delete(folderId);
+                return next;
+            });
+        }
+        setMoveBookId(null);
+    };
+
     const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
@@ -323,6 +427,155 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
     const activeBook = books.find(b => b.id === activeBookId);
 
     const visibleEntries = activeBook?.entries || [];
+
+    // --- Folder grouping ---
+    const folderIds = new Set(folders.map(folder => folder.id));
+    const rootBooks = books.filter(book => !book.folderId || !folderIds.has(book.folderId));
+    const canMoveBook = folders.length > 0;
+
+    const renderBookCard = (book: WorldBookConfig) => (
+        <div
+            key={book.id}
+            className="ui-config-card min-w-0 cursor-pointer"
+            style={{ aspectRatio: "3 / 2", padding: "12px", justifyContent: "space-between" }}
+            role="button"
+            tabIndex={0}
+            aria-label={`编辑 ${book.name || "世界书"}`}
+            onClick={() => { setActiveBookId(book.id); setViewMode("detail"); }}
+            onKeyDown={(event) => {
+                if (event.target !== event.currentTarget) return;
+                if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setActiveBookId(book.id);
+                    setViewMode("detail");
+                }
+            }}
+        >
+            <div className="min-w-0 flex flex-col gap-1.5">
+                <div className="min-w-0 flex items-center gap-[6px]">
+                    <BookOpen size={16} className="shrink-0" />
+                    <span className="truncate text-[calc(14.4px*var(--app-text-scale,1))] font-bold leading-tight text-[var(--c-text-title)]">{book.name}</span>
+                </div>
+                <span className="menu-desc truncate">{book.description || `${book.entries?.length || 0} 个条目`}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+                <span className="menu-desc ts-12">条目 {book.entries?.length || 0}</span>
+                <div className="flex items-center gap-0.5">
+                    {canMoveBook && (
+                        <button
+                            type="button"
+                            className="modal-header-btn"
+                            style={{ width: 26, height: 26, color: "var(--c-icon)" }}
+                            title="移动到文件夹"
+                            aria-label={`移动「${book.name || "世界书"}」到文件夹`}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                setMoveBookId(book.id);
+                            }}
+                        >
+                            <FolderInput size={14} strokeWidth={1.8} />
+                        </button>
+                    )}
+                    <ChevronLeft size={16} className="opacity-40" style={{ transform: "rotate(180deg)" }} />
+                </div>
+            </div>
+        </div>
+    );
+
+    const renderBookGrid = (groupBooks: WorldBookConfig[]) => (
+        <div className="grid grid-cols-2 gap-3">
+            {groupBooks.map(book => renderBookCard(book))}
+        </div>
+    );
+
+    const renderGroupHeader = (options: {
+        groupId: string;
+        label: string;
+        count: number;
+        icon: "folder" | "root";
+        folder?: WorldBookFolder;
+    }) => {
+        const collapsed = collapsedGroupIds.has(options.groupId);
+        return (
+            <div
+                className="ui-entry-card"
+                style={{ padding: "10px 14px", gap: 0, cursor: "pointer" }}
+                role="button"
+                tabIndex={0}
+                aria-expanded={!collapsed}
+                onClick={() => toggleGroupCollapsed(options.groupId)}
+                onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return;
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleGroupCollapsed(options.groupId);
+                    }
+                }}
+            >
+                <div className="flex min-w-0 items-center gap-2">
+                    {options.icon === "folder"
+                        ? (collapsed ? <Folder size={17} className="shrink-0" /> : <FolderOpen size={17} className="shrink-0" />)
+                        : <BookOpen size={17} className="shrink-0" />}
+                    <span className="truncate text-[calc(13.5px*var(--app-text-scale,1))] font-bold leading-tight text-[var(--c-text-title)]">{options.label}</span>
+                    <span className="menu-desc ts-12 shrink-0">{options.count} 本</span>
+                    {options.folder && (
+                        <div
+                            className="ml-auto flex shrink-0 items-center gap-0.5"
+                            onClick={(event) => event.stopPropagation()}
+                        >
+                            <button
+                                type="button"
+                                className="modal-header-btn"
+                                style={{ color: "var(--c-icon)" }}
+                                title="重命名文件夹"
+                                aria-label={`重命名文件夹「${options.folder.name}」`}
+                                onClick={() => openRenameFolder(options.folder!)}
+                            >
+                                <Pencil size={14} strokeWidth={1.8} />
+                            </button>
+                            <button
+                                type="button"
+                                className="modal-header-btn"
+                                style={{ color: "var(--c-danger)" }}
+                                title="删除文件夹"
+                                aria-label={`删除文件夹「${options.folder.name}」`}
+                                onClick={() => setFolderToDelete(options.folder!)}
+                            >
+                                <Trash2 size={14} strokeWidth={1.8} />
+                            </button>
+                        </div>
+                    )}
+                    {!options.folder && <span className="ml-auto" />}
+                    <ChevronDown
+                        size={16}
+                        className="shrink-0 opacity-50"
+                        style={{ transform: collapsed ? "rotate(-90deg)" : undefined, transition: "transform 0.15s" }}
+                    />
+                </div>
+            </div>
+        );
+    };
+
+    const renderFolderGroup = (folder: WorldBookFolder) => {
+        const folderBooks = books.filter(book => book.folderId === folder.id);
+        const collapsed = collapsedGroupIds.has(folder.id);
+        return (
+            <div key={folder.id} className="flex flex-col gap-2">
+                {renderGroupHeader({
+                    groupId: folder.id,
+                    label: folder.name || "未命名文件夹",
+                    count: folderBooks.length,
+                    icon: "folder",
+                    folder,
+                })}
+                {!collapsed && (
+                    folderBooks.length > 0
+                        ? renderBookGrid(folderBooks)
+                        : <div className="menu-desc ts-12 text-center py-2">空文件夹，暂无世界书</div>
+                )}
+            </div>
+        );
+    };
 
     // ── 条目左滑操作（微信式：左滑露出「新增/删除」） ──
     const swipe = useSwipeActions();
@@ -476,11 +729,19 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
             <input type="file" accept=".json" className="hidden" ref={entryFileInputRef} onChange={handleEntryImportFile} />
             {viewMode === "list" ? (
                 <>
-                    <div className="flex items-center">
+                    <div className="flex items-center justify-between gap-2">
                         <h2 className="m-0 mx-2 ts-28 font-bold italic leading-none text-black">Worldbooks</h2>
+                        <button
+                            type="button"
+                            onClick={openCreateFolder}
+                            className="inline-flex h-8 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-[16px] border border-black/10 bg-white px-3 text-[calc(10.8px*var(--app-text-scale,1))] font-bold text-gray-800 shadow-sm transition-all hover:bg-gray-50 hover:shadow-md active:scale-95 focus:outline-none"
+                        >
+                            <FolderPlus size={14} strokeWidth={1.8} />
+                            <span>新建文件夹</span>
+                        </button>
                     </div>
 
-                    {books.length === 0 ? (
+                    {books.length === 0 && folders.length === 0 ? (
                         <div className="ui-empty mt-2">
                             <div className="ui-icon-circle">
                                 <BookOpen size={24} />
@@ -494,38 +755,26 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
                             </button>
                         </div>
                     ) : (
-                        <div className="grid grid-cols-2 gap-3">
-                            {books.map(book => (
-                                <div
-                                    key={book.id}
-                                    className="ui-config-card min-w-0 cursor-pointer"
-                                    style={{ aspectRatio: "3 / 2", padding: "12px", justifyContent: "space-between" }}
-                                    role="button"
-                                    tabIndex={0}
-                                    aria-label={`编辑 ${book.name || "世界书"}`}
-                                    onClick={() => { setActiveBookId(book.id); setViewMode("detail"); }}
-                                    onKeyDown={(event) => {
-                                        if (event.target !== event.currentTarget) return;
-                                        if (event.key === "Enter" || event.key === " ") {
-                                            event.preventDefault();
-                                            setActiveBookId(book.id);
-                                            setViewMode("detail");
-                                        }
-                                    }}
-                                >
-                                    <div className="min-w-0 flex flex-col gap-1.5">
-                                        <div className="min-w-0 flex items-center gap-[6px]">
-                                            <BookOpen size={16} className="shrink-0" />
-                                            <span className="truncate text-[calc(14.4px*var(--app-text-scale,1))] font-bold leading-tight text-[var(--c-text-title)]">{book.name}</span>
-                                        </div>
-                                        <span className="menu-desc truncate">{book.description || `${book.entries?.length || 0} 个条目`}</span>
+                        <div className="flex flex-col gap-4">
+                            {folders.map(folder => renderFolderGroup(folder))}
+                            {folders.length === 0 && rootBooks.length > 0
+                                ? renderBookGrid(rootBooks)
+                                : rootBooks.length > 0 && (
+                                    <div className="flex flex-col gap-2">
+                                        {renderGroupHeader({
+                                            groupId: ROOT_GROUP_ID,
+                                            label: "未分组",
+                                            count: rootBooks.length,
+                                            icon: "root",
+                                        })}
+                                        {!collapsedGroupIds.has(ROOT_GROUP_ID) && renderBookGrid(rootBooks)}
                                     </div>
-                                    <div className="flex items-center justify-between gap-2">
-                                        <span className="menu-desc ts-12">条目 {book.entries?.length || 0}</span>
-                                        <ChevronLeft size={16} className="opacity-40" style={{ transform: "rotate(180deg)" }} />
-                                    </div>
+                                )}
+                            {books.length === 0 && folders.length > 0 && (
+                                <div className="menu-desc ts-12 text-center py-2">
+                                    暂无世界书，可以新建世界书后移动到文件夹
                                 </div>
-                            ))}
+                            )}
                         </div>
                     )}
                 </>
@@ -576,6 +825,22 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
                                         className="ui-textarea resize-none"
                                     />
                                 </div>
+
+                                {folders.length > 0 && (
+                                    <div className="flex flex-col gap-2">
+                                        <label className="menu-label ts-13 font-semibold ml-1">所属文件夹</label>
+                                        <select
+                                            value={activeBook.folderId && folderIds.has(activeBook.folderId) ? activeBook.folderId : ""}
+                                            onChange={(e) => updateBook(activeBook.id, { folderId: e.target.value || undefined })}
+                                            className="ui-select ts-14"
+                                        >
+                                            <option value="">根目录（未分组）</option>
+                                            {folders.map(folder => (
+                                                <option key={folder.id} value={folder.id}>{folder.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
                             </div>
 
                             {/* Entries Section */}
@@ -886,6 +1151,99 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
                     onCancel={() => setImportError(null)}
                 />
             )}
+
+            {folderDialog && (
+                <ContentDialog
+                    title={folderDialog.mode === "create" ? "新建文件夹" : "重命名文件夹"}
+                    confirmLabel={folderDialog.mode === "create" ? "创建" : "保存"}
+                    cancelLabel="取消"
+                    onConfirm={submitFolderDialog}
+                    onCancel={() => setFolderDialog(null)}
+                >
+                    <div className="flex flex-col gap-2">
+                        <label className="menu-label ts-13 font-semibold ml-1">文件夹名称</label>
+                        <input
+                            type="text"
+                            autoFocus
+                            value={folderNameDraft}
+                            maxLength={60}
+                            onChange={(event) => setFolderNameDraft(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    submitFolderDialog();
+                                }
+                            }}
+                            placeholder="例如：世界观 / 角色设定 / 剧情扩展"
+                            className="ui-input"
+                        />
+                    </div>
+                </ContentDialog>
+            )}
+
+            {folderToDelete && (
+                <ConfirmDialog
+                    title="删除文件夹？"
+                    message={`「${folderToDelete.name}」内的世界书会回到根目录，不会被删除。`}
+                    icon={AlertCircle}
+                    variant="danger"
+                    confirmLabel="删除文件夹"
+                    cancelLabel="取消"
+                    onConfirm={() => removeFolder(folderToDelete.id)}
+                    onCancel={() => setFolderToDelete(null)}
+                />
+            )}
+
+            {moveBookId && (() => {
+                const book = books.find(item => item.id === moveBookId);
+                if (!book) return null;
+                const currentFolderId = book.folderId && folderIds.has(book.folderId) ? book.folderId : "";
+                return (
+                    <BottomSheet title="移动到文件夹" onClose={() => setMoveBookId(null)}>
+                        <div className="binding-sheet-list">
+                            <button
+                                type="button"
+                                className="binding-sheet-option"
+                                data-selected={!currentFolderId}
+                                aria-pressed={!currentFolderId}
+                                onClick={() => moveBookToFolder(book.id, undefined)}
+                            >
+                                <span className="binding-sheet-check">{!currentFolderId && <Check size={15} />}</span>
+                                <span className="binding-sheet-option-text">根目录（未分组）</span>
+                            </button>
+                            {folders.map(folder => {
+                                const selected = currentFolderId === folder.id;
+                                return (
+                                    <button
+                                        key={folder.id}
+                                        type="button"
+                                        className="binding-sheet-option"
+                                        data-selected={selected}
+                                        aria-pressed={selected}
+                                        onClick={() => moveBookToFolder(book.id, folder.id)}
+                                    >
+                                        <span className="binding-sheet-check">{selected && <Check size={15} />}</span>
+                                        <span className="binding-sheet-option-text">{folder.name}</span>
+                                    </button>
+                                );
+                            })}
+                            {folders.length === 0 && (
+                                <div className="binding-sheet-empty">还没有文件夹，可以先新建一个。</div>
+                            )}
+                            <button
+                                type="button"
+                                className="ui-btn ui-btn-outline w-full mt-2"
+                                onClick={() => {
+                                    setMoveBookId(null);
+                                    openCreateFolder();
+                                }}
+                            >
+                                <FolderPlus size={16} /> 新建文件夹
+                            </button>
+                        </div>
+                    </BottomSheet>
+                );
+            })()}
 
             {addEntryMenuOpen && activeBook && (
                 <BottomSheet title="添加条目" onClose={() => setAddEntryMenuOpen(false)}>

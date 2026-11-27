@@ -6,6 +6,8 @@ import { updateStatusBarTone } from "@/lib/bg-tone";
 import { loadDeviceCompatibilitySettings } from "@/lib/device-compatibility";
 import { startDiaryEntryTimerService, stopDiaryEntryTimerService } from "@/lib/diary-entry-timer-service";
 import { startFollowUpService, stopFollowUpService } from "@/lib/follow-up-service";
+import { startJointFundScheduler } from "@/lib/economy/joint-fund-scheduler";
+import { startCharacterIncomeScheduler } from "@/lib/economy/character-income";
 import { installLifeScheduleProactiveScheduler } from "@/lib/life/life-proactive-scheduler";
 import { startMomentsService, stopMomentsService } from "@/lib/moments-engine";
 import { bgTimerCleanup } from "@/lib/bg-timer";
@@ -13,6 +15,8 @@ import { PhoneThemeApp } from "@/components/phone-theme-app";
 import { PhoneCharacterApp } from "@/components/phone-character-app";
 import { PhoneSettingsApp } from "@/components/phone-settings-app";
 import { PhoneChatApp } from "@/components/chat/phone-chat-app";
+import { WalletApp } from "@/components/wallet-app";
+import { AnonymousQaApp } from "@/components/anonymous-qa-app";
 import { PhonePlaceholderApp } from "@/components/phone-placeholder-app";
 import MusicApp from "@/components/music/music-app";
 import MusicPlayer from "@/components/music/music-player";
@@ -2095,6 +2099,8 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     let servicesStarted = false;
     let cleanupWeixinCloudRealtimeSync: (() => void) | null = null;
     let cleanupLifeScheduleScheduler: (() => void) | null = null;
+    let cleanupJointFundScheduler: (() => void) | null = null;
+    let cleanupCharacterIncomeScheduler: (() => void) | null = null;
 
     void (async () => {
       try {
@@ -2134,6 +2140,8 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       const stopLifeScheduleScheduler = installLifeScheduleProactiveScheduler();
       cleanupLifeScheduleScheduler = stopLifeScheduleScheduler;
       startDiaryEntryTimerService();
+      cleanupJointFundScheduler = startJointFundScheduler();
+      cleanupCharacterIncomeScheduler = startCharacterIncomeScheduler();
       const stopWeixinCloudRealtimeSync = startWeixinCloudRealtimeSync();
       servicesStarted = true;
       cleanupWeixinCloudRealtimeSync = stopWeixinCloudRealtimeSync;
@@ -2153,6 +2161,10 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
         stopMomentsService();
         cleanupLifeScheduleScheduler?.();
         cleanupLifeScheduleScheduler = null;
+        cleanupJointFundScheduler?.();
+        cleanupJointFundScheduler = null;
+        cleanupCharacterIncomeScheduler?.();
+        cleanupCharacterIncomeScheduler = null;
         stopDiaryEntryTimerService();
       }
       bgTimerCleanup();
@@ -4620,6 +4632,14 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
           />
         </CustomAppForegroundBoundary>
       );
+    }
+
+    if (activeApp === "wallet") {
+      return <WalletApp onClose={() => setActiveApp(null)} />;
+    }
+
+    if (activeApp === "anonymous_qa") {
+      return <AnonymousQaApp onClose={() => setActiveApp(null)} />;
     }
 
     if (activeApp === "chat") {

@@ -13,6 +13,8 @@ on:
       - "lib/push-bailout-client.ts"
       - "scripts/test-life-*.mjs"
       - "lib/tool-executor.ts"
+      - "lib/wallet-planning.ts"
+      - "components/wallet-planning-tabs.tsx"
       - "lib/tool-storage.ts"
       - "components/chat/chat-room.tsx"
       - "components/desktop-shell.tsx"
@@ -82,6 +84,8 @@ jobs:
         run: npx tsc --noEmit
       - name: Native background and life-system wiring assertions
         run: node scripts/test-life-wiring.mjs
+      - name: Playful app-lock safety and interaction contract tests
+        run: npm run test:playful-app-lock
       - name: Life schedule regression tests (UTC)
         run: TZ=UTC npm run test:life
       - name: Life schedule regression tests (daylight-saving timezone)

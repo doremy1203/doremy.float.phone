@@ -5,6 +5,7 @@ import { ArrowDownToLine, ArrowUpFromLine, CreditCard, Plus, Trash2, WalletCards
 
 import { ConfirmDialog } from "@/components/ui";
 import { PageShell } from "@/components/ui/page-shell";
+import { WalletHeaderIsolationStyle } from "@/components/wallet-header-isolation-style";
 import {
   adjustWalletCardAccount,
   createWalletCard,
@@ -18,9 +19,24 @@ import {
 } from "@/lib/wallet-storage";
 import type { WalletCard, WalletCardStyle, WalletState } from "@/lib/wallet-types";
 
+type WalletPanelTab = "home" | "accounts" | "family" | "joint" | "ledger" | "budget" | "goals" | "bills" | "calendar" | "insights";
 type WalletPanelProps = {
   onBack: () => void;
+  onNavigateTab: (tab: WalletPanelTab) => void;
 };
+
+const WALLET_NAV_TABS: Array<{ id: WalletPanelTab; label: string }> = [
+  { id: "home", label: "总览" },
+  { id: "accounts", label: "银行卡" },
+  { id: "family", label: "亲属卡" },
+  { id: "joint", label: "小金库" },
+  { id: "ledger", label: "角色账本" },
+  { id: "budget", label: "预算" },
+  { id: "goals", label: "储蓄目标" },
+  { id: "bills", label: "周期账单" },
+  { id: "calendar", label: "财务日历" },
+  { id: "insights", label: "财务报告" },
+];
 
 const WALLET_STYLE_OPTIONS: Array<{ id: WalletCardStyle; label: string }> = [
   { id: "obsidian", label: "黑金" },
@@ -112,7 +128,7 @@ function WalletBankCard({
   );
 }
 
-export function WalletPanel({ onBack }: WalletPanelProps) {
+export function WalletPanel({ onBack, onNavigateTab }: WalletPanelProps) {
   const [wallet, setWallet] = useState<WalletState>(() => loadWalletState());
   const [activeCardId, setActiveCardId] = useState(() => wallet.defaultCardId || wallet.cards[0]?.id || "");
   const [balanceTransferMode, setBalanceTransferMode] = useState<"deposit" | "withdraw" | null>(null);
@@ -297,64 +313,32 @@ export function WalletPanel({ onBack }: WalletPanelProps) {
     : balanceTransferMode === "withdraw" ? walletBalance : selectedTransferCard?.balance;
 
   return (
-    <PageShell title="余额管理" onBack={onBack} className="wallet-page-root">
-      <style>{`
-        .wallet-page-root {
-          background: var(--c-page-body-bg) !important;
-        }
-        .wallet-page-root .page-body {
-          overflow-y: auto;
-        }
-        .wallet-card-stack {
-          padding-inline: 7%;
-          scroll-padding-inline: 7%;
-        }
-        .wallet-card-stack .cp-premium-bank-card {
-          flex: 0 0 86%;
-          min-width: 0;
-          cursor: grab;
-          box-shadow: 0 16px 34px rgba(0, 0, 0, 0.26), inset 0 1px 1px rgba(255, 255, 255, 0.1);
-        }
-        .wallet-card-stack .cp-premium-bank-card:active {
-          cursor: grabbing;
-        }
-        .wallet-card-stack .cp-premium-bank-card.is-active {
-          opacity: 1;
-        }
-        .wallet-balance-action {
-          min-height: 34px;
-          padding: 0 12px;
-          border-radius: 999px;
-          background: rgba(255,255,255,0.72);
-          border: 1px solid rgba(255,255,255,0.82);
-          color: #246bfd;
-          display: inline-flex;
-          align-items: center;
-          gap: 5px;
-          font-size: calc(12px*var(--app-text-scale,1));
-          font-weight: 700;
-        }
-        .wallet-bank-action {
-          min-height: 42px;
-          border-radius: 16px;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          gap: 6px;
-          font-size: calc(12px*var(--app-text-scale,1));
-          font-weight: 700;
-        }
-      `}</style>
+    <PageShell title="余额管理" onBack={onBack} className="wallet-page-root" headerClassName="wallet-app-header" headerStyle={{ background: "#f7f6f0", backgroundColor: "#f7f6f0", backgroundImage: "none", backdropFilter: "none", WebkitBackdropFilter: "none", zIndex: 50, isolation: "isolate" }}>
+      <WalletHeaderIsolationStyle />
+
+      <div className="wallet-private-bank wallet-tab-row flex shrink-0 gap-2 overflow-x-auto px-4 pb-3 pt-1" aria-label="钱包页面导航">
+        {WALLET_NAV_TABS.map(item => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onNavigateTab(item.id)}
+            aria-current={item.id === "accounts" ? "page" : undefined}
+            className={`wallet-tab shrink-0 rounded-full px-4 py-2 text-sm transition-colors`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
 
       <div className="p-4 flex flex-col gap-4 pb-24">
-        <section className="rounded-2xl p-5 overflow-hidden relative min-h-[156px] flex flex-col justify-between" style={{ background: "#eaf5ff", boxShadow: "0 8px 24px rgba(0,0,0,0.025)", border: "1px solid rgba(255,255,255,0.72)", color: "#172033" }}>
+        <section className="wallet-balance-hero rounded-2xl p-5 overflow-hidden relative min-h-[156px] flex flex-col justify-between">
           <div className="relative flex items-start justify-between gap-4">
             <div>
-              <div className="ts-11 font-semibold opacity-70 tracking-[0.18em] uppercase">Real Balance</div>
+              <div className="wallet-luxe-kicker" style={{color:"#c7b78e"}}>PRIVATE WALLET · REAL BALANCE</div>
               <div className="ts-34 font-semibold mt-2" style={{ fontFamily: "Georgia, serif" }}>{formatWalletAmount(walletBalance)}</div>
-              <div className="ts-12 opacity-70 mt-1">红包、转账与余额支付默认使用这里</div>
+              <div className="ts-12 opacity-70 mt-1">可用余额 · 红包、转账与付款默认账户</div>
             </div>
-            <span className="ts-11 font-semibold opacity-70 tracking-[0.18em] shrink-0">{wallet.cards.length}张银行卡</span>
+            <span className="ts-10 font-semibold opacity-75 tracking-[0.12em] shrink-0 text-right">{wallet.cards.length} ACCOUNTS<br/><span className="text-[9px] opacity-60">账户总额 ¥{(wallet.balance + wallet.cards.reduce((sum, card) => sum + card.balance, 0)).toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2})}</span></span>
           </div>
           <div className="relative flex items-end justify-between gap-3">
             <span className="ts-12 opacity-70">{wallet.transactions.length} 条流水</span>
@@ -373,7 +357,7 @@ export function WalletPanel({ onBack }: WalletPanelProps) {
 
         <section className="flex flex-col gap-3">
           <div className="flex items-center justify-between px-1">
-            <h2 className="ts-15 font-bold text-[var(--c-text-title)]">银行卡</h2>
+            <div><div className="wallet-luxe-kicker">YOUR ACCOUNTS</div><h2 className="ts-17 font-semibold text-[#292b25] mt-1">账户与银行卡</h2></div>
             <button type="button" onClick={() => setAddOpen(true)} className="min-h-[36px] px-3 rounded-full flex items-center gap-1.5 ts-12 font-semibold" style={{ background: "var(--c-icon-active)", color: "#fff" }}>
               <Plus size={15} />
               新增卡
@@ -389,10 +373,11 @@ export function WalletPanel({ onBack }: WalletPanelProps) {
               />
             ))}
           </div>
+
         </section>
 
         {activeCard ? (
-          <section className="rounded-2xl bg-[var(--c-card)] p-4 flex flex-col gap-4" style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.025)" }}>
+          <section className="wallet-luxe-panel rounded-2xl p-4 flex flex-col gap-4" style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.025)" }}>
             <div className="min-w-0">
               <div className="ts-11 text-[var(--c-text)] opacity-60">当前银行卡余额</div>
               <div className="ts-26 font-bold text-[var(--c-text-title)] mt-1">{formatWalletAmount(activeCard.balance)}</div>
@@ -433,7 +418,7 @@ export function WalletPanel({ onBack }: WalletPanelProps) {
           </section>
         ) : null}
 
-        <section className="rounded-2xl bg-[var(--c-card)] px-4 py-2 flex flex-col" style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.025)" }}>
+        <section className="wallet-luxe-panel rounded-2xl px-4 py-2 flex flex-col" style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.025)" }}>
           <div className="py-3 flex items-center justify-between">
             <h2 className="ts-15 font-bold text-[var(--c-text-title)]">流水</h2>
             <span className="ts-11 text-[var(--c-text)] opacity-55">余额、银行卡与购物付款实时同步</span>

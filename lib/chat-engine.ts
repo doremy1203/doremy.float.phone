@@ -2,10 +2,12 @@
 
 import { createSseJsonParser } from "./sse-json";
 import { makeNativeToolName } from "./native-tool-name";
+import { extractDsmlToolCalls } from "./dsml-tool-calls";
 import { maybeAppendShortcutCapability, maybeAppendPerceptionStatus } from "./offline-shortcut-capability";
 import { maybeBuildStatusInjection } from "./perception/describe";
 import { loadCharacters } from "./character-storage";
-import { buildLifeMemoryContext, buildLifePresenceContext } from "./life/life-memory-bridge";
+import { buildCharacterEconomyContext } from "./economy/character-income";
+import { buildLifePresenceContext } from "./life/life-memory-bridge";
 import { buildScreenEffectPromptHint } from "./chat-screen-effects";
 import { emitChatPluginEvent, runChatPluginTransform } from "./chat-plugin-hooks";
 import { buildChatPluginPromptFragments } from "./chat-plugin-storage";
@@ -70,7 +72,7 @@ import { prepareShortTermContext } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { findEnabledToolForSchema, getEnabledTools, type EnabledTool } from "./tool-storage";
 import { formatToolsForPrompt, formatToolSchema } from "./tool-prompt";
-import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults } from "./tool-executor";
+import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults, resolveToolCallDisplayName } from "./tool-executor";
 import type { ToolCall, ToolResult } from "./tool-executor";
 import { getCustomStickerNames, getCustomStickerExample } from "./custom-sticker-storage";
 import { formatCustomAppChatDirectivesForPrompt } from "./custom-app-chat-directives";
@@ -422,6 +424,8 @@ type ChatPromptBuildOptions = {
     excludeOfflineSessionId?: string;
     promptProfile?: CustomAppPromptProfile;
     extraWorldBookIds?: string[];
+    /** Replace bound world books for one isolated generation request. */
+    worldBookIdsOverride?: string[];
     worldBookActivationContext?: string;
     activateAllWorldBooks?: boolean;
     toolsAllowed?: boolean;
@@ -432,6 +436,8 @@ type ChatPromptBuildOptions = {
     /** 是否把当前角色的线上私聊作为 recent_chat 注入短期时间线。
      *  默认按 offline 判断；生活场景/日程等显式传 false，避免线上话题串味。 */
     includeDirectChatEntries?: boolean;
+    /** Prevent cross-app timeline and memory context from entering one-off source extraction. */
+    isolatedPromptContext?: boolean;
 };
 
 function matchesPromptProfileRef(prompt: { identifier: string; name?: string }, refs: Set<string>): boolean {
@@ -1876,7 +1882,9 @@ export async function buildChatPromptMessages(
 
     const allWorldBooks = loadWorldBooks();
     const extraWorldBookIds = options?.extraWorldBookIds ?? [];
-    const worldBookIds = [...new Set([...(activeSlot.worldBookIds || []), ...extraWorldBookIds])];
+    const worldBookIds = options?.worldBookIdsOverride
+        ? [...new Set(options.worldBookIdsOverride)]
+        : [...new Set([...(activeSlot.worldBookIds || []), ...extraWorldBookIds])];
     const worldBooks = promptProfile?.enableWorldBooks === false
         ? []
         : worldBookIds.map(id => allWorldBooks.find(w => w.id === id)).filter(Boolean) as typeof allWorldBooks;
@@ -1952,6 +1960,7 @@ export async function buildChatPromptMessages(
     const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(character.id, resolvedAppId, {
         history: historyForPromptExpanded,
         includeDirectChatEntries: options?.includeDirectChatEntries ?? isOfflineMode,
+        includeTimeline: options?.isolatedPromptContext !== true,
         includeNativeToolHistory: usesNativeActions,
         excludeOfflineSessionId: options?.excludeOfflineSessionId,
         promptTimestampOptions,
@@ -1968,8 +1977,8 @@ export async function buildChatPromptMessages(
     }
 
     const [memResults, coreResults, musicLocal, musicCloud] = await Promise.all([
-        retrieveMemoriesForPrompt(character.id, wbActivationContext, memConfig).catch(() => null),
-        retrieveCoreMemoriesForPrompt(character.id, memConfig).catch(() => null),
+        options?.isolatedPromptContext === true ? Promise.resolve(null) : retrieveMemoriesForPrompt(character.id, wbActivationContext, memConfig).catch(() => null),
+        options?.isolatedPromptContext === true ? Promise.resolve(null) : retrieveCoreMemoriesForPrompt(character.id, memConfig).catch(() => null),
         buildMusicLocalMacro(),
         buildMusicCloudMacro(),
     ]);
@@ -1981,10 +1990,15 @@ export async function buildChatPromptMessages(
     const longTermMemories = [
         memResults ? formatLongTermMemories(memResults) : "",
         memoDigest,
-        buildLifeMemoryContext(character.id),
-        buildLifePresenceContext(character.id),
+        // 生活共同事实已经由短期时间线的 life 条目注入；旧 buildLifeMemoryContext
+        // 再把同一批事实拼进长期块，会让同一件事在提示词里出现两遍。
+        // 这里只保留“当前生活状态”，历史事实交给统一短期时间线。
+        ...(options?.isolatedPromptContext === true ? [] : [
+            buildLifePresenceContext(character.id),
+            buildCharacterEconomyContext(character.id),
+        ]),
     ].filter(Boolean).join("\n\n");
-    const coreMemories = coreResults ? formatCoreMemories(coreResults) : "";
+    const coreMemories = options?.isolatedPromptContext === true ? "" : (coreResults ? formatCoreMemories(coreResults) : "");
     const scheduleSummary = buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now));
     const currentSchedule = getCurrentCalendarScheduleForPrompt("character", character.id, now);
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";
@@ -2029,7 +2043,7 @@ export async function buildChatPromptMessages(
         currentSchedule,
         coreMemories,
         longTermMemories,
-        worldBookActivationContext: options?.worldBookActivationContext || wbActivationContext,
+        worldBookActivationContext: options?.worldBookActivationContext ?? wbActivationContext,
         activateAllWorldBooks: options?.activateAllWorldBooks,
         recentBlocks,
         unifiedRecentItems,
@@ -2197,7 +2211,7 @@ export type OfflineChatCompletionResult = ParsedOfflineResponse & {
 export async function generateOfflineChatCompletion(
     session: ChatSession,
     history: ChatMessage[],
-    options?: { signal?: AbortSignal; onStreamDelta?: (delta: string) => void; includeDirectChatEntries?: boolean; appId?: string; appTags?: string[] },
+    options?: { signal?: AbortSignal; onStreamDelta?: (delta: string) => void; includeDirectChatEntries?: boolean; appId?: string; appTags?: string[]; worldBookIdsOverride?: string[]; worldBookActivationContext?: string; promptProfile?: CustomAppPromptProfile; isolatedPromptContext?: boolean; toolsAllowed?: boolean },
 ): Promise<OfflineChatCompletionResult> {
     const appId = options?.appId ?? "chat";
     const appTags = options?.appTags ?? ["chat", "offline"];
@@ -2209,6 +2223,11 @@ export async function generateOfflineChatCompletion(
             appTags,
             excludeOfflineSessionId: session.id,
             includeDirectChatEntries: options?.includeDirectChatEntries,
+            worldBookIdsOverride: options?.worldBookIdsOverride,
+            worldBookActivationContext: options?.worldBookActivationContext,
+            promptProfile: options?.promptProfile,
+            isolatedPromptContext: options?.isolatedPromptContext,
+            toolsAllowed: options?.toolsAllowed,
         },
     );
     const summaryTag = preset?.story_summary_tag?.trim() || "summary";
@@ -2391,6 +2410,12 @@ async function generateNativeChatCompletion(
 
         // 线上思维链标签解析：开启时从正文提取 <tag> 思维链（覆盖原生），并剥离标签后再做后续解析
         let displayContent = result.content;
+        // DeepSeek 可能把工具调用写成 DSML 标记混在正文里：取出来并回填为原生调用。
+        const dsmlPass = extractDsmlToolCalls(displayContent);
+        if (dsmlPass.toolCalls.length > 0) {
+            displayContent = dsmlPass.text;
+            result = { ...result, toolCalls: [...result.toolCalls, ...dsmlPass.toolCalls] };
+        }
         if (onlineThinkingEnabled) {
             const tagThinking = extractThinkingTag(displayContent, onlineThinkingTag);
             if (tagThinking) callbacks?.onReasoning?.(tagThinking);
@@ -2436,7 +2461,7 @@ async function generateNativeChatCompletion(
         const textCalls = realNativeCalls.map((call) => nativeChatToolCallToTextCall(call, nativeBundle));
         const displayedActionNames = [
             ...loaderCalls.map(item => `展开「${item.loader.label}」动作说明`),
-            ...realNativeCalls.map(call => nativeBundle.displayNameMap.get(call.name) || nativeBundle.nameMap.get(call.name) || call.name),
+            ...realNativeCalls.map(call => nativeBundle.displayNameMap.get(call.name) || nativeBundle.nameMap.get(call.name) || resolveToolCallDisplayName(call.name, { appId: options?.appId ?? "chat", sessionId: session.id, characterId: character.id, sourceEngine: "chat" })),
         ];
         const actorName = character.name;
         callbacks?.onToolNotice?.(`${actorName}正在${displayedActionNames.join("、")}...`);
@@ -2848,8 +2873,11 @@ async function generateChatCompletionCore(
         // 剔除预设配置的文本片段（<思考结束> 等残留标签），不进入消息/提示词
         filteredOutput = stripPresetTexts(filteredOutput, preset);
 
+        // 文本协议路径同样可能收到 DSML 标记：先剥掉，能解析出的调用并入本轮工具调用。
+        const dsmlPass = extractDsmlToolCalls(filteredOutput);
+        const textOutput = dsmlPass.text;
         // Parse actions (朋友圈 etc) — strip from display text but keep tool tags
-        const { cleanText: afterActionStrip, actions } = parseActionTags(filteredOutput);
+        const { cleanText: afterActionStrip, actions } = parseActionTags(textOutput);
         if (actions.length > 0) {
             throwIfAborted(options?.signal);
             dispatchActions(actions, actionContext).catch(err => console.warn("[ChatEngine] Action dispatch failed:", err));
@@ -2857,11 +2885,15 @@ async function generateChatCompletionCore(
 
         // Check for [获取指令:xxx] and [执行动作:xxx({...})]
         const toolFetches = toolsEnabled ? parseToolFetches(afterActionStrip) : [];
-        const { toolCalls } = toolsEnabled ? parseToolCalls(afterActionStrip) : { toolCalls: [] };
+        const parsedTextCalls: ToolCall[] = toolsEnabled ? parseToolCalls(afterActionStrip).toolCalls : [];
+        const dsmlTextCalls: ToolCall[] = toolsEnabled
+            ? dsmlPass.toolCalls.map(call => ({ name: call.name, args: call.args }))
+            : [];
+        const toolCalls: ToolCall[] = [...parsedTextCalls, ...dsmlTextCalls];
         // Tool directives are protocol, never user-facing prose. Strip valid directives
         // (they are persisted separately below) and discard malformed directive lines.
         const visibleText = stripMalformedTextToolDirectives(stripTextToolDirectives(afterActionStrip));
-        const assistantForToolContext = stripStateAndInnerForPrompt(filteredOutput);
+        const assistantForToolContext = stripStateAndInnerForPrompt(textOutput);
 
         // No tool activity — final round
         if (toolFetches.length === 0 && toolCalls.length === 0) {
@@ -2928,7 +2960,10 @@ async function generateChatCompletionCore(
         // Handle [执行动作:xxx({...})] — execute calls
         if (toolCalls.length > 0) {
             const actorName = toolCalls[0]?.actor || character.name;
-            const toolNotice = `${actorName}正在${toolCalls.map(t => t.name).join("、")}...`;
+            // 模型有时把原生工具名（action_xxxx）写进文本协议；执行前会解析回中文名，
+            // 状态文案也必须用同一套解析，否则聊天里只会显示一串哈希。
+            const displayNameContext = { appId: options?.appId ?? "chat", sessionId: session.id, characterId: character.id, sourceEngine: "chat" as const };
+            const toolNotice = `${actorName}正在${toolCalls.map(t => resolveToolCallDisplayName(t.name, displayNameContext)).join("、")}...`;
             callbacks?.onToolNotice?.(toolNotice);
 
             let results: Awaited<ReturnType<typeof executeToolCalls>>;

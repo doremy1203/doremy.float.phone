@@ -4,8 +4,8 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "scripts": {
-    "dev": "node --max-old-space-size=4096 scripts/local-next-server.mjs --dev",
-    "build": "node scripts/build-weixin-assistant-dist.mjs && node scripts/build-personal-push-dist.mjs && next build && node scripts/restore-backdrop-filter.mjs",
+    "dev": "node scripts/copy-pdf-worker.mjs && node --max-old-space-size=4096 scripts/local-next-server.mjs --dev",
+    "build": "node scripts/copy-pdf-worker.mjs && node scripts/build-weixin-assistant-dist.mjs && node scripts/build-personal-push-dist.mjs && next build && node scripts/restore-backdrop-filter.mjs",
     "start": "node scripts/local-next-server.mjs --prod",
     "lint": "node scripts/run-eslint.mjs",
     "test:character-id": "node scripts/test-character-id-integration.mjs",
@@ -21,7 +21,14 @@
     "push:build-dist": "node scripts/build-personal-push-dist.mjs",
     "build:glass-icons": "node scripts/build-glass-icons.mjs",
     "test:memo": "node scripts/test-memo-archive-contract.mjs",
-    "test:tool-names": "node scripts/test-native-tool-name-resolution.mjs"
+    "test:economy": "node scripts/test-joint-fund.mjs && node scripts/test-character-income.mjs && node scripts/test-wallet-bookkeeping.mjs",
+    "test:anonymous": "node scripts/test-anonymous-qa.mjs",
+    "test:files": "node scripts/test-file-text.mjs",
+    "test:tool-names": "node scripts/test-native-tool-name-resolution.mjs",
+    "test:dsml": "node scripts/test-dsml-tool-calls.mjs",
+    "test:stickers": "node scripts/test-sticker-pack-png.mjs",
+    "test:wallet-planning": "node scripts/test-wallet-planning.mjs",
+    "test:playful-app-lock": "node scripts/test-playful-app-lock.mjs"
   },
   "dependencies": {
     "@gltf-transform/functions": "^4.4.1",
@@ -47,6 +54,7 @@
     "marked": "^17.0.4",
     "motion": "^12.43.0",
     "next": "^15.1.0",
+    "pdfjs-dist": "^4.10.38",
     "pinyin-pro": "^3.28.0",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",

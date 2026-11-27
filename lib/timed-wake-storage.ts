@@ -16,6 +16,10 @@ export type TimedWakeSchedule = {
     intent: string;
     /** 创建来源：tool=角色自己约的（"你当时想着"视角）/ user=用户预约（"TA拜托你"视角）。缺省按 tool。 */
     source?: "tool" | "user";
+    /** 角色休息时保留任务，醒来后再询问。 */
+    retryIfSleeping?: boolean;
+    /** 会话正在进行其他回合时延后执行，避免丢掉必须完成的系统询问。 */
+    retryIfBusy?: boolean;
 };
 
 export function makeTimedWakeId(sessionId: string): string {
@@ -47,6 +51,13 @@ export function saveTimedWakeSchedule(schedule: TimedWakeSchedule): void {
     const next = all.filter(item => item.sessionId !== schedule.sessionId);
     next.push(schedule);
     saveTimedWakeSchedules(next);
+}
+
+/** 追加一条后台主动联系，不覆盖用户或角色已经预约的其他定时唤醒。 */
+export function appendTimedWakeSchedule(schedule: TimedWakeSchedule): void {
+    const all = loadTimedWakeSchedules();
+    if (all.some(item => item.id === schedule.id)) return;
+    saveTimedWakeSchedules([...all, schedule]);
 }
 
 export function clearTimedWakeSchedule(sessionId: string): void {

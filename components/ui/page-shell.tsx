@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, type ReactNode, type Ref } from "react";
+import { useEffect, type CSSProperties, type ReactNode, type Ref } from "react";
 import { ChevronLeft } from "lucide-react";
 
 type PageShellProps = {
@@ -11,10 +11,12 @@ type PageShellProps = {
   children: ReactNode;
   footer?: ReactNode;
   className?: string;
+  headerClassName?: string;
+  headerStyle?: CSSProperties;
   bodyRef?: Ref<HTMLDivElement>;
 };
 
-export function PageShell({ title = "", onBack, leftAction, rightAction, children, footer, className, bodyRef }: PageShellProps) {
+export function PageShell({ title = "", onBack, leftAction, rightAction, children, footer, className, headerClassName, headerStyle, bodyRef }: PageShellProps) {
   useEffect(() => {
     if (!onBack) return;
     const handleSwipeBack = (event: Event) => {
@@ -28,7 +30,7 @@ export function PageShell({ title = "", onBack, leftAction, rightAction, childre
 
   return (
     <div className={`page-shell ${className ?? ""}`}>
-      <header className="page-header" data-ui="header">
+      <header className={`page-header ${headerClassName ?? ""}`.trim()} style={headerStyle} data-ui="header">
         <div className="page-header-safe-area" />
         <div className="page-header-content">
           {onBack ? (

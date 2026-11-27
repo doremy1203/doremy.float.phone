@@ -1,4 +1,5 @@
 import { loadCharacters } from "./character-storage";
+import { buildCharacterLedgerAssetsPayload } from "./economy/character-ledger";
 import { normalizeBilingualTextInput, splitBilingualText } from "./bilingual-text";
 import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
 import { getChatMessagePreview, loadChatMessages, loadChatSessions, type ChatMessage, type ChatSession } from "./chat-storage";
@@ -5485,36 +5486,17 @@ export async function generateCheckPhoneAssets(
   previousPayload?: CheckPhoneAssetsPayload | null,
   previousUpdatedAt?: string,
 ): Promise<{ payload: CheckPhoneAssetsPayload | null; summary: string; error?: string; debugRawOutput?: string }> {
-  const { apiConfig, preset, worldBooks, regexes } = resolveCheckPhoneConfigs(characterId);
-  if (!apiConfig) return { payload: null, summary: "", error: "未找到可用的 API 配置", debugRawOutput: "" };
-
-  try {
-    const messages = await buildCheckPhoneAppMessages(characterId, "assets", preset, worldBooks, regexes, {
-      snapshotSummary: previousPayload ? formatSnapshotSummary(previousPayload) : "",
-      lastRefreshAt: previousUpdatedAt ?? "",
-    });
-    const rawOutput = await sendLLMRequest(
-      apiConfig,
-      preset,
-      messages,
-      regexes,
-      { characterName: loadCharacters().find((item) => item.id === characterId)?.name },
-      { skipOutputRegex: true, appId: "checkphone_assets" },
-    );
-
-    if (!rawOutput?.trim()) return { payload: null, summary: "", error: "LLM 返回为空", debugRawOutput: rawOutput ?? "" };
-    const { parsed } = parseAssetsBlockPayload(rawOutput);
-    const payload = normalizeAssetsPayload(parsed);
-    if (!payload) return { payload: null, summary: "", error: "无法解析资产内容", debugRawOutput: rawOutput };
-    return {
-      payload,
-      summary: formatSnapshotSummary(payload),
-      debugRawOutput: rawOutput,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "生成失败";
-    return { payload: null, summary: "", error: message, debugRawOutput: "" };
-  }
+  /* 资产页不再用 LLM 编造：角色账本是唯一真相。没有收入就显示空账本，
+     等角色通过经济事件/工具入账。 */
+  const characterName = loadCharacters().find(item => item.id === characterId)?.name || "角色";
+  const ledgerPayload = buildCharacterLedgerAssetsPayload(characterId, characterName);
+  void previousPayload;
+  void previousUpdatedAt;
+  return {
+    payload: ledgerPayload,
+    summary: ledgerPayload.headerSubtitle,
+    debugRawOutput: "",
+  };
 }
 
 function normalizePhonePayload(payload: unknown): CheckPhonePhonePayload | null {

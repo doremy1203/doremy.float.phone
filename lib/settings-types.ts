@@ -23,7 +23,16 @@ export type WorldBookEntry = {
     insertion_order: number;
 };
 
+export type WorldBookFolder = {
+    id: string;
+    name: string;
+    createdAt: number;
+    updatedAt: number;
+};
+
 export type WorldBookConfig = SettingItemMeta & {
+    /** 所属文件夹 ID。缺省（或引用了已不存在的文件夹）表示根目录，兼容旧数据。 */
+    folderId?: string;
     entries: WorldBookEntry[];
 };
 
@@ -171,6 +180,18 @@ export type VoiceApiConfig = {
     speechSpeed?: number;
     /** Minimax voice_setting.pitch（半音，±12）。缺省保持旧行为（0，原声）。 */
     speechPitch?: number;
+    /** ElevenLabs voice_settings.stability (0-1). */
+    stability?: number;
+    /** ElevenLabs voice_settings.similarity_boost (0-1). */
+    similarityBoost?: number;
+    /** ElevenLabs voice_settings.style (0-1). */
+    style?: number;
+    /** ElevenLabs voice_settings.use_speaker_boost. */
+    speakerBoost?: boolean;
+    /** 输出格式：mp3 / wav / pcm16 等，按 provider 支持能力。 */
+    outputFormat?: string;
+    /** 风格/导演指令：MiMo user message、OpenAI instructions 等。 */
+    instructions?: string;
     customVoices?: { id: string; name: string; createdAt?: number }[];
     enableSTT: boolean;
     enableTTS: boolean;

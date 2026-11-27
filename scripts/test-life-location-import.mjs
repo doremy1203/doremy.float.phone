@@ -95,5 +95,14 @@ assert.equal(sharedHome.locations.length, 1, "a home explicitly shared with the 
 assert.equal(sharedHome.locations[0].id, "home");
 assert.ok(sharedHome.locations[0].residents.includes("character-b"), "shared-home import should register the character as a resident");
 
+// 地点导入必须和七日日程生成使用不同的预设标签：复用 schedule 标签会把日程条目
+// 一起注入，模型就会返回排班 JSON（dayOffset/start/end/kind）而不是地点数组。
+const appSource = readFileSync(new URL("../components/life/life-engine-app.tsx", import.meta.url), "utf8");
+const importStart = appSource.indexOf("const importLocationsFromSource");
+const importEnd = appSource.indexOf("const importCharacterCardLocations", importStart);
+assert.ok(importStart >= 0 && importEnd > importStart, "location import entry must stay identifiable");
+const importSlice = appSource.slice(importStart, importEnd);
+assert.match(importSlice, /appTags: \["life-location-import"\]/, "location import must not reuse the schedule prompt tags");
+assert.doesNotMatch(importSlice, /lifeAppTags\("schedule"\)/, "schedule preset entries must never be injected into location import");
 
 console.log("Life location import regression tests passed.");

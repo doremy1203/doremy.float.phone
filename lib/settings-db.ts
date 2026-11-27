@@ -3,13 +3,14 @@
 // Same pattern as chat-db.ts: in-memory cache + async fire-and-forget writes.
 
 import Dexie from "dexie";
-import type { PresetConfig, WorldBookConfig, RegexConfig } from "./settings-types";
+import type { PresetConfig, WorldBookConfig, WorldBookFolder, RegexConfig } from "./settings-types";
 
 // ── Database Schema ──────────────────────────────
 
 class SettingsDatabase extends Dexie {
     presets!: Dexie.Table<PresetConfig, string>;
     worldBooks!: Dexie.Table<WorldBookConfig, string>;
+    worldBookFolders!: Dexie.Table<WorldBookFolder, string>;
     regexes!: Dexie.Table<RegexConfig, string>;
 
     constructor() {
@@ -18,6 +19,11 @@ class SettingsDatabase extends Dexie {
             presets: "id",
             worldBooks: "id",
             regexes: "id",
+        });
+        // v2: world-book folders. Existing world books and folders stay untouched;
+        // books without folderId are treated as root by the UI (legacy compatibility).
+        this.version(2).stores({
+            worldBookFolders: "id",
         });
     }
 }
@@ -35,6 +41,7 @@ const LS_MIGRATED_FLAG = "ai_phone_settings_idb_migrated_v1";
 
 let _presets: PresetConfig[] | null = null;
 let _worldBooks: WorldBookConfig[] | null = null;
+let _worldBookFolders: WorldBookFolder[] | null = null;
 let _regexes: RegexConfig[] | null = null;
 let _hydrated = false;
 let _presetsWriteQueue: Promise<void> = Promise.resolve();
@@ -60,19 +67,22 @@ export async function hydrateSettingsDb(): Promise<void> {
             const existingCount =
                 (await settingsDb.presets.count()) +
                 (await settingsDb.worldBooks.count()) +
+                (await settingsDb.worldBookFolders.count()) +
                 (await settingsDb.regexes.count());
             if (existingCount > 0) {
                 window.localStorage.setItem(LS_MIGRATED_FLAG, "1");
-                const [presets, worldBooks, regexes] = await Promise.all([
+                const [presets, worldBooks, worldBookFolders, regexes] = await Promise.all([
                     settingsDb.presets.toArray(),
                     settingsDb.worldBooks.toArray(),
+                    settingsDb.worldBookFolders.toArray(),
                     settingsDb.regexes.toArray(),
                 ]);
                 _presets = presets;
                 _worldBooks = worldBooks;
+                _worldBookFolders = worldBookFolders;
                 _regexes = regexes;
                 _hydrated = true;
-                console.log(`[SettingsDB] Migration flag missing but IndexedDB has data; reusing it: ${presets.length} presets, ${worldBooks.length} worldBooks, ${regexes.length} regexes`);
+                console.log(`[SettingsDB] Migration flag missing but IndexedDB has data; reusing it: ${presets.length} presets, ${worldBooks.length} worldBooks, ${worldBookFolders.length} worldBookFolders, ${regexes.length} regexes`);
                 return;
             }
         } catch (err) {
@@ -98,29 +108,34 @@ export async function hydrateSettingsDb(): Promise<void> {
 
             _presets = lsPresets;
             _worldBooks = lsWorldBooks;
+            _worldBookFolders = [];
             _regexes = lsRegexes;
         } catch (err) {
             console.error("[SettingsDB] Migration failed, falling back to localStorage:", err);
             _presets = safeParse(window.localStorage.getItem(LS_PRESETS_KEY));
             _worldBooks = safeParse(window.localStorage.getItem(LS_WORLDBOOKS_KEY));
+            _worldBookFolders = [];
             _regexes = safeParse(window.localStorage.getItem(LS_REGEXES_KEY));
         }
     } else {
         // Already migrated: load from IndexedDB
         try {
-            const [presets, worldBooks, regexes] = await Promise.all([
+            const [presets, worldBooks, worldBookFolders, regexes] = await Promise.all([
                 settingsDb.presets.toArray(),
                 settingsDb.worldBooks.toArray(),
+                settingsDb.worldBookFolders.toArray(),
                 settingsDb.regexes.toArray(),
             ]);
             _presets = presets;
             _worldBooks = worldBooks;
+            _worldBookFolders = worldBookFolders;
             _regexes = regexes;
-            console.log(`[SettingsDB] Loaded: ${presets.length} presets, ${worldBooks.length} worldBooks, ${regexes.length} regexes`);
+            console.log(`[SettingsDB] Loaded: ${presets.length} presets, ${worldBooks.length} worldBooks, ${worldBookFolders.length} worldBookFolders, ${regexes.length} regexes`);
         } catch (err) {
             console.error("[SettingsDB] Failed to load from IndexedDB:", err);
             _presets = [];
             _worldBooks = [];
+            _worldBookFolders = [];
             _regexes = [];
         }
     }
@@ -139,6 +154,10 @@ export function readPresetsCache(): PresetConfig[] {
 
 export function readWorldBooksCache(): WorldBookConfig[] {
     return _worldBooks ?? [];
+}
+
+export function readWorldBookFoldersCache(): WorldBookFolder[] {
+    return _worldBookFolders ?? [];
 }
 
 export function readRegexesCache(): RegexConfig[] {
@@ -200,6 +219,19 @@ export function writeWorldBooksCache(books: WorldBookConfig[]): void {
         await settingsDb.worldBooks.clear();
         await settingsDb.worldBooks.bulkPut(books);
     }).catch(err => console.warn("[SettingsDB] save worldBooks failed:", err));
+}
+
+export function writeWorldBookFoldersCache(folders: WorldBookFolder[]): void {
+    _worldBookFolders = folders;
+    if (!_hydrated && typeof window !== "undefined") {
+        console.warn("[SettingsDB] writeWorldBookFoldersCache before hydration; using additive write to avoid replacing existing worldBookFolders.");
+        settingsDb.worldBookFolders.bulkPut(folders).catch(err => console.warn("[SettingsDB] additive save worldBookFolders failed:", err));
+        return;
+    }
+    settingsDb.transaction("rw", settingsDb.worldBookFolders, async () => {
+        await settingsDb.worldBookFolders.clear();
+        await settingsDb.worldBookFolders.bulkPut(folders);
+    }).catch(err => console.warn("[SettingsDB] save worldBookFolders failed:", err));
 }
 
 export function writeRegexesCache(regexes: RegexConfig[]): void {

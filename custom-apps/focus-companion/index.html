@@ -886,10 +886,12 @@ function defaults() {
     wallGenWithCustom: false, // 用自定义壁纸的同时仍让 AI 生成壁纸（默认关：开了自定义壁纸就暂停生图，省额度）
     wallVary: true,           // 生成时随机加构图/光线变化，降低重复感
     sleepCharIds: [], sleepLullaby: true, sleepChat: true, genLogKeep: 200, sleepIdleMin: 5,
-    apptAdvanceMin: 10, apptGapMin: 5, apptMaxNudge: 3, apptGraceMin: 0, apptChatNudge: true, apptPunish: true,
+    apptAdvanceMin: 10, apptGapMin: 5, apptMaxNudge: 3, apptGraceMin: 5, apptChatNudge: true, apptPunish: true,
     apptSysAlarm: true,      /* 预约时借系统时钟立闹钟（APK）：页面被杀也准时响；网页环境自动跳过 */
     focusLevel: 'off',       /* 锁机分级：off=不开启 / L1=提醒锁 / L2=看守锁 / L3=承诺死锁 */
     lockedApps: [],          /* 常驻白名单 [{name, pkg}] —— L2 看守锁按包名放行 + 中途离开豁免依据 */
+    lockSchedules: [],       /* 独立定时锁机 [{id, startAt, endAt, task, charId, createdAt}] */
+    lockDnd: true,           /* 定时锁机时同时开勿扰（沿用用户原本策略） */
     focusAssist: false,      /* 兼容旧字段：L1 的勿扰开关（新逻辑读 focusLevel） */
     lockCooldownSec: 60,     /* L3 暂停冷静期秒数 */
     assistDndOn: false,      /* 本场专注由锁机助手开过勿扰 —— 结束后自动恢复 */
@@ -905,7 +907,8 @@ function defaults() {
     morning: { enabled: false, time: '07:00', charId: '', voice: true },
     noteLimit: 3, noteRestMin: 5, noteRewardKinds: ['rest', 'wall', 'voice'], noteLullaby: true,
     noteLinkFocus: true, noteLinkSleep: true,
-    lastMorningFired: '', periodReports: [], reportKeep: 20
+    lastMorningFired: '', periodReports: [], reportKeep: 20,
+    appLock: null, appLockAffection: 0
   };
 }
 function cfg(k) { return (S.settings || {})[k]; }
@@ -957,6 +960,12 @@ async function loadSettings() {
     S.settings.syncChatDefaultV2 = true;
   }
   if (S.settings.masteryNeed == null) S.settings.masteryNeed = 3;
+  /* 2026-11：预约到点不再 T-0 立即判失约，默认给 5 分钟宽限。
+     老存档里 apptGraceMin 是 0 的，一次性迁到 5；用户之后仍可改回 0。 */
+  if (S.settings.apptGraceV2 !== true) {
+    if (Number(S.settings.apptGraceMin) === 0) S.settings.apptGraceMin = 5;
+    S.settings.apptGraceV2 = true;
+  }
   if (!Array.isArray(S.settings.bankCats)) S.settings.bankCats = [];
   if (S.settings.punishCat == null) S.settings.punishCat = '';
   ['quizMixSrc', 'quizMixKind'].forEach(k => {
@@ -1523,6 +1532,8 @@ function tick() {
       pushWidget(st);
     } catch (e) { }
   })();
+  /* 专注悬浮胶囊：每秒调用但只有签名变化才真正推原生（暂停/任务/阶段变化全覆盖） */
+  try { syncFocusOverlay(S.session); } catch (e) { }
   /* 通行证查岗：APK 走原生查岗浮层（不要求专注 App 在前台）；网页/旧壳才弹 APP 内层 */
   (function () {
     const c = S.settings.wlCheckin;
@@ -1560,7 +1571,7 @@ function tick() {
      页面里的秒表和 visibilitychange 都断了，重开只能靠这个心跳反算离开多久 */
   s.lastAliveAt = now;
   if (now - (s.lastAliveSaved || 0) > 10000) { s.lastAliveSaved = now; saveSession(); }
-  if (gap > 4200 && !s.justResumed) { onAway(Math.round(gap / 1000)); return; }
+  if (gap > 4200 && !s.justResumed) { onAway(Math.round(gap / 1000), now - gap); return; }
   /* 真实专注时长：只累计「这一拍确实在走」的时间。
      暂停（上面已 return）、切到别的 APP / 关掉 APP（定时器被掐停，或 gap 超阈值走了离开判定）、
      刚回到前台的那一下（justResumed）都不计入 —— 结算从此不再按「设定时长」估。 */
@@ -1615,16 +1626,37 @@ document.addEventListener('visibilitychange', function () {
   const s = S.session;
   if (document.hidden) { awayStartAt = Date.now(); return; }
   if (!awayStartAt) return;
+  const since = awayStartAt;
   const sec = (Date.now() - awayStartAt) / 1000; awayStartAt = 0;
-  if (sec >= 2 && s && s.status === 'running' && !s.paused) onAway(sec);
+  if (sec >= 2 && s && s.status === 'running' && !s.paused) onAway(sec, since);
 });
-async function onAway(sec) {
+async function onAway(sec, since) {
   const s = S.session;
   if (!s || s.status !== 'running' || s.paused || S.lock) return;
   if (Date.now() - lastAwayHandled < 4000) return;
   lastAwayHandled = Date.now();
   const grace = Number(cfg('graceSec') || 8);
   if (sec <= grace) { pushMsg(s, 'sys', `离开 ${Math.round(sec)} 秒，在宽限（${grace}秒）内，不计违规`); await saveSession(); render(); return; }
+  /* 白名单应用内的时间不算「逃跑」：查离开期间打开过的应用轨迹，而不是
+     回来时的当前应用（那时前台已经是 Float 自己）。只有轨迹里的应用全在白名单，
+     才算合规离开；混进任意一个非白名单应用，就继续按原规则处理。 */
+  if (since && API && API.device && typeof API.device.foregroundTrace === 'function') {
+    try {
+      const trace = await sdk(() => API.device.foregroundTrace({ startMs: since }), null);
+      const rows = (trace && trace.ok && Array.isArray(trace.packages)) ? trace.packages : [];
+      const allowed = new Set(lockedAppsFor());
+      const own = pkg => pkg === 'app.floatphone.shell' || pkg === 'app.floatphone.shell.dev'
+        || pkg === 'com.android.systemui';
+      const bad = rows.map(x => String((x && x.package) || '')).filter(Boolean)
+        .filter(pkg => !own(pkg) && !allowed.has(pkg));
+      if (rows.length && !bad.length) {
+        const names = rows.map(x => x.label || x.package).filter(Boolean).slice(0, 3).join('、');
+        pushMsg(s, 'sys', `离开 ${Math.round(sec)} 秒：${names || '白名单应用'} 在本次白名单里，不计违规`);
+        await saveSession(); render();
+        return;
+      }
+    } catch (e) { }
+  }
   s.violations = s.violations || [];
   const v = { type: 'leave', at: Date.now(), detail: `中途离开 ${Math.round(sec)} 秒`, excused: false };
   s.violations.push(v);
@@ -1742,18 +1774,27 @@ function sessionEndAt(s) {
 }
 /* 通行证生效/过期时重推白名单：看守锁的黑名单在启动时冻结，必须重推才能即时放行或重新锁上。
    update 只换白名单/延长截止，不重置计时基准；老 APK 没有 update 时才退回 lockStart。 */
-function syncLockNow() {
-  const s = S.session;
-  if (!s || s.status !== 'running') return;
+async function syncLockNow() {
   if (typeof API === 'undefined' || !API || !API.device) return;
-  const until = sessionEndAt(s);
-  s.lockUntil = until;
+  const s = S.session;
+  let until = 0;
+  if (s && s.status === 'running') {
+    until = sessionEndAt(s);
+    s.lockUntil = until;
+  } else if (typeof API.device.lockStatus === 'function') {
+    /* 没有进行中的网页会话，但可能有「长时段定时锁机」已经在跑；
+       通行证/白名单变更仍要推给原生，否则用户批了通行证也解不开。 */
+    const st = await sdk(() => API.device.lockStatus(), null);
+    if (!st || !st.running) return;
+    until = Number(st.until) || 0;
+  } else return;
   const payload = { packages: JSON.stringify(lockedAppsFor()), until };
   const fn = API.device.lockUpdate || API.device.lockStart;
   if (!fn) return;
   sdk(() => fn(payload), null).catch(() => { });
 }
 async function releaseAssistLock() {
+  await syncFocusOverlay(null);
   S.settings.assistLockOn = false;
   await saveSettings(true);
   await sdk(() => API.device.lockStop(), null).catch(() => { });
@@ -2023,6 +2064,9 @@ function applyAppPick(app) {
     S.settings.lockedApps = (cfg('lockedApps') || []).filter(x => x.pkg !== app.package).concat([{ name: app.label, pkg: app.package }]);
     saveSettings(true);
     toast('🧱 已加入常驻白名单：' + app.label);
+  } else if (t === 'appLock') {
+    S.draft.appLockApp = { label: app.label, pkg: app.package };
+    toast('已选择要锁的应用：' + app.label);
   } else {
     S.draft.wlAppName = app.label; S.draft.wlPackage = app.package;
     toast('已选择：' + app.label);
@@ -2096,6 +2140,120 @@ function assistLevelFor(session) {
   if (raw) return raw;
   return assistLevelNow();
 }
+/* 专注悬浮胶囊：网页只推快照（phaseEndsAt/tasks），原生每秒自己算倒计时。 */
+let lastFocusOverlaySig = '';
+function focusOverlaySnapshot(s) {
+  return {
+    active: !!(s && s.status === 'running'),
+    phaseEndsAt: Number(s && s.phaseEndsAt) || 0,
+    paused: !!(s && s.paused),
+    phaseLabel: s && s.phase === 'break' ? '休息' : '专注',
+    tasks: ((s && s.plan) || []).map(t => ({ text: String(t.content || ''), done: !!t.done }))
+  };
+}
+async function syncFocusOverlay(s) {
+  if (!API || !API.device) return;
+  const snap = focusOverlaySnapshot(s);
+  const sig = JSON.stringify(snap);
+  if (sig === lastFocusOverlaySig) return;
+  lastFocusOverlaySig = sig;
+  if (!snap.active) {
+    if (typeof API.device.focusOverlayStop === 'function') {
+      await sdk(() => API.device.focusOverlayStop(), null).catch(() => { });
+    }
+    return;
+  }
+  if (typeof API.device.focusOverlayUpdate !== 'function') return;
+  await sdk(() => API.device.focusOverlayUpdate(snap), null).catch(() => { });
+}
+async function applyFocusOverlayEvents() {
+  const s = S.session;
+  if (!s || s.status !== 'running') return;
+  if (!API || !API.device || typeof API.device.focusOverlayEvents !== 'function') return;
+  const r = await sdk(() => API.device.focusOverlayEvents(), null).catch(() => null);
+  const events = (r && Array.isArray(r.events)) ? r.events : [];
+  if (!events.length) return;
+  let changed = false;
+  for (const ev of events) {
+    const i = Number(ev && ev.index);
+    const t = (s.plan || [])[i];
+    if (!t) continue;
+    const done = !!(ev && ev.done);
+    if (!!t.done === done) continue;
+    t.done = done;
+    pushMsg(s, 'sys', done ? `✓ 完成：${t.content}` : `取消勾选：${t.content}`);
+    syncSelfTasksFromPlan(s);
+    changed = true;
+    if (done) await onTaskDone(s, t.content);
+  }
+  if (changed) {
+    await saveSession(true);
+    await syncFocusOverlay(s);
+    render();
+  }
+}
+async function consumeScheduledFocus() {
+  if (!API || !API.device || typeof API.device.scheduledFocusConsume !== 'function') return;
+  if (S.session && S.session.status === 'running') return;
+  const r = await sdk(() => API.device.scheduledFocusConsume(), null).catch(() => null);
+  const rec = r && r.record;
+  if (!rec) return;
+  /* 独立定时锁机没有专注会话，不要把它补录成一次「专注」。 */
+  if (String(rec.id || '').indexOf('manual_') === 0) return;
+  const startAt = Number(rec.startAt) || 0;
+  const endAt = Number(rec.endAt) || 0;
+  if (!startAt || endAt <= startAt) return;
+  let charIds = [];
+  try { charIds = JSON.parse(String(rec.charIds || '[]')); } catch (e) { charIds = []; }
+  charIds = (Array.isArray(charIds) ? charIds : []).filter(id => charById(id));
+  const cid = charIds[0] || anyCharId();
+  if (!cid) return;
+  const minutes = Math.max(1, Math.min(600, Number(rec.minutes) || Math.round((endAt - startAt) / 60000)));
+  const task = String(rec.task || '定时专注').slice(0, 80);
+  const apptId = String(rec.id || '').replace(/^appt_/, '');
+  const appt = (S.appts || []).find(a => String(a.id) === apptId);
+  if (appt && appt.status === 'pending') {
+    appt.status = 'started'; appt.startedAt = startAt; appt.note = '定时锁机自动开始';
+    await updateAppt(appt);
+  }
+  const now = Date.now();
+  if (now >= endAt) {
+    const focusSec = Math.max(60, Math.round((endAt - startAt) / 1000));
+    const sess = {
+      id: '', createdAt: startAt, startAt, endAt, date: dkey(new Date(startAt)),
+      charIds, focusMin: minutes, breakMin: 0, cycles: 1, cycle: 1, phase: 'focus',
+      phaseEndsAt: endAt, totalFocusSec: focusSec, paused: false,
+      plan: [{ content: task, est: 0, done: false }], extraTasks: [], selfTasks: [], violations: [], msgs: [],
+      status: 'passed', scheduledAuto: true, autoSettled: true,
+      summary: '定时锁机完成 ' + Math.round(focusSec / 60) + ' 分钟（自动结算）'
+    };
+    const saved = await DB.create(T.SESSION, { data: sess });
+    if (saved) sess.id = saved.id;
+    S.sessions = (S.sessions || []).concat([sess]);
+    if (appt) { appt.status = 'done'; appt.note = '定时锁机已自动完成'; await updateAppt(appt); }
+    const mins = Math.round(focusSec / 60);
+    const earn = Math.max(1, Math.round(mins * coinRate() * (1 + coinBonus() / 100)));
+    await coinAdd(earn, '定时锁机完成的专注 ' + mins + ' 分钟');
+    await addPublic('task', `定时锁机：${task} · ${mins} 分钟（自动结算）`, cid, { sessionId: sess.id });
+    await syncTimeline(cid, `定时锁机自动完成了 ${mins} 分钟的专注：${task}。`, 'scheduled_focus_done', {});
+    toast('⏱ 已补录定时锁机：' + mins + ' 分钟，专注币 +' + earn);
+    render();
+    return;
+  }
+  await startSession({
+    charIds: charIds.length ? charIds : [cid],
+    focusMin: minutes,
+    breakMin: Math.max(1, Number(cfg('breakMin') || 5)),
+    cycles: 1,
+    plan: [{ content: task, est: 0, done: false }],
+    reviewEvery: 'focus',
+    voiceOn: cfg('voiceMode') !== 'off',
+    startedAt: startAt,
+    phaseEndsAt: endAt,
+    totalFocusSec: Math.max(0, Math.round((now - startAt) / 1000)),
+    scheduledAuto: true
+  });
+}
 async function startSession(o) {
   /* 防重复：已经有一段专注在跑时不再另起一段 ——
      否则会出现两段同时计时，看起来就是「完成任务后又重复专注」 */
@@ -2120,12 +2278,14 @@ async function startSession(o) {
   if (pendingLevel === 'L3') S.draft.assistForSession = pendingLevel;   // 已签：本场锁定等级
   const plan = (o.plan || []).filter(t => t.content && t.content.trim());
   const cycles = Math.max(1, Number(o.cycles) || 1);
+  const startedAt = Number(o.startedAt) || Date.now();
   const s = {
-    id: '', createdAt: Date.now(), startAt: Date.now(), date: dkey(),
+    id: '', createdAt: Date.now(), startAt: startedAt, date: dkey(new Date(startedAt)),
     charIds: o.charIds.slice(), focusMin: Number(o.focusMin) || 25, breakMin: Number(o.breakMin) || 5,
     cycles: cycles, cycle: 1, phase: 'focus',
-    phaseEndsAt: Date.now() + (Number(o.focusMin) || 25) * 60000,
-    totalFocusSec: 0, paused: false, pausedAt: 0, pauseReason: '', excuseUsed: 0,
+    phaseEndsAt: Number(o.phaseEndsAt) || (startedAt + (Number(o.focusMin) || 25) * 60000),
+    totalFocusSec: Math.max(0, Number(o.totalFocusSec) || 0), paused: false, pausedAt: 0, pauseReason: '', excuseUsed: 0,
+    scheduledAuto: !!o.scheduledAuto,
     plan: plan.map(t => ({ content: t.content.trim(), est: Number(t.est) || 0, done: false })),
     extraTasks: [], violations: [], msgs: [], selfTasks: [],
     lastMsgAt: Date.now(), lastSelfAt: Date.now(), status: 'running',
@@ -2142,6 +2302,7 @@ async function startSession(o) {
   await genSelfTasks(s);
   await scheduleNotices(s);
   go('running');
+  syncFocusOverlay(s);
   /* 锁机分级：L1/L3 专注期勿扰（结束后由 tick 自动恢复） */
   s.assistLevel = assistLevelFor(s);
   S.draft.assistForSession = null;
@@ -2173,8 +2334,14 @@ async function startSession(o) {
     }).catch(() => { });
   }
   if (s.assistLevel !== 'off' && API && API.device && API.device.dndSet) {
-    sdk(() => API.device.dndSet({ on: true }), null).then((r) => {
-      if (r && r.ok) { S.settings.assistDndOn = true; saveSettings(true); pushMsg(s, 'sys', '🔒 勿扰已开启（锁机助手，专注结束自动恢复）'); render(); }
+    sdk(() => API.device.dndSet({ on: true, until: sessionEndAt(s) }), null).then((r) => {
+      if (r && r.ok) {
+        S.settings.assistDndOn = true; saveSettings(true);
+        pushMsg(s, 'sys', r.allowMedia === false
+          ? '🔒 勿扰已按你原本的规则开启；系统勿扰没有允许媒体，角色语音可能听不到，需要的话去系统勿扰设置里允许媒体。'
+          : '🔒 勿扰已开启（沿用你原本的允许名单，专注结束自动恢复）');
+        render();
+      }
     }).catch(() => { });
   }
   setTimeout(() => roleSay(s, 'start'), 600);
@@ -2185,6 +2352,20 @@ async function startSession(o) {
 }
 async function onPhaseEnd() {
   const s = S.session; if (!s) return;
+  if (s.phase === 'focus' && s.scheduledAuto) {
+    const mins = Math.max(1, Math.round((s.totalFocusSec || Math.max(60, (Date.now() - (s.startAt || Date.now())) / 1000)) / 60));
+    const earn = Math.max(1, Math.round(mins * coinRate() * (1 + coinBonus() / 100)));
+    s.status = 'passed'; s.autoSettled = true; s.endAt = Date.now();
+    s.totalFocusSec = Math.max(s.totalFocusSec || 0, mins * 60);
+    s.summary = '定时锁机完成 ' + mins + ' 分钟（自动结算）';
+    await releaseAssistLock(); stopTicking();
+    await coinAdd(earn, '定时锁机完成的专注 ' + mins + ' 分钟');
+    const cid = pickOneChar(s.charIds);
+    await addPublic('task', `定时锁机完成：${mins} 分钟（自动结算）`, cid, { sessionId: s.id });
+    await syncTimeline(cid, `定时锁机自动完成了 ${mins} 分钟专注，已自动结算。`, 'scheduled_focus_done', {});
+    await saveSession(true); toast('⏱ 定时锁机完成：' + mins + ' 分钟，专注币 +' + earn); render();
+    return;
+  }
   if (s.phase === 'focus') {
     /* totalFocusSec 已由 tick 逐秒累加（只算真正在走的秒数），这里不再按设定时长估算 */
     if (s.reviewEvery === 'session' && (s.cycle || 1) < s.cycles) {
@@ -2197,14 +2378,14 @@ async function onPhaseEnd() {
     S.draft.reviewErr = '';                 // 新一轮校验：清掉上一轮的失败提示
     pushMsg(s, 'sys', '本轮专注结束，进入校验流程');
     await settleSelfTasks(s, pickOneChar(s.charIds), '这轮专注结束了');
-    await saveSession(true); notify('专注结束', '来填写本次学习反馈与总结吧');
+    await saveSession(true); await syncFocusOverlay(s); notify('专注结束', '来填写本次学习反馈与总结吧');
     go('review'); return;
   }
   s.cycle = (s.cycle || 1) + 1;
   if (s.cycle > s.cycles) { s.status = 'done'; s.endAt = Date.now(); await releaseAssistLock(); stopTicking(); await saveSession(true); render(); return; }
   s.phase = 'focus'; s.phaseEndsAt = Date.now() + s.focusMin * 60000;
   pushMsg(s, 'sys', `休息结束 · 第 ${s.cycle}/${s.cycles} 轮专注开始`);
-  await saveSession(true); render(); roleSay(s, 'start');
+  await saveSession(true); render(); await syncFocusOverlay(s); roleSay(s, 'start');
 }
 async function scheduleNotices(s) {
   if (!cfg('notif') || !API || !API.tasks) return;
@@ -2427,9 +2608,16 @@ async function sendNote(text) {
     pushMsg(s, 'sys', `🌿 他让你松一口气：这 ${min} 分钟不计入专注，到点自动接着走`);
     await saveSession(true);
   } else if (rec.reward === 'wall' && s) {
-    s.wallUnlocked = Math.max(Number(s.wallUnlocked) || 0, (s.walls || []).length);
-    await unlockWalls(s, s.wallUnlocked + 1);
-    ensureWall(s, (s.walls || []).length + 2, '纸条里他让我再坚持了一会');
+    /* 关掉 AI 壁纸后不能再拿上一张旧的当奖励；没有新图就把这项奖励降级。 */
+    if (!canGenWall()) {
+      rec.reward = 'none';
+      pushMsg(s, 'sys', '壁纸生成已关闭：这次不再解锁旧壁纸，换成一句口头奖励。');
+      await saveSession(true);
+    } else {
+      s.wallUnlocked = Math.max(Number(s.wallUnlocked) || 0, (s.walls || []).length);
+      await unlockWalls(s, s.wallUnlocked + 1);
+      ensureWall(s, (s.walls || []).length + 2, '纸条里他让我再坚持了一会');
+    }
   } else if (rec.reward === 'voice') {
     await speak(cid, rec.reply, 'note', '小纸条 · 哄你一句');
   }
@@ -2887,6 +3075,14 @@ function cancelWlCheckinNative(passId) {
 }
 async function scheduleWlCheckin(pass) {
   if (!pass || pass.status !== 'active' || !pass.expireAt) return;
+  /* 通行证比本场专注短时，查岗会被排到过期之后；先把有效期覆盖到专注结束+查岗宽限。 */
+  if (S.session && S.session.status === 'running') {
+    const need = sessionEndAt(S.session) + 2 * 60000;
+    if (pass.expireAt < need) {
+      pass.expireAt = need;
+      if (pass.dbId) await DB.update(T.WLP, pass.dbId, JSON.parse(JSON.stringify(pass)));
+    }
+  }
   const winStart = Date.now() + 60000;
   const winEnd = Math.max(winStart + 60000, pass.expireAt - 2 * 60000);
   const fireAt = winStart + Math.random() * Math.max(60000, winEnd - winStart);
@@ -2977,6 +3173,8 @@ async function wlCheckinPhoto() {
 async function wlCheckinExpire() {
   const c = S.settings && S.settings.wlCheckin;
   if (!c || c.done) return;
+  /* 已经交了截图但角色还没来得及判定：等判定，不按「没交」收回通行证。 */
+  if (c.done === 'photo') return;
   const pass = (S.wlPasses || []).find(x => x.id === c.passId);
   if (pass && pass.verdict) {
     c.done = 'verdict'; await saveSettings(true);
@@ -3150,6 +3348,12 @@ async function saveAlbum(kind, dataUrl, meta) {
   let ref = '';
   const st = await sdk(() => API.media.put({ dataUrl: dataUrl }), null);
   if (st && st.ref) ref = st.ref;
+  /* 同一份媒体内容只保留一条壁纸记录；否则同一 ref 会被反复 saveAlbum，
+     壁纸库里出现一排一模一样的图，而且每条都占一条记录。 */
+  if (ref) {
+    const existing = (S.album || []).find(x => x && x.ref === ref);
+    if (existing) return existing;
+  }
   const rec = {
     kind: kind, ref: ref, at: Date.now(), date: dkey(), charId: meta.charId || '',
     title: meta.title || (kind === 'sleep' ? '睡眠壁纸' : kind === 'reward' ? '奖励留念' : kind === 'streak' ? '连续作息奖励' : '专注壁纸'),
@@ -3239,8 +3443,13 @@ function wallMode() {
 }
 async function ensureWall(s, n, taskText) {
   if (!s) return;
-  /* 总开关：开了之后专注壁纸彻底不再生成（省额度、也不再被重复的图刷屏） */
-  if (!canGenWall()) { s.wallpaperError = ''; return; }
+  /* 总开关：开了之后专注壁纸彻底不再生成（省额度、也不再被重复的图刷屏）。
+     同时清掉上一场遗留的生成图，避免「没生成新图却继续铺旧图」。 */
+  if (!canGenWall()) {
+    s.wallpaperError = '';
+    if (!cfg('customWallUse')) s.wallpaperData = '';
+    return;
+  }
   if (!API || !API.ai || !API.ai.generateImage) { s.wallpaperError = '生图不可用，请先配置生图 API'; return; }
   s.walls = s.walls || [];
   s.wallTarget = Math.max(Number(s.wallTarget) || 0, Math.max(1, Number(n) || 1));
@@ -3321,11 +3530,18 @@ async function onTaskDone(s, taskText) {
      于是他的进度条一直停在 0，看起来就是「进度没跟着任务同步」。 */
   syncSelfTasksFromPlan(s);
   const doneN = (s.plan || []).filter(t => t.done).length + (s.extraTasks || []).filter(t => t.done).length;
-  s.wallUnlocked = Math.max(Number(s.wallUnlocked) || 0, doneN);
-  await unlockWalls(s, s.wallUnlocked);
-  await saveSession(true);
-  if (S.session === s) render();
-  ensureWall(s, s.wallUnlocked + 1, taskText);     // 再攒一张新的，留给下一项任务解锁
+  if (canGenWall()) {
+    s.wallUnlocked = Math.max(Number(s.wallUnlocked) || 0, doneN);
+    await unlockWalls(s, s.wallUnlocked);
+    await saveSession(true);
+    if (S.session === s) render();
+    ensureWall(s, s.wallUnlocked + 1, taskText);     // 再攒一张新的，留给下一项任务解锁
+  } else {
+    /* 关掉 AI 壁纸后，完成任务不再解锁历史壁纸；否则就是“没生成新的，却把旧图奖励一遍”。 */
+    await saveSession(true);
+    if (S.session === s) render();
+  }
+  await syncFocusOverlay(s);
 }
 /* ---------- 壁纸样式：三套提示词，可固定也可轮换 ---------- */
 const WALL_STYLES = [
@@ -4874,6 +5090,10 @@ VIEWS.home = function () {
     </div>
     <div class="row mt10" style="gap:8px">
       <button class="btn sm ghost grow" data-act="gotoView" data-view="me">⚙️ 设置与数据</button>
+      <button class="btn sm ghost grow" data-act="gotoView" data-view="applock">🎭 角色小手段</button>
+    </div>
+    <div class="row mt8" style="gap:8px">
+      <button class="btn sm ghost grow" data-act="gotoView" data-view="appt">⏰ 设置定时锁机时段</button>
     </div>
   </div>`;
 };
@@ -4902,6 +5122,116 @@ function initDraft() {
     fpSel: (S.draft && S.draft.fpSel) || ''
   };
 }
+/* ---------- 角色小手段：单应用密码锁 ---------- */
+function appLockRule() { return S.settings && S.settings.appLock ? S.settings.appLock : null; }
+function appLockScore() { return clamp(Number(cfg('appLockAffection') || 0), 0, 100); }
+async function appLockChatAffinity(cid) {
+  try {
+    const h = await sdk(() => API.chat.readHistory({ characterId: cid, limit: 40 }), null);
+    const list = Array.isArray(h) ? h : ((h && h.messages) || []);
+    for (let i = list.length - 1; i >= 0; i--) {
+      const row = list[i] || {};
+      /* 宿主会把解析后的状态值一起返回；好感度标签本身已从正文剥离，
+         只看 content 会永远是 0。先读 stateValues，再兼容旧版 content/raw。 */
+      const sv = Array.isArray(row.stateValues) ? row.stateValues : [];
+      for (const item of sv) {
+        if (!item || String(item.name || '').indexOf('好感度') < 0) continue;
+        const n = Number(item.value);
+        if (Number.isFinite(n)) return clamp(n, 0, 100);
+      }
+      const text = String(row.content || row.text || row.rawResponseText || '');
+      const m = text.match(/\[好感度[:：]\s*(\d{1,3})\]/);
+      if (m) return clamp(Number(m[1]) || 0, 0, 100);
+    }
+  } catch (e) { }
+  return 0;
+}
+function appLockTarget() { return S.draft.appLockApp || (appLockRule() ? { label: appLockRule().label, pkg: appLockRule().target } : null); }
+async function startPlayfulAppLock(appArg, charArg, thresholdArg) {
+  const app = appArg || appLockTarget();
+  const rule = appLockRule();
+  const cid = charArg || ((rule && rule.charId) || anyCharId());
+  if (!app || !app.pkg) { toast('先选一个要锁的应用'); return; }
+  if (!cid) { toast('还没有角色'); return; }
+  if (!API || !API.device || typeof API.device.appLockStart !== 'function') { toast('当前壳版本不支持角色小手段'); return; }
+  const c = charById(cid);
+  const threshold = clamp(Number(thresholdArg || cfg('appLockThreshold') || 60), 0, 100);
+  const r = await sdk(() => API.device.appLockStart({
+    target: app.pkg, label: app.label, charId: cid,
+    charName: c ? c.name : 'TA', avatar: (c && c.avatar) || '',
+    style: {
+      title: String(cfg('appLockTitle') || '').slice(0, 40),
+      subtitle: String(cfg('appLockSubtitle') || '').slice(0, 120),
+      background: String(cfg('appLockBackground') || '').slice(0, 800000),
+      avatar: (c && c.avatar) || '',
+      showAvatar: cfg('appLockShowAvatar') !== false,
+      showTitle: cfg('appLockShowTitle') !== false,
+      showSubtitle: cfg('appLockShowSubtitle') !== false,
+      showFloatButton: cfg('appLockShowFloat') !== false
+    }
+  }), null);
+  if (!r || r.ok !== true) { toast('小手段没启动：' + ((r && r.reason) || '壳不支持')); return; }
+  S.settings.appLock = { target: app.pkg, label: app.label, charId: cid, threshold, active: true, startedAt: Date.now() };
+  S.settings.appLockAffection = 0;
+  await saveSettings(true);
+  toast('🎭 已锁住「' + app.label + '」：只有 TA 知道密码');
+  render();
+}
+async function stopPlayfulAppLock() {
+  try { if (API && API.device && API.device.appLockStop) await sdk(() => API.device.appLockStop(), null); } catch (e) { }
+  if (S.settings.appLock) S.settings.appLock.active = false;
+  await saveSettings(true);
+  toast('已解除小手段');
+  render();
+}
+VIEWS.applock = function () {
+  const rule = appLockRule();
+  const target = appLockTarget();
+  const cid = (rule && rule.charId) || anyCharId();
+  const c = charById(cid);
+  const threshold = clamp(Number(cfg('appLockThreshold') || (rule && rule.threshold) || 60), 0, 100);
+  const score = appLockScore();
+  return `<div class="card" style="background:linear-gradient(160deg,rgba(255,180,200,.12),rgba(255,255,255,.03));border-color:rgba(255,180,200,.3)">
+    <div class="row between"><div class="grow"><h3>🎭 角色小手段</h3>
+      <div class="tiny mt6">让 TA 单独锁住一个应用。锁页只有密码框，不在锁页聊天；聊天、求情、好感度都在 Float 聊天室里。</div></div>
+      <div style="font-size:30px">🔐</div></div>
+    ${rule && rule.active ? `<div class="tiny mt10" style="color:var(--gold)">正在锁住：${esc(rule.label || rule.target)} · 密码只有 ${esc(c ? c.name : 'TA')} 知道</div>` : ''}
+  </div>
+  <div class="card"><h3>锁哪个应用</h3>
+    <div class="row mt8" style="gap:8px">
+      <button class="btn ghost grow" data-act="appLockPick">${target ? '换一个应用' : '选择应用'}</button>
+      <div class="grow" style="min-width:0"><div class="tiny">${target ? esc(target.label) + ' · ' + esc(target.pkg) : '还没选应用'}</div></div>
+    </div>
+    <label class="fl">告诉 TA 密码所需好感度（0-100）</label>
+    <input class="input" type="number" inputmode="numeric" data-in="setting.appLockThreshold" data-num="1" value="${threshold}">
+    <div class="tiny mt8">当前好感度：<b>${score}</b> / ${threshold}。你在 Float 聊天室和 TA 说话会慢慢涨；到阈值后，TA 可以选择告诉你密码，也可能继续逗你。</div>
+    <label class="fl">锁页标题（留空用默认）</label>
+    <input class="input" data-in="setting.appLockTitle" value="${esc(cfg('appLockTitle') || '')}" placeholder="例如：今天这个门，我说了算">
+    <label class="fl">锁页副标题</label>
+    <input class="input" data-in="setting.appLockSubtitle" value="${esc(cfg('appLockSubtitle') || '')}" placeholder="例如：想开门？先来跟我说说好话。">
+    <div class="chips mt10">
+      <button class="chip ${cfg('appLockShowAvatar') !== false ? 'on' : ''}" data-act="toggleSetting" data-k="appLockShowAvatar">显示头像</button>
+      <button class="chip ${cfg('appLockShowTitle') !== false ? 'on' : ''}" data-act="toggleSetting" data-k="appLockShowTitle">显示标题</button>
+      <button class="chip ${cfg('appLockShowSubtitle') !== false ? 'on' : ''}" data-act="toggleSetting" data-k="appLockShowSubtitle">显示说明</button>
+      <button class="chip ${cfg('appLockShowFloat') !== false ? 'on' : ''}" data-act="toggleSetting" data-k="appLockShowFloat">显示去 Float 按钮</button>
+      <label class="chip" style="cursor:pointer">上传锁页背景<input id="appLockBgInput" type="file" accept="image/*" style="display:none"></label>
+      ${cfg('appLockBackground') ? '<button class="chip on" data-act="appLockBgClear">删除背景图</button>' : ''}
+    </div>
+    ${cfg('appLockBackground') ? '<div class="tiny mt6">已设置自定义背景</div>' : ''}
+    <div class="row mt10" style="gap:8px">
+      ${rule && rule.active
+        ? `<button class="btn warn grow" data-act="appLockStop">解除小手段</button>`
+        : `<button class="btn primary grow" data-act="appLockStart">锁住这个应用</button>`}
+      <button class="btn ghost grow" data-act="appLockOpenChat">去 Float 找 TA</button>
+    </div>
+  </div>
+  <div class="card"><h3>怎么开锁</h3>
+    <div class="tiny" style="line-height:1.9">1. 打开被锁应用 → 弹出锁页，只有密码输入框。<br>
+    2. 点「去 Float 找 TA」回聊天室，和 TA 说话/求情。<br>
+    3. 好感度达到阈值后，TA 可能把密码告诉你；密码不会显示在设置页、通知或锁页。<br>
+    4. 回到锁页输入密码。输错没有提示，每次锁应用都会换新密码。</div>
+  </div>`;
+};
 VIEWS.setup = function () {
   const d = S.draft.plan ? S.draft : (initDraft(), S.draft);
   const sel = d.charIds || [], wl = cfg('whitelist') || [], lib = cfg('punishLib') || [], fps = fpList();
@@ -5730,7 +6060,8 @@ VIEWS.album = function () {
     return `<div class="card">${meta}
       <img id="albBig" data-ref="${esc(big.id)}" src="" style="width:100%;border-radius:14px;margin-top:10px;display:block;background:#1a2030;min-height:200px" alt="">
       <button class="btn primary block mt10" data-act="albumDownload" data-id="${esc(big.id)}">⬇️ 下载这张壁纸</button>
-      <button class="btn block ghost mt8" data-act="albumFav" data-id="${esc(big.id)}">⭐ 收藏这张壁纸</button></div>`;
+      <button class="btn block ghost mt8" data-act="albumFav" data-id="${esc(big.id)}">⭐ 收藏这张壁纸</button>
+      <button class="btn block ghost mt8" data-act="albumDelete" data-id="${esc(big.id)}">🗑 删除这张壁纸</button></div>`;
   }
   return `
   ${tip ? `<div class="card" style="border-color:rgba(94,234,212,.45);background:linear-gradient(160deg,rgba(94,234,212,.14),rgba(255,255,255,.03))">
@@ -7881,7 +8212,7 @@ VIEWS.help = function () {
     · <b>查我的专注情况</b> —— 问「我这两天学得怎么样」，他会去读你的真实记录（今日/本周分钟数、次数、通过率、最有效率的时段、违规、连续打卡、专注币）。<br>
     · <b>看昨晚睡得怎么样</b> —— 他知道你昨晚睡了多久、酝酿了多久、中途醒了几次。<br>
     · <b>帮我记一条待办</b> —— 你说「帮我记一下」，这条待办就进了「首页 → 📝 待办」，开始专注时能直接选。<br>
-    · <b>跟我约一段专注</b> —— 他约你的时间会变成一条真的预约：到点前提醒你准备，每 5 分钟催一次、共 3 次，连着催 3 次没开始就按惩罚库开罚。<br>
+    · <b>跟我约一段专注</b> —— 他约你的时间会先进「💌 TA 的邀请」；<b>你答应之后</b>才变成正式预约：到点前提醒你准备，每 5 分钟催一次、共 3 次，连着催 3 次没开始才按惩罚库开罚。没答应就不催、不罚。<br>
     · <b>邀我一起睡</b> —— 他邀请你一起睡，会写进「💌 TA 的邀请」并给你发一条通知，你打开就能一键躺下（他会说一句哄你入睡的话）。<br><br>
     他也可以直接在回复里写这两种卡：<b>[陪睡:小憩:20:早点睡]</b>、<b>[约专注:21:00:背单词:25]</b>。一次回复最多写一个，你那边会看到一张卡。<br><br>
     <b>觉得他太主动了？</b>「设置 → 聊天工具箱」里可以关掉本 APP 的工具；「设置 → 提示词预设」里可以关掉「角色陪伴专注 · TA 主动约你」这一条；APP 内「我的 → 待办 / TA 的邀请」里也能随时删掉他记的东西。</div></details>
@@ -8449,6 +8780,7 @@ Object.assign(ACTIONS, {
     pushMsg(s, 'sys', s.plan[i].done ? `✓ 完成：${s.plan[i].content}` : `取消勾选：${s.plan[i].content}`);
     syncSelfTasksFromPlan(s);                                // TA 的进度跟着你走
     await saveSession(true); render();
+    await syncFocusOverlay(s);
     if (s.plan[i].done) onTaskDone(s, s.plan[i].content);   // 完成一个任务 → 解锁一张 + 生成下一张
   },
   extraToggle: async el => {
@@ -9341,6 +9673,21 @@ Object.assign(ACTIONS, {
     if (!item || item.locked) return;
     const url = await albumImage(item);
     openSavePanel(url, item.title || '保存图片', (item.title || 'wallpaper') + '_' + item.date + '.png', item.charId || anyCharId());
+  },
+  albumDelete: async el => {
+    const it = (S.album || []).find(x => String(x.id) === String(el.dataset.id));
+    if (!it) return;
+    const ok = await confirmBox('删除这张壁纸？', '会从壁纸库和媒体缓存里一起删除，不可恢复。', '删除');
+    if (!ok) return;
+    try { if (it.ref) await sdk(() => API.media.delete({ ref: it.ref }), null); } catch (e) { }
+    if (it.id) await DB.remove(T.ALBUM, it.id);
+    S.album = (S.album || []).filter(x => String(x.id) !== String(it.id));
+    if (S.session && String(S.session.albumId) === String(it.id)) {
+      S.session.albumId = ''; S.session.wallpaperData = '';
+      await saveSession(true);
+    }
+    toast('已删除这张壁纸');
+    go('album');
   },
   clearAlbum: async () => {
     const ok = await confirmBox('清空壁纸库？', '所有壁纸记录与存储的图片都会被删除，不可恢复。', '清空');
@@ -11614,7 +11961,22 @@ async function bookSystemAlarmForAppt(rec) {
     await bookSystemAlarm(d.getHours(), d.getMinutes(), ('TA约你·' + (rec.task || '专注')).slice(0, 18));
   } catch (e) { }
 }
+function findDuplicateAppt(rec, ignoreId) {
+  const start = Number(rec && rec.startAt) || 0;
+  const chars = new Set((rec && rec.charIds) || []);
+  return (S.appts || []).find(a => a && a.status === 'pending'
+    && String(a.id) !== String(ignoreId || '')
+    && start && Math.abs((Number(a.startAt) || 0) - start) < 5 * 60000
+    && ((a.charIds || []).some(cid => chars.has(cid)) || !chars.size));
+}
 async function createAppt(rec) {
+  /* 预约创建层去重：不能只在聊天卡上拦。角色工具/邀请/表单任何一条路
+     只要在同一角色、前后 5 分钟内，就复用已有预约，不再新建一条。 */
+  const dup = findDuplicateAppt(rec);
+  if (dup) {
+    Object.assign(rec, dup);
+    return rec;
+  }
   const r = await DB.create(T.APPT, rec);
   if (r) rec.id = r.id;
   S.appts = (S.appts || []).filter(x => String(x.id) !== String(rec.id)).concat([rec])
@@ -11630,6 +11992,91 @@ async function removeAppt(a) {
   if (!a || !a.id) return;
   await DB.remove(T.APPT, a.id);
   S.appts = (S.appts || []).filter(x => String(x.id) !== String(a.id));
+}
+/* 长时段定时锁机：预约保存时交给原生 AlarmManager，Float 被杀/没打开也能到点锁。
+   和聊天催促任务不同，这条不依赖网页存活。 */
+function apptDeferAt(a) {
+  const start = Number(a && a.startAt) || Date.now();
+  const defer = Number(a && a.deferAt) || 0;
+  return defer > start ? defer : start + apptGrace() * 60000;
+}
+function apptLockEndAt(a) {
+  const opt = sessionOptsFromAppt(a, a.task || '', Number(a.minutes) || 25);
+  const cycles = Math.max(1, Number(opt.cycles) || 1);
+  const breakMin = Math.max(1, Number(opt.breakMin) || 5);
+  return apptDeferAt(a) + (Number(opt.focusMin) || 25) * cycles * 60000
+    + Math.max(0, cycles - 1) * breakMin * 60000;
+}
+async function scheduleNativeLockForAppt(a) {
+  if (!a || !a.id || !a.startAt) return { ok: false, reason: '预约不存在' };
+  if (cfg('apptAutoLock') === false) return { ok: false, reason: '自动锁机已关闭' };
+  const level = assistLevelNow();
+  if (level !== 'L2' && level !== 'L3') return { ok: false, reason: '当前锁机等级不是 L2/L3' };
+  if (!API || !API.device || typeof API.device.lockSchedule !== 'function') {
+    return { ok: false, reason: '当前壳版本不支持原生定时锁机' };
+  }
+  const cid = (a.charIds && a.charIds[0]) || anyCharId();
+  const endAt = apptLockEndAt(a);
+  return await sdk(() => API.device.lockSchedule({
+    id: 'appt_' + a.id,
+    startAt: apptDeferAt(a),
+    endAt,
+    packages: JSON.stringify(lockedAppsFor()),
+    taLine: '约好的专注到点了，先把手机交给这段时间。',
+    charName: charName(cid),
+    dnd: assistLevelNow() !== 'off',
+    task: a.task || '专注',
+    charIds: JSON.stringify(a.charIds || []),
+    minutes: Number(a.minutes) || 25
+  }), null);
+}
+async function cancelNativeLockForAppt(a) {
+  if (!a || !a.id || !API || !API.device || typeof API.device.lockScheduleCancel !== 'function') return;
+  await sdk(() => API.device.lockScheduleCancel('appt_' + a.id), null).catch(() => { });
+}
+/* ---------- 独立定时锁机：只锁时间段，不要求开专注 ---------- */
+function liveLockSchedules() {
+  const now = Date.now();
+  return (cfg('lockSchedules') || []).filter(x => x && Number(x.endAt) > now).sort((a, b) => a.startAt - b.startAt);
+}
+function lockDraftTimes() {
+  const dp = String(S.draft.lockDate || dkey()).split('-').map(Number);
+  const sp = String(S.draft.lockStart || '22:00').split(':').map(Number);
+  const ep = String(S.draft.lockEnd || '23:00').split(':').map(Number);
+  if (!dp[0] || !dp[1] || !dp[2]) return null;
+  const startAt = new Date(dp[0], dp[1] - 1, dp[2], sp[0] || 0, sp[1] || 0, 0, 0).getTime();
+  let endAt = new Date(dp[0], dp[1] - 1, dp[2], ep[0] || 0, ep[1] || 0, 0, 0).getTime();
+  if (!startAt || !endAt) return null;
+  if (endAt <= startAt) endAt += 86400000; // 跨夜：22:00 → 次日 06:00
+  return { startAt, endAt };
+}
+async function createLockSchedule(startAt, endAt, task) {
+  if (!API || !API.device || typeof API.device.lockSchedule !== 'function') { toast('当前壳版本不支持原生定时锁机'); return false; }
+  const minutes = Math.round((endAt - startAt) / 60000);
+  if (!startAt || !endAt || minutes < 1) { toast('锁机时间段不正确'); return false; }
+  if (startAt - Date.now() < 1000) { toast('开始时间要晚于现在（至少留 1 分钟）'); return false; }
+  const label = String(task || '').trim().slice(0, 60) || '定时锁机';
+  const id = 'manual_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const cid = anyCharId();
+  const res = await sdk(() => API.device.lockSchedule({
+    id,
+    startAt,
+    endAt,
+    packages: JSON.stringify(lockedAppsFor()),
+    taLine: '说好的锁机时间到了，先把手机放下。',
+    charName: charName(cid),
+    dnd: cfg('lockDnd') !== false,
+    task: label,
+    charIds: JSON.stringify(cid ? [cid] : []),
+    minutes
+  }), null);
+  if (!res || res.ok !== true) { toast('定时锁机没排上：' + ((res && res.reason) || '壳没有返回成功')); return false; }
+  S.settings.lockSchedules = liveLockSchedules().concat([{
+    id, startAt, endAt, task: label, charId: cid || '', createdAt: Date.now()
+  }]);
+  await saveSettings(true);
+  toast('已排好：' + dkey(new Date(startAt)) + ' ' + hm(startAt) + ' → ' + hm(endAt) + '（' + minutes + ' 分钟）');
+  return true;
 }
 /* 排催促任务：同一个预约用固定 id，改期就覆盖，不会越排越多 */
 async function scheduleAppt(a) {
@@ -11677,6 +12124,10 @@ async function scheduleAppt(a) {
     }), null);
     ok++;
   }
+  const lockRes = await scheduleNativeLockForAppt(a);
+  if (lockRes && lockRes.ok === false && lockRes.reason && lockRes.reason.indexOf('自动锁机已关闭') < 0) {
+    toast('预约已保存，但自动锁机没排上：' + lockRes.reason);
+  }
   return ok;
 }
 /* ---------- 失约：TA 的反应 + 记忆（第一反应，不依赖 AI） ---------- */
@@ -11721,18 +12172,26 @@ function maybeApptStartSheet(a) {
       <div class="sub">${esc(charName(cid))} 和你约好了 ${esc(a.minutes)} 分钟的「${esc(a.task || '专注')}」，到点了。</div>
       <div class="row mt10" style="gap:8px">
         <button class="btn primary grow" data-act="apptStart" data-id="${esc(a.id)}">▶️ 现在开始</button>
-        <button class="btn ghost grow" data-act="apptSnoozeSheet">💤 再赖会儿</button></div>
-      <div class="tiny mt8">再赖下去 TA 会接着催，${apptMaxNudge()} 次没开始就按约定开罚。</div>`);
+        <button class="btn ghost grow" data-act="apptDefer" data-id="${esc(a.id)}" data-min="5">⏳ 5 分钟后开始</button></div>
+      <div class="tiny mt8">不选也会在 ${apptGrace()} 分钟后自动开始并计时；不会跳过本次。</div>`);
   } catch (e) { }
 }
 /* 判定：APP 打开时每 20 秒跑一次；APP 没开时靠宿主任务发通知，重开即补判 */
 async function checkAppointments() {
+  await consumeScheduledFocus();
+  await applyFocusOverlayEvents();
   if (!S.appts || !S.appts.length) return;
   const now = Date.now();
   let changed = false;
   for (const a of S.appts) {
     if (!a || !a.startAt) continue;
     if (a.status === 'pending') {
+      /* 到点先问，不锁；用户选“5分钟后”或没操作时，到 deferAt 由这里自动开始。
+         如果页面不在，原生会在同一个 deferAt 拉起锁机；网页恢复后补开始计时。 */
+      if (a.deferAt && now >= Number(a.deferAt)) {
+        await ACTIONS.apptStart({ dataset: { id: a.id } });
+        continue;
+      }
       const times = apptTimesOf(a), n = times.length;
       const due = times.filter(t => now >= t).length;
       if (due > (a.nudgeCount || 0)) {
@@ -11820,6 +12279,38 @@ VIEWS.appt = function () {
       <div class="tiny mt6">跟 TA 约一个时间一起专注：开始前 ${apptAdvance()} 分钟 TA 会来催你准备，每 ${apptGap()} 分钟催一次，一共 ${apptMaxNudge()} 次；连着催 ${apptMaxNudge()} 次你都没点「现在开始」→ 直接按惩罚库开罚。</div></div>
       <div style="font-size:30px">⏳</div></div>
     <button class="btn primary block mt12" data-act="apptNew">＋ 新约一个专注</button></div>
+  ${(() => {
+    const lockDate = S.draft.lockDate || dkey();
+    const lockStart = S.draft.lockStart || '22:00';
+    const lockEnd = S.draft.lockEnd || '23:00';
+    const list = liveLockSchedules();
+    const preview = lockDraftTimes();
+    const span = preview ? Math.round((preview.endAt - preview.startAt) / 60000) : 0;
+    return `<div class="card" style="border-color:rgba(124,140,255,.35)">
+      <div class="row between"><div class="grow"><h3>⏰ 定时锁机</h3>
+        <div class="tiny mt6">只锁一个时间段，不要求开专注、不用点「开始」。到点由系统闹钟直接锁机，白名单外的应用会被带回 Float；到结束时间自动解除${cfg('lockDnd') !== false ? '，同时按你原本的勿扰策略开勿扰' : ''}。</div></div>
+        <div style="font-size:28px">🔒</div></div>
+      <div class="row mt10" style="gap:8px">
+        <div class="grow"><label class="fl">日期</label><input class="input" type="date" data-in="lockDate" value="${esc(lockDate)}"></div>
+        <div class="grow" style="max-width:120px"><label class="fl">开始</label><input class="input" type="time" data-in="lockStart" value="${esc(lockStart)}"></div>
+        <div class="grow" style="max-width:120px"><label class="fl">结束</label><input class="input" type="time" data-in="lockEnd" value="${esc(lockEnd)}"></div>
+      </div>
+      <label class="fl">这段时间叫什么（可留空）</label>
+      <input class="input" data-in="lockTask" value="${esc(S.draft.lockTask || '')}" placeholder="例如：写完作业再碰手机">
+      <div class="tiny mt8">锁机时段：${esc(lockDate)} ${esc(lockStart)} → ${esc(lockEnd)}${span ? '（' + span + ' 分钟' : ''}${preview && preview.endAt - preview.startAt > 0 && lockEnd <= lockStart ? ' · 跨夜' : ''}${span ? '）' : ''} · 白名单 ${(cfg('lockedApps') || []).length} 个（在「锁机分级」里改）</div>
+      <div class="chips mt8">
+        <button class="chip ${cfg('lockDnd') !== false ? 'on' : ''}" data-act="toggleSetting" data-k="lockDnd">锁机时开勿扰</button>
+        <button class="chip ${cfg('apptAutoLock') !== false ? 'on' : ''}" data-act="toggleSetting" data-k="apptAutoLock">预约专注到点也自动锁</button>
+      </div>
+      <button class="btn primary block mt10" data-act="lockScheduleSave">排入这段锁机</button>
+      <button class="btn ghost block sm mt8" data-act="lockScheduleTest">测试：1 分钟后开始 · 锁 5 分钟</button>
+      ${list.length ? `<div class="mt10">${list.map(x => `<div class="item">
+        <div class="ic">🔒</div>
+        <div class="grow"><div style="font-size:13px">${esc(x.task || '定时锁机')}</div>
+          <div class="tiny">${esc(dkey(new Date(x.startAt)))} ${hm(x.startAt)} → ${hm(x.endAt)} · ${Math.max(1, Math.round((x.endAt - x.startAt) / 60000))} 分钟</div></div>
+        <button class="btn sm ghost" data-act="lockScheduleCancel" data-id="${esc(x.id)}">取消</button></div>`).join('')}</div>` : '<div class="tiny mt8">还没有排入的定时锁机。</div>'}
+    </div>`;
+  })()}
   ${live.length ? live.map(a => apptCardHTML(a)).join('') : ''}
   ${pend.length ? pend.map(a => apptCardHTML(a)).join('')
       : (live.length ? '' : '<div class="empty">还没有待开始的预约。<br>点上面「新约一个专注」，填好日期、时长和要做的事，剩下的交给 TA 催你。</div>')}
@@ -11836,6 +12327,7 @@ VIEWS.appt = function () {
     <input class="input" type="number" inputmode="numeric" data-in="setting.apptGraceMin" data-num="1" value="${apptGrace()}">
     <div class="chips mt10">
       <button class="chip ${cfg('apptChatNudge') !== false ? 'on' : ''}" data-act="toggleSetting" data-k="apptChatNudge">催促同时让 TA 在聊天室回你一句</button>
+      <button class="chip ${cfg('apptAutoLock') !== false ? 'on' : ''}" data-act="toggleSetting" data-k="apptAutoLock">到点自动锁机（L2/L3，APP 没开也生效）</button>
       <button class="chip ${cfg('apptPunish') !== false ? 'on' : ''}" data-act="toggleSetting" data-k="apptPunish">没开始就开罚</button>
       <button class="chip ${cfg('apptSysAlarm') !== false ? 'on' : ''}" data-act="toggleSetting" data-k="apptSysAlarm">⏰ 系统闹钟兜底（APK）</button>
     </div>
@@ -12012,6 +12504,9 @@ Object.assign(ACTIONS, {
     };
     rec.date = dkey(d); rec.time = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
     rec.startAt = startAt; rec.minutes = minutes; rec.task = task.slice(0, 60);
+    if (!editing || !Number(rec.deferAt) || Number(rec.deferAt) < startAt) {
+      rec.deferAt = startAt + apptGrace() * 60000;
+    }
     rec.charIds = charIds.slice();
     rec.segments = segs;
     rec.breakMin = breakMin;
@@ -12024,7 +12519,17 @@ Object.assign(ACTIONS, {
       rec.nudgeCount = apptTimesOf(rec).filter(t => t < nowMs - 60000).length;
       rec.note += '离开始不足 ' + apptAdvance() + ' 分钟，前面 ' + rec.nudgeCount + ' 次催促来不及发出（还是会按约定开罚）';
     }
-    if (editing) await updateAppt(rec); else await createAppt(rec);
+    if (!editing) {
+      const dup = findDuplicateAppt(rec);
+      if (dup) {
+        toast('同一时间已经有预约了：' + apptTimeText(dup) + ' · ' + (dup.task || '专注'));
+        closeAllSheets(); go('appt');
+        return;
+      }
+      await createAppt(rec);
+    } else {
+      await updateAppt(rec);
+    }
     S.draft.apptEditId = '';
     /* 这次是给「TA 的邀请」改时间：把那条邀请记为已答应，并指向这条预约 */
     if (S.draft.inviteReschedId) {
@@ -12051,6 +12556,29 @@ Object.assign(ACTIONS, {
     toast(n ? ((editing ? '已改期：' : '约好了：') + rec.date + ' ' + rec.time + ' · 已排好 ' + n + ' 次催促')
       : (editing ? '已改期（宿主定时任务不可用，到时自己留意）' : '预约已记下（宿主定时任务不可用，到时请自己留意）'));
     if (S.view !== 'appt') go('appt'); else render();
+  },
+  /* 独立定时锁机：不创建预约、不要求点开始，到点直接锁，到点自动解。 */
+  lockScheduleSave: async () => {
+    const times = lockDraftTimes();
+    if (!times) { toast('日期或时间格式不对'); return; }
+    const ok = await createLockSchedule(times.startAt, times.endAt, String(S.draft.lockTask || '').trim());
+    if (ok) { S.draft.lockTask = ''; render(); }
+  },
+  lockScheduleTest: async () => {
+    const start = Date.now() + 60000;
+    const ok = await createLockSchedule(start, start + 5 * 60000, '测试定时锁机');
+    if (ok) render();
+  },
+  lockScheduleCancel: async el => {
+    const id = String(el.dataset.id || '');
+    if (!id) return;
+    if (API && API.device && typeof API.device.lockScheduleCancel === 'function') {
+      await sdk(() => API.device.lockScheduleCancel(id), null).catch(() => { });
+    }
+    S.settings.lockSchedules = (cfg('lockSchedules') || []).filter(x => String(x.id) !== id);
+    await saveSettings(true);
+    toast('已取消这段定时锁机');
+    render();
   },
   apptEdit: el => {
     const a = (S.appts || []).find(x => String(x.id) === String(el.dataset.id));
@@ -12084,6 +12612,7 @@ Object.assign(ACTIONS, {
       '已经排进小手机后台的催促任务宿主没有撤回接口，到点可能仍会响一次通知 —— 忽略即可；APP 这边不会再拿它开罚。', '取消预约');
     if (!ok) return;
     a.status = 'canceled'; a.note = '已取消' + (a.nudgeCount ? '（取消前已被催 ' + a.nudgeCount + ' 次）' : '');
+    await cancelNativeLockForAppt(a);
     await updateAppt(a);
     closeAllSheets(); toast('已取消'); render();
   },
@@ -12091,6 +12620,7 @@ Object.assign(ACTIONS, {
     const a = (S.appts || []).find(x => String(x.id) === String(el.dataset.id));
     if (!a) return;
     if (a.status === 'started') { toast('正在专注中的预约不能删'); return; }
+    await cancelNativeLockForAppt(a);
     await removeAppt(a); render();
   },
   apptSnoozeSheet: () => {
@@ -12123,6 +12653,11 @@ Object.assign(ACTIONS, {
     openLockedAppsSheet(); render();
   },
   appPickerOpen: el => { pickFromAppList(el.dataset.target || 'apply'); },
+  appLockPick: () => pickFromAppList('appLock'),
+  appLockStart: () => startPlayfulAppLock(),
+  appLockStop: () => stopPlayfulAppLock(),
+  appLockOpenChat: () => toast('切到聊天室，找 TA 说话；锁页没有聊天入口'),
+  appLockBgClear: async () => { S.settings.appLockBackground = ''; await saveSettings(true); render(); },
   focusLevelPick: async el => {
     S.settings.focusLevel = el.dataset.v;
     await saveSettings(true);
@@ -12179,6 +12714,18 @@ Object.assign(ACTIONS, {
     toast('通行证已作废：' + p.app);
     syncLockNow();
     openWlSheet(); render();
+  },
+  apptDefer: async el => {
+    const a = (S.appts || []).find(x => String(x.id) === String(el.dataset.id));
+    if (!a || a.status !== 'pending') return;
+    const min = Math.max(1, Math.min(60, Number(el.dataset.min) || 5));
+    a.deferAt = Date.now() + min * 60000;
+    a.note = '已延后到 ' + hm(a.deferAt) + ' 自动开始';
+    await updateAppt(a);
+    await scheduleAppt(a);
+    closeAllSheets(); if (S.draft) S.draft.apptSheetFor = '';
+    toast('⏳ ' + min + ' 分钟后自动锁机并开始计时');
+    render();
   },
   apptStart: async el => {
     const a = (S.appts || []).find(x => String(x.id) === String(el.dataset.id));
@@ -17176,6 +17723,24 @@ TITLES.rcchat = ['抽背 · 聊天室', 'RECITE'];
 /* ==========================================================
    数据加载与启动
    ========================================================== */
+/* 旧版本在用户答应邀请前就建了预约和催促任务：清掉这些没有「已答应」邀请的预约，
+   避免用户明明没答应，却一直被催、最后还被按失约开罚。 */
+async function cleanupUnacceptedInviteAppts() {
+  const accepted = new Set((S.invites || [])
+    .filter(inv => inv && inv.status === 'accepted' && inv.apptId)
+    .map(inv => String(inv.apptId)));
+  const stale = (S.appts || []).filter(a => a && a.status === 'pending'
+    && a.note === '由角色在聊天里约的' && !accepted.has(String(a.id)));
+  if (!stale.length) return;
+  for (const appt of stale) {
+    for (let i = 0; i < 8; i++) {
+      try { await sdk(() => API.tasks.cancel('focus_appt_' + appt.id + '_n' + i), null); } catch (e) { /* 任务可能已经执行或不存在 */ }
+    }
+    try { await cancelNativeLockForAppt(appt); } catch (e) { /* 锁机可能没排过 */ }
+    await removeAppt(appt);
+  }
+}
+
 async function loadAll() {
   /* 宿主 db.list 返回的是扁平记录；老版本有些表保存成了 { data: {...} }。
      两种都兼容，否则通行证/会话重启后会变成空对象。 */
@@ -17195,8 +17760,10 @@ async function loadAll() {
   S.gen = ((await DB.list(T.GEN)) || []).sort((a, b) => (b.at || 0) - (a.at || 0));
   S.fav = ((await DB.list(T.FAV)) || []).sort((a, b) => (b.at || 0) - (a.at || 0));
   S.appts = ((await DB.list(T.APPT)) || []).filter(x => x && x.startAt).sort((a, b) => (a.startAt || 0) - (b.startAt || 0));
+  S.apptsLoaded = true;
   S.todos = ((await DB.list(T.TODO)) || []).filter(x => x && x.text).sort((a, b) => (b.at || 0) - (a.at || 0));
   S.invites = ((await DB.list(T.INVITE)) || []).filter(x => x && x.kind).sort((a, b) => (b.at || 0) - (a.at || 0));
+  await cleanupUnacceptedInviteAppts();
   S.qlogs = ((await DB.list(T.QA)) || []).filter(x => x && x.q).sort((a, b) => (b.at || 0) - (a.at || 0));
   S.qa = ((await DB.list(T.QA)) || []).sort((a, b) => (b.at || 0) - (a.at || 0));
   S.notes = ((await DB.list(T.NOTE)) || []).filter(x => x && x.text).sort((a, b) => (b.at || 0) - (a.at || 0));
@@ -17222,6 +17789,7 @@ async function loadAll() {
   S.rlogs = ((await DB.list(T.RLOG)) || []).filter(x => x && x.date).sort((a, b) => (b.at || 0) - (a.at || 0));
   S.alarms = (alarms || []).filter(x => x.enabled !== false);
   S.wlPasses = (wlp || []).map(dbRow);
+  S.wlPassesLoaded = true;
   await repairWlPassPackages();
   S.album = (album || []).slice().sort((a, b) => b.at - a.at);
   S.rewards = (rewards || []).map(dbRow).sort((a, b) => b.at - a.at);
@@ -17233,6 +17801,22 @@ async function loadAll() {
   await loadCustomWall();     // 你上传过的壁纸：启动时从媒体库取回来铺上
   await loadStories();
 }
+document.addEventListener('change', function (e) {
+  const input = e.target;
+  if (!input || input.id !== 'appLockBgInput') return;
+  const file = input.files && input.files[0];
+  if (!file) return;
+  if (file.size > 700 * 1024) { toast('背景图太大，请选 700KB 以内的图片'); input.value = ''; return; }
+  const reader = new FileReader();
+  reader.onload = async () => {
+    S.settings.appLockBackground = String(reader.result || '');
+    await saveSettings(true);
+    toast('锁页背景已更新');
+    render();
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+});
 async function boot() {
   setTimeout(() => { try { consumePendingApply(); } catch (e) { } }, 800);
   try {
@@ -17246,6 +17830,16 @@ async function boot() {
     await loadSettings();
     await loadChars();
     await loadAll();
+    /* 小手段的好感度缓存可能停在 0：用户关掉专注 APP 后仍在聊天，监听器不在。
+       打开时从最近私聊的状态值同步一次，避免设置页永远显示 0。 */
+    try {
+      const affinity = await appLockChatAffinity((appLockRule() && appLockRule().charId) || anyCharId());
+      if (affinity > appLockScore()) {
+        S.settings.appLockAffection = affinity;
+        await saveSettings(true);
+      }
+    } catch (e) { }
+    await consumeScheduledFocus();
     clearBadge();
     S.lastSleepWallRef = cfg('lastSleepWallRef') || '';
     S.lastSleepInfo = cfg('lastSleepInfo') || null;
@@ -17264,7 +17858,7 @@ async function boot() {
         if (aliveAt) {
           const awaySec = Math.round((Date.now() - aliveAt) / 1000);
           const grace = Number(cfg('graceSec') || 8);
-          if (awaySec > grace) await onAway(awaySec);
+          if (awaySec > grace) await onAway(awaySec, aliveAt);
           else if (awaySec > 1) toast('重开 APP：离开 ' + awaySec + ' 秒，在宽限 ' + grace + ' 秒内，不计违规');
         }
       } catch (e) { }
@@ -18191,6 +18785,15 @@ Object.assign(ACTIONS, {
 async function ensureBasics() {
   if (!S.settings) await loadSettings();
   if (!S.chars || !S.chars.length) { try { await loadChars(); } catch (e) { } }
+  /* 隐藏运行环境不会走 loadAll；不补预约列表，角色工具就看不到已有预约，
+     同一时间可以反复新建。 */
+  if (!S.apptsLoaded) {
+    try {
+      S.appts = ((await DB.list(T.APPT)) || []).filter(x => x && x.startAt)
+        .sort((a, b) => (a.startAt || 0) - (b.startAt || 0));
+    } catch (e) { S.appts = S.appts || []; }
+    S.apptsLoaded = true;
+  }
 }
 function statBriefOf(sess, range) {
   const now = Date.now(), today = midnight();
@@ -18307,23 +18910,25 @@ function registerTools() {
       if (cid) await syncTimeline(cid, `你约用户现在就一起专注 ${minutes} 分钟：${task}。`, 'appt_invite', {});
       return { success: true, data: { mode: 'now', inviteId: saved ? saved.id : '' }, userNotice: '已把「现在就一起专注」的邀请发给用户了' };
     }
-    const rec = {
-      id: '', date: dateStr, time: pad2(hh) + ':' + pad2(mi), startAt: startAt,
-      minutes: minutes, task: task.slice(0, 60), charIds: cid ? [cid] : [],
-      status: 'pending', nudgeCount: 0, createdAt: Date.now(), note: '由角色在聊天里约的'
-    };
-    await createAppt(rec);
-    const n = await scheduleAppt(rec);
+    /* 未答应的邀请不能建预约：先只留邀请，用户答应后才 createAppt + scheduleAppt。
+       否则用户只是被问了一句，到点没答应也会被连催三次、最后按失约开罚。 */
+    const invTime = dateStr + ' ' + pad2(hh) + ':' + pad2(mi);
+    const sameInvite = (S.invites || []).find(x => x && x.kind === 'focus'
+      && x.status === 'new' && String(x.charId) === String(cid)
+      && String(x.time || '') === invTime);
+    if (sameInvite) {
+      return { success: true, data: { mode: 'scheduled', inviteId: sameInvite.id, accepted: false }, userNotice: '这个时间已经邀请过用户了，等 TA 答复。' };
+    }
     const inv = {
-      kind: 'focus', task: task, minutes: minutes, time: rec.date + ' ' + rec.time, note: '',
-      charId: cid, apptId: rec.id, at: Date.now(), status: 'new', from: 'tool'
+      kind: 'focus', task: task, minutes: minutes, time: invTime, note: '',
+      charId: cid, apptId: '', at: Date.now(), status: 'new', from: 'tool'
     };
     await pushInvite(inv);
-    if (cid) await syncTimeline(cid, `你和用户约好 ${rec.date} ${rec.time} 一起专注 ${minutes} 分钟：${task}。到点前你要来催他开始。`, 'appt_make', {});
+    if (cid) await syncTimeline(cid, `你邀请用户 ${invTime} 一起专注 ${minutes} 分钟：${task}。等 TA 答应后再到点催；TA 没答应就不要催，也不要按失约算。`, 'appt_invite', {});
     return {
       success: true,
-      data: { mode: 'scheduled', date: rec.date, time: rec.time, minutes: minutes, task: task, nudges: n },
-      userNotice: '已排好：' + rec.date + ' ' + rec.time + '（会提前 ' + apptAdvance() + ' 分钟开始催）'
+      data: { mode: 'scheduled', date: dateStr, time: pad2(hh) + ':' + pad2(mi), minutes: minutes, task: task, accepted: false },
+      userNotice: '邀请已发出：' + invTime + '（等用户答应后才会开始催）'
     };
   });
   /* 5) 邀我一起睡 */
@@ -18357,13 +18962,58 @@ function registerTools() {
       userNotice: running ? '专注已结束，看守锁和勿扰都解除了' : '看守锁已解除',
     };
   });
+  /* 角色小手段：只有好感度达到用户设定阈值，才允许把密码告诉用户。
+     密码不在设置页/锁页/通知里展示；这里返回给角色，由角色决定说或继续逗。 */
+  API.tools.handle('revealAppLockPassword', async (args, ctx) => {
+    await ensureBasics();
+    const rule = appLockRule();
+    if (!rule || !rule.active) return { success: false, error: '现在没有角色小手段在生效', userNotice: '现在没有锁住的应用' };
+    const threshold = clamp(Number(rule.threshold || cfg('appLockThreshold') || 60), 0, 100);
+    const cid = (ctx && ctx.characterId) || rule.charId || anyCharId();
+    const score = Math.max(appLockScore(), await appLockChatAffinity(cid));
+    if (score < threshold) {
+      return { success: false, error: '好感度不够，还不能告诉他密码', userNotice: 'TA 现在还不肯告诉你' };
+    }
+    const r = await sdk(() => API.device.appLockReveal(), null);
+    if (!r || r.ok !== true || !r.password) return { success: false, error: '密码读取失败', userNotice: 'TA 现在拿不出密码' };
+    return { success: true, data: { password: String(r.password), app: rule.label || rule.target }, userNotice: 'TA 把密码告诉你了' };
+  });
+  /* 角色/现实桥主动锁应用：app 可以是显示名或包名；密码仍由原生生成。 */
+  API.tools.handle('startAppLock', async (args, ctx) => {
+    await ensureBasics();
+    const wanted = String((args && (args.app || args.package || args.label)) || '').trim();
+    if (!wanted) return { success: false, error: '需要 app（应用名或包名）', userNotice: '没说要锁哪个应用' };
+    let apps = [];
+    try {
+      const list = await sdk(() => API.device.appsList(), null);
+      apps = (list && list.ok && list.apps) ? list.apps : [];
+    } catch (e) { apps = []; }
+    const norm = v => String(v || '').trim().toLowerCase();
+    const app = apps.find(x => norm(x.package) === norm(wanted))
+      || apps.find(x => norm(x.label) === norm(wanted))
+      || apps.find(x => norm(x.label).indexOf(norm(wanted)) >= 0 || norm(wanted).indexOf(norm(x.label)) >= 0);
+    if (!app) return { success: false, error: '找不到应用：' + wanted, userNotice: '找不到「' + wanted + '」' };
+    const cid = (ctx && ctx.characterId) || anyCharId();
+    const threshold = clamp(Number((args && args.threshold) || cfg('appLockThreshold') || 60), 0, 100);
+    const before = appLockRule();
+    await startPlayfulAppLock({ label: app.label, pkg: app.package }, cid, threshold);
+    const after = appLockRule();
+    if (!after || !after.active || (before && after.startedAt === before.startedAt)) {
+      return { success: false, error: '锁应用失败', userNotice: '小手段没启动' };
+    }
+    return { success: true, data: { app: app.label, package: app.package, threshold }, userNotice: '把「' + app.label + '」锁上了，密码只有你知道' };
+  });
   /* 7) 角色判定通行证查岗结果：pass +2；violation 收回通行证并 -10 */
   API.tools.handle('passVerdict', async (args, ctx) => {
     await ensureBasics();
+    /* 隐藏运行环境不会走 boot/loadAll，S.wlPasses 默认是空数组。
+       不补加载的话，角色每次判定都只能说「没有生效中的通行证」。 */
+    if (!S.wlPassesLoaded) await loadAll();
     const cid = (ctx && ctx.characterId) || (args && args.characterId) || anyCharId();
     const verdict = String((args && args.verdict) || '').toLowerCase() === 'violation' ? 'violation' : 'pass';
     const appName = String((args && args.app) || '').trim().toLowerCase();
-    const active = (S.wlPasses || []).filter(p => p.status === 'active');
+    const active = (S.wlPasses || []).filter(p => p.status === 'active'
+      || (p.status === 'expired' && p.expireAt && Date.now() - p.expireAt < 10 * 60000 && !p.verdict));
     const pass = (appName
       ? active.find(p => {
           const name = String(p.app || '').toLowerCase();
@@ -18408,7 +19058,17 @@ function startInviteListener() {
     API.on('chat.message.created', async (payload) => {
       try {
         const msg = (payload && payload.message) || null;
-        if (!msg || msg.role !== 'assistant') return;
+        if (!msg) return;
+        if (msg.role !== 'assistant') {
+          /* 角色小手段：用户每次在 Float 聊天室说话，好感度涨一点；
+             达到用户设的阈值后，角色工具才允许揭示密码。 */
+          if (msg.role === 'user' && appLockRule() && appLockRule().active) {
+            S.settings.appLockAffection = Math.min(100, appLockScore() + 1);
+            await saveSettings(true);
+            if (S.view === 'applock') render();
+          }
+          return;
+        }
         const text = String(msg.content || msg.text || '');
         if (!text || (text.indexOf('陪睡') < 0 && text.indexOf('约专注') < 0)) return;
         await ensureBasics();
@@ -18446,21 +19106,15 @@ function startInviteListener() {
             await pushInvite({ kind: 'focus', task: d.task, minutes: d.minutes, time: hmStr, note: '', charId: cid, apptId: '', at: Date.now(), status: 'new', from: 'directive' });
             if (cid) await syncTimeline(cid, `你写卡约用户现在就一起专注 ${d.minutes} 分钟：${d.task}。`, 'appt_invite', {});
           } else {
-            /* 同一角色、同一开始时间已经有待开始的预约时，不再建第二条；
-               否则后面每次聊到这件事都会多一条同时间预约和一张同时间卡。 */
-            const sameAppt = (S.appts || []).find(a => a && a.status === 'pending'
-              && Number(a.startAt) === dt2.getTime()
-              && (!cid || (Array.isArray(a.charIds) ? a.charIds : []).indexOf(cid) >= 0));
-            if (sameAppt) continue;
-            const rec = {
-              id: '', date: dkey(dt2), time: pad2(hh2) + ':' + pad2(mi2), startAt: dt2.getTime(),
-              minutes: d.minutes, task: String(d.task || '').slice(0, 60), charIds: cid ? [cid] : [],
-              status: 'pending', nudgeCount: 0, createdAt: Date.now(), note: '由角色在聊天里约的'
-            };
-            await createAppt(rec);
-            await scheduleAppt(rec);
-            await pushInvite({ kind: 'focus', task: d.task, minutes: d.minutes, time: rec.date + ' ' + rec.time, note: '', charId: cid, apptId: rec.id, at: Date.now(), status: 'new', from: 'directive' });
-            if (cid) await syncTimeline(cid, `你和用户约好 ${rec.date} ${rec.time} 一起专注 ${d.minutes} 分钟：${d.task}。到点前你要来催他开始。`, 'appt_make', {});
+            /* 未答应的邀请不建预约：只留邀请，用户答应后才创建预约和催促任务。
+               以前在这里提前排了任务，用户没答应也会被连催、最后按失约开罚。 */
+            const invTime = dkey(dt2) + ' ' + pad2(hh2) + ':' + pad2(mi2);
+            const sameInvite = (S.invites || []).find(x => x && x.kind === 'focus'
+              && x.status === 'new' && String(x.charId) === String(cid)
+              && String(x.time || '') === invTime);
+            if (sameInvite) continue;
+            await pushInvite({ kind: 'focus', task: d.task, minutes: d.minutes, time: invTime, note: '', charId: cid, apptId: '', at: Date.now(), status: 'new', from: 'directive' });
+            if (cid) await syncTimeline(cid, `你写卡邀请用户 ${invTime} 一起专注 ${d.minutes} 分钟：${d.task}。等 TA 答应后再到点催；TA 没答应不要催，也不算失约。`, 'appt_invite', {});
           }
         }
       } catch (e) { console.warn('directive listener', e); }

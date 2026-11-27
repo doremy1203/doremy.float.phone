@@ -7,6 +7,7 @@ import { createCipheriv, createHash, randomBytes, randomUUID } from "node:crypto
 import http from "node:http";
 import https from "node:https";
 import tls from "node:tls";
+import { WEIXIN_ILINK_APP_CLIENT_VERSION, WEIXIN_ILINK_BASE_INFO } from "@/lib/weixin-protocol";
 
 export const runtime = "nodejs";
 
@@ -20,7 +21,7 @@ const WEIXIN_POLL_PAUSED = true;
 
 const ILINK_BASE = "https://ilinkai.weixin.qq.com";
 const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
-const BASE_INFO = { channel_version: "1.0.2" };
+const BASE_INFO = WEIXIN_ILINK_BASE_INFO;
 
 type ProxyRequest = {
     path: string;                        // iLink 路径，如 "/ilink/bot/getupdates"
@@ -156,16 +157,21 @@ function fetchViaProxy(
 }
 
 function makeIlinkHeaders(botToken?: string): Record<string, string> {
+    const randomUin = randomBytes(4).readUInt32BE(0);
     const headers: Record<string, string> = {
         "Content-Type": "application/json",
-        "iLink-App-ClientVersion": "1",
+        // WeChat's QR scan checks these two headers. Missing/old values produce
+        // the misleading "upgrade WeChat interface version in OpenClaw" prompt.
+        "iLink-App-Id": "bot",
+        "iLink-App-ClientVersion": String(WEIXIN_ILINK_APP_CLIENT_VERSION),
+        // QR minting has no bot token yet, but iLink still expects a stable
+        // per-request WECHAT-UIN header on the QR endpoints.
+        "X-WECHAT-UIN": Buffer.from(String(randomUin)).toString("base64"),
     };
 
     if (botToken) {
-        const randomUin = randomBytes(4).readUInt32BE(0);
         headers["Authorization"] = `Bearer ${botToken}`;
         headers["AuthorizationType"] = "ilink_bot_token";
-        headers["X-WECHAT-UIN"] = Buffer.from(String(randomUin)).toString("base64");
     }
 
     return headers;

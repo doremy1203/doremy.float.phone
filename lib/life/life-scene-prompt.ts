@@ -1,6 +1,7 @@
 import { getActorClock, resolveActorLifeNow } from "./life-runtime";
 import type { LifeSceneState, VirtualLifeState } from "./life-types";
 import { asPlayerRecordSubject } from "./life-timeline-subject";
+import { canSeeLifeSceneMessage } from "./life-scene-visibility";
 import { renderUserNameMacro, USER_NAME_MACRO } from "../user-macro";
 import { resolveUserIdentity } from "../settings-storage";
 
@@ -16,7 +17,10 @@ export function buildLifeScenePromptContext(state: VirtualLifeState, scene: Life
   const participantIds = scene.participants.map(p => p.ownerId);
   const location = state.locations.find(item => item.id === scene.locationId);
   const homeLocations = state.locations.filter(item => item.id === "home" || item.id.startsWith("home-"));
-  const allSceneMessages = state.sceneMessages.filter(message => message.sceneId === scene.id);
+  const allSceneMessages = state.sceneMessages.filter(message =>
+    message.sceneId === scene.id
+    && (!viewerId || canSeeLifeSceneMessage(message, scene, viewerId))
+  );
   const throughIndex = throughMessageId ? allSceneMessages.findIndex(message => message.id === throughMessageId) : -1;
   const prefix = throughIndex >= 0 ? allSceneMessages.slice(0, throughIndex + 1) : allSceneMessages;
   const cutoffAt = throughIndex >= 0 ? allSceneMessages[throughIndex].createdAt : undefined;

@@ -494,29 +494,30 @@ export function getEnabledTools(appId?: string): EnabledTool[] {
         const lifeSettings = loadVirtualLifeState().settings;
         if (lifeSettings.enabled) {
             for (const tool of LIFE_TOOL_DEFINITIONS) {
-                const capabilityId = tool.name === "life_propose_invitation"
+                const toolId = tool.id;
+                const capabilityId = toolId === "life_propose_invitation"
                     ? LIFE_INVITATION_CAPABILITY_ID
-                    : tool.name === "life_request_follow"
+                    : toolId === "life_request_follow"
                         ? LIFE_FOLLOW_CAPABILITY_ID
                         : LIFE_SCHEDULE_CAPABILITY_ID;
                 const capability = getInternalCapability(capabilityId);
-                const isScheduleRead = tool.name === "life_view_schedule";
-                const isScheduleWrite = tool.name === "life_create_schedule"
-                    || tool.name === "life_change_schedule"
-                    || tool.name === "life_cancel_schedule"
-                    || tool.name === "life_move_location";
+                const isScheduleRead = toolId === "life_view_schedule";
+                const isScheduleWrite = toolId === "life_create_schedule"
+                    || toolId === "life_change_schedule"
+                    || toolId === "life_cancel_schedule"
+                    || toolId === "life_move_location";
                 const allowed = capability?.enabled && capability.mode !== "off"
                     && (isScheduleRead || lifeSettings.enableCharacterAutonomy)
-                    && (tool.name === "life_propose_invitation"
+                    && (toolId === "life_propose_invitation"
                     ? lifeSettings.enableInvitations
-                    : tool.name === "life_request_follow"
+                    : toolId === "life_request_follow"
                         ? lifeSettings.enableFollowRequestTool
                         : isScheduleRead
                             ? true
                             : isScheduleWrite
                                 ? lifeSettings.enableScheduleChangeTool
                                 : false);
-                if (allowed) tools.push({ ...tool, source: "life", sourceId: capabilityId });
+                if (allowed) tools.push({ name: tool.name, description: tool.description, parameterSchema: tool.parameterSchema, source: "life", sourceId: capabilityId });
             }
         }
     }
@@ -526,11 +527,13 @@ export function getEnabledTools(appId?: string): EnabledTool[] {
 
 export function findEnabledToolForSchema(name: string, appId?: string, macroContext?: ToolNameMacroContext): EnabledTool | undefined {
     const enabled = getEnabledTools(appId);
-    const matches = (tool: EnabledTool) => toolNameMatches(tool.name, name, macroContext);
-    // Match the runtime dispatcher priority: life-prefixed calls, internal, REST,
+    // 生活工具对模型展示中文名；历史上下文里可能还留着 life_* 内部 ID，这里统一映射。
+    const requestedName = LIFE_TOOL_DEFINITIONS.find(tool => tool.id === name)?.name ?? name;
+    const matches = (tool: EnabledTool) => toolNameMatches(tool.name, requestedName, macroContext);
+    // Match the runtime dispatcher priority: life, internal, REST,
     // composite, MCP, then custom apps. This prevents a duplicate name from exposing
     // one tool's schema while executeSingleToolCall dispatches to another tool.
-    const lifeDirect = name.startsWith("life_") ? enabled.find(t => t.source === "life" && matches(t)) : undefined;
+    const lifeDirect = enabled.find(t => t.source === "life" && matches(t));
     if (lifeDirect) return lifeDirect;
 
     const internalDirect = enabled.find(t => t.source === "internal" && matches(t));
