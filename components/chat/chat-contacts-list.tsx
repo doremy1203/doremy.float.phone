@@ -58,7 +58,7 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
     const [mascotAvatarUrl, setMascotAvatarUrl] = useState(mascotSettings.avatarImage || DEFAULT_MASCOT_AVATAR);
 
     const identity = useMemo(() => resolveUserIdentity(), []);
-    const chars = useMemo(() => loadCharacters(), []);
+    const chars = loadCharacters();
     const deferredContactFilter = useDeferredValue(contactFilter);
     const bodyRef = useRef<HTMLDivElement>(null);
     const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -101,10 +101,12 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
     }
 
     const refresh = useCallback(() => {
+        // 直接读最新角色表，避免组件挂载时缓存的旧数组把新建角色挡在联系人/搜索之外。
+        const currentChars = loadCharacters();
         const rawContacts = loadChatContacts();
         const enriched = rawContacts.map(c => ({
             ...c,
-            char: chars.find(ch => ch.id === c.characterId)
+            char: currentChars.find(ch => ch.id === c.characterId)
         })).filter(c => c.char);
         enriched.sort((a, b) => (a.char?.name || "").localeCompare(b.char?.name || ""));
         setContacts(enriched);
@@ -117,14 +119,17 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
         setLatestPost(map);
 
         setPendingRequests(getPendingFriendRequests());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useEffect(() => {
         refresh();
         const handler = () => refresh();
         window.addEventListener("friend-requests-updated", handler);
-        return () => window.removeEventListener("friend-requests-updated", handler);
+        window.addEventListener("characters-updated", handler);
+        return () => {
+            window.removeEventListener("friend-requests-updated", handler);
+            window.removeEventListener("characters-updated", handler);
+        };
     }, [refresh]);
 
     /** Group contacts by pinyin initial */
@@ -454,7 +459,13 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                                     <button
                                         className="menu-item"
                                         onClick={() => {
-                                            const found = chars.find(c => c.wechatID === addQuery.trim() || c.id === addQuery.trim());
+                                            const query = addQuery.trim();
+                                            const lowered = query.toLowerCase();
+                                            // 精确匹配微信号 / 角色 ID，再按名字模糊兜底，避免新角色只能靠复制 ID 添加。
+                                            const found = query
+                                                ? (chars.find(c => c.wechatID === query || c.id === query)
+                                                    || chars.find(c => (c.name || "").toLowerCase().includes(lowered)))
+                                                : null;
                                             setAddResult(found || null);
                                         }}
                                     >

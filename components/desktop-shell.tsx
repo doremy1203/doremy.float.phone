@@ -142,7 +142,7 @@ import { WidgetRenderer } from "@/components/widgets/widget-renderer";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
-import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
+import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, resolveSessionCharacterId, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
 import { ensureGlobalBindingDefaults, resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
@@ -2203,7 +2203,10 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       // Group chat: use characterName from event detail; 1:1: use session.contactId
       const char = isGroup
         ? (detail.characterName ? chars.find(c => c.name === detail.characterName) : null)
-        : chars.find(c => c.id === session.contactId);
+        : (() => {
+          const resolvedId = resolveSessionCharacterId(session);
+          return resolvedId ? chars.find(c => c.id === resolvedId) : undefined;
+        })();
       const charName = isGroup
         ? (detail.characterName || session.groupName || "群聊")
         : (session.alias || char?.name || "未知");
@@ -3029,7 +3032,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
       const chars = loadCharacters();
       const isGroup = detail.isGroup ?? !!session.isGroup;
-      const char = !isGroup ? chars.find(c => c.id === session.contactId) : null;
+      const resolvedId = resolveSessionCharacterId(session);
+      const char = !isGroup && resolvedId ? chars.find(c => c.id === resolvedId) : null;
       const detailSenderName = detail.senderName?.trim();
       const title = detailSenderName && detailSenderName !== "对方"
         ? detailSenderName

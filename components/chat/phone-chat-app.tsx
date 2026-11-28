@@ -9,7 +9,7 @@ import { MascotChatRoom } from "./mascot-chat-room";
 import { UserProfilePanel } from "./user-profile-panel";
 import { MessageCircle, Users, Aperture, UserRound } from "lucide-react";
 import { ChatHistorySearch } from "./chat-history-search";
-import { ChatSession, loadChatSessions, pushChatMessage, hydrateChatStorage, markChatSessionRead, setActiveChatSessionId } from "@/lib/chat-storage";
+import { ChatSession, loadChatSessions, pushChatMessage, hydrateChatStorage, markChatSessionRead, setActiveChatSessionId, resolveSessionCharacterId } from "@/lib/chat-storage";
 import { notifyMascotPageContext } from "@/lib/mascot-events";
 import { loadCharacters } from "@/lib/character-storage";
 import { SessionCustomCSS } from "@/components/ui/session-custom-css";
@@ -144,7 +144,8 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
             });
             // Push session info to mascot context so 小卷 can access sessionId
             const chars = loadCharacters();
-            const char = chars.find(c => c.id === activeSession.contactId);
+            const resolvedCharacterId = resolveSessionCharacterId(activeSession);
+            const char = resolvedCharacterId ? chars.find(c => c.id === resolvedCharacterId) : undefined;
             notifyMascotPageContext({
                 page: "chat",
                 mode: "chatting",

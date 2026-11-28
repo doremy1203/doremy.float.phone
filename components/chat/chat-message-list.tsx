@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useSyncExternalStore } from "react";
 import { ChevronLeft, SlidersHorizontal } from "lucide-react";
-import { CHAT_MESSAGE_PUSHED_EVENT, loadChatSessions, loadChatContacts, ChatSession, createOrGetSession, createGroupSession, pushChatMessage, addChatContact, loadChatMessages, getLastVisibleSessionMessage, getChatMessagePreview } from "@/lib/chat-storage";
+import { CHAT_MESSAGE_PUSHED_EVENT, loadChatSessions, loadChatContacts, ChatSession, createOrGetSession, createGroupSession, pushChatMessage, addChatContact, loadChatMessages, getLastVisibleSessionMessage, getChatMessagePreview, resolveSessionCharacterId } from "@/lib/chat-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { Character } from "@/lib/character-types";
 import { resolveUserIdentity, USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
@@ -296,13 +296,16 @@ export function ChatMessageList({ onCloseApp, onOpenHistorySearch, activeSession
                                 && (!keyword || (mascotSettings.nickname || "AI助手").toLowerCase().includes(keyword));
                             const regularItems = [...sessions]
                             .filter(s => {
-                                if (!(s.isGroup || contactIds.has(s.contactId))) return false;
+                                // 用规范角色 ID 判断归属：session.contactId 可能是 Character.id，
+                                // 也可能是 ChatContact.id；直接拿它和角色 ID 集合比较，会让后者在首页被隐藏。
+                                const resolvedId = s.isGroup ? null : resolveSessionCharacterId(s);
+                                if (!(s.isGroup || (resolvedId && contactIds.has(resolvedId)))) return false;
                                 if (!hasSessionListContent(s.id)) return false;
                                 if (listTab === "private" && s.isGroup) return false;
                                 if (listTab === "group" && !s.isGroup) return false;
                                 if (!keyword) return true;
                                 if (s.isGroup) return (s.groupName || "群聊").toLowerCase().includes(keyword);
-                                const name = s.alias || allChars.find(c => c.id === s.contactId)?.name || "";
+                                const name = s.alias || (resolvedId ? allChars.find(c => c.id === resolvedId)?.name : undefined) || "";
                                 return name.toLowerCase().includes(keyword);
                             })
                             .sort((a, b) => {
@@ -375,7 +378,14 @@ export function ChatMessageList({ onCloseApp, onOpenHistorySearch, activeSession
                                         className="menu-item"
                                         onClick={() => {
                                             const chars = loadCharacters();
-                                            const found = chars.find(c => c.wechatID === searchQuery.trim() || c.id === searchQuery.trim());
+                                            const query = searchQuery.trim();
+                                            const lowered = query.toLowerCase();
+                                            // 先按微信号 / 角色 ID 精确匹配，再按名字模糊兜底。
+                                            // 否则新建角色只能靠复制 ID 才能搜到。
+                                            const found = query
+                                                ? (chars.find(c => c.wechatID === query || c.id === query)
+                                                    || chars.find(c => (c.name || "").toLowerCase().includes(lowered)))
+                                                : null;
                                             setSearchResult(found || null);
                                         }}
                                     >
@@ -758,7 +768,8 @@ function ContactPicker({ onClose, onSelect }: { onClose: () => void; onSelect: (
 
 function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, onSelect: () => void, isPinned?: boolean }) {
     const chars = loadCharacters();
-    const character = chars.find(c => c.id === session.contactId);
+    const resolvedCharacterId = resolveSessionCharacterId(session);
+    const character = resolvedCharacterId ? chars.find(c => c.id === resolvedCharacterId) : undefined;
     const lastVisibleMessage = getLastVisibleSessionMessage(session.id);
     const lastOfflineTurn = getLastChatOfflineTurn(session.id);
     // 线下记录比线上消息新时（含只在线下聊过的会话），列表展示线下摘要

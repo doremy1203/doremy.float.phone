@@ -20,6 +20,7 @@ import {
     loadChatAppSettings,
     resolveChatUserAvatar,
     resolveVisionImagePromptLimit,
+    resolveSessionCharacterId,
     type ChatMessage,
 } from "@/lib/chat-storage";
 import {
@@ -582,7 +583,8 @@ export function ChatSettingsPanel({
     const [groupName, setGroupName] = useState(session.groupName || "");
 
     const characters = loadCharacters();
-    const character = characters.find(c => c.id === session.contactId);
+    const resolvedCharacterId = resolveSessionCharacterId(session);
+    const character = resolvedCharacterId ? characters.find(c => c.id === resolvedCharacterId) : undefined;
 
     const characterName = session.isGroup
         ? (groupName || session.groupName || "群聊")
@@ -654,7 +656,8 @@ export function ChatSettingsPanel({
     const updateCharacterAvatar = async (file: File) => {
         const avatar = await fileToAvatarDataUrl(file);
         const latest = loadCharacters();
-        saveCharacters(latest.map(item => item.id === session.contactId
+        const resolvedId = resolveSessionCharacterId(session);
+        saveCharacters(latest.map(item => item.id === resolvedId
             ? { ...item, avatar, updatedAt: new Date().toISOString() }
             : item));
         setAvatarRevision(value => value + 1);
