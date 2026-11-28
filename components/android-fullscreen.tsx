@@ -13,8 +13,9 @@ import { shouldRequestPwaFullscreen } from "@/lib/pwa-display-mode";
  */
 export function AndroidFullscreen() {
   useEffect(() => {
+    // 与 phone-shell.css 一致：hover 误报时用宽度兜底判定手机布局。
     const isMobile = window.matchMedia(
-      "(max-width: 500px) and (hover: none) and (pointer: coarse)"
+      "(hover: none), (max-width: 500px)"
     ).matches;
     if (!isMobile) return;
 

@@ -153,7 +153,8 @@ export function useKeyboardDismissAutoSend(
     // 不依赖某一次 resize 是否如约而至。
     useEffect(() => {
         const viewport = window.visualViewport;
-        const touchLike = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+        // 与 phone-shell.css 一致：hover 误报时用宽度兜底，避免把手机当成桌面分支。
+        const touchLike = window.matchMedia("(hover: none), (max-width: 500px)").matches;
 
         let keyboardWasOpen = false;
         let inputWasFocused = false;

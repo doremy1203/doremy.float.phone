@@ -1114,7 +1114,10 @@ function useAndroidCaretKeyboardLift() {
       return;
     }
 
-    const mobileMq = window.matchMedia("(max-width: 500px) and (hover: none) and (pointer: coarse)");
+    // 必须与 phone-shell.css 的手机端媒体查询保持一致：安卓壳 WebView 常把 hover 误报为
+    // hover，只认 (hover: none) 会让这套键盘避让失效（输入栏落到键盘下方、收不到文字），
+    // 而 CSS 已用 max-width 兜底切到手机布局，两边不一致就会出问题。
+    const mobileMq = window.matchMedia("(hover: none), (max-width: 500px)");
     const viewport = window.visualViewport;
     let focusedElement: HTMLElement | null = null;
     let raf = 0;
@@ -1226,7 +1229,10 @@ function useAndroidNativeKeyboardViewport() {
     if (!/Android/i.test(navigator.userAgent)) {
       return;
     }
-    const mobileMq = window.matchMedia("(max-width: 500px) and (hover: none) and (pointer: coarse)");
+    // 必须与 phone-shell.css 的手机端媒体查询保持一致：安卓壳 WebView 常把 hover 误报为
+    // hover，只认 (hover: none) 会让这套键盘避让失效（输入栏落到键盘下方、收不到文字），
+    // 而 CSS 已用 max-width 兜底切到手机布局，两边不一致就会出问题。
+    const mobileMq = window.matchMedia("(hover: none), (max-width: 500px)");
     if (!mobileMq.matches) {
       return;
     }

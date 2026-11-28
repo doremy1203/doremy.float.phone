@@ -22,7 +22,8 @@ export function useCallKeyboardOffsetStyle(): CSSProperties {
 
         const isAndroidMobile =
             /Android/i.test(navigator.userAgent) &&
-            window.matchMedia("(max-width: 500px) and (hover: none) and (pointer: coarse)").matches;
+            // 与 phone-shell.css 一致的手机布局判定（hover 可能被壳 WebView 误报）。
+            window.matchMedia("(hover: none), (max-width: 500px)").matches;
 
         if (isAndroidMobile) {
             setOffset(0);
